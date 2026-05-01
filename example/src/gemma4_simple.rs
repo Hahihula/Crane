@@ -12,7 +12,7 @@ use crane_core::models::DType;
 fn main() -> Result<()> {
     let model_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "model/gemma-4-E2B".to_string());
+        .unwrap_or_else(|| "checkpoints/gemma-4-E2B".to_string());
 
     let device = crane_core::models::Device::cuda_if_available(0)?;
     let dtype = if device.is_cuda() {

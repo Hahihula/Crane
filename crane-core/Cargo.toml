@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.97"
 
-candle-nn = "^0.9.2-alpha.2"
-candle-transformers = "0.9.2-alpha.2"
-candle-onnx = { version = "0.9.2-alpha.2", optional = true }
+candle-nn = "0.10"
+    candle-transformers = "0.10"
+    candle-onnx = { version = "0.10", optional = true }
 clap = { version = "4.5.32", features = ["derive"] }
 hf-hub = "0.4.2"
 minijinja = { version = "2.15.1", features = ["builtins"] }
@@ -29,13 +29,13 @@ audioadapter-buffers = "2.0.0"
 # candle-core = { version = "0.9.2-alpha.2", features = ["accelerate"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-candle-core = { version = "0.9.2-alpha.2", features = ["metal"] }
+candle-core = { version = "0.10", features = ["metal"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-candle-core = { version = "0.9.2-alpha.2", features = ["accelerate"] }
+candle-core = { version = "0.10", features = ["accelerate"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = { version = "0.9.2-alpha.2" }
+candle-core = "0.10"
 
 [features]
 cuda = [

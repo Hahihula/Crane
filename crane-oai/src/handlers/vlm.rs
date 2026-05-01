@@ -143,6 +143,12 @@ fn extract_image_and_text(
     }
 
     if image_urls.is_empty() {
+        if model_name == "Gemma4-VL" {
+            return Err(make_error(
+                StatusCode::BAD_REQUEST,
+                "No image_url found in messages. Gemma4-VL requires at least one image.",
+            ));
+        }
         return Err(make_error(
             StatusCode::BAD_REQUEST,
             &format!("No image_url found in messages. {model_name} requires at least one image."),
@@ -151,6 +157,86 @@ fn extract_image_and_text(
 
     Ok((image_urls.swap_remove(0), text_prompt))
 }
+
+/// Extract text prompt only (for models like Gemma4-VL that require images).
+fn extract_text_only(
+    messages: &[crate::openai_api::ChatMessage],
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let mut text_prompt = String::new();
+    for msg in messages {
+        if msg.role == "user" {
+            let text = msg.text_content();
+            if !text.is_empty() {
+                text_prompt = text;
+            }
+        }
+    }
+    Ok(text_prompt)
+}
+
+/// Extract first image URL only, if any.
+fn extract_first_image_url(
+    messages: &[crate::openai_api::ChatMessage],
+) -> Option<String> {
+    for msg in messages {
+        if msg.role == "user" {
+            let mut urls = msg.image_urls();
+            if !urls.is_empty() {
+                return Some(urls.swap_remove(0));
+            }
+        }
+    }
+    None
+}
+
+/// Decode a base64 data URL into bytes and return (extension, bytes).
+fn decode_base64_image(data_url: &str) -> Result<(&'static str, Vec<u8>), String> {
+    let data_url = data_url.trim();
+    let comma_pos = data_url.find(',').ok_or_else(|| format!("Invalid base64 data URL: missing comma"))?;
+    let header = &data_url[..comma_pos];
+    let encoded = &data_url[comma_pos + 1..];
+
+    let mime = header
+        .strip_prefix("data:")
+        .and_then(|s| s.strip_suffix(";base64"))
+        .unwrap_or("image/png");
+
+    let bytes = base64::decode(encoded)
+        .map_err(|e| format!("Failed to decode base64: {e}"))?;
+
+    let ext = if mime.contains("png") {
+        "png"
+    } else if mime.contains("webp") {
+        "webp"
+    } else if mime.contains("jpeg") || mime.contains("jpg") {
+        "jpg"
+    } else {
+        "png"
+    };
+
+    Ok((ext, bytes))
+}
+
+/// Download or decode an image (supports URL or base64 data URL).
+async fn get_image(
+    url_or_data: &str,
+) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
+    if url_or_data.starts_with("data:") {
+        let (ext, bytes) = decode_base64_image(url_or_data)?;
+        let dir = tempfile::TempDir::new()
+            .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+        let img_path = dir.path().join(format!("image.{ext}"));
+        std::fs::write(&img_path, &bytes)
+            .map_err(|e| format!("Failed to write image to temp file: {e}"))?;
+        Ok((dir, img_path))
+    } else {
+        download_image(url_or_data).await
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  VLM Chat Completions (PaddleOCR-VL)
+// ─────────────────────────────────────────────────────────────
 
 /// VLM-aware chat completions handler.
 ///
@@ -167,8 +253,8 @@ pub async fn vlm_chat_completions(
     let (image_url, text_prompt) = extract_image_and_text(&req.messages, "PaddleOCR-VL")?;
     let image_url = &image_url;
 
-    // Download image.
-    let (temp_dir, img_path) = download_image(image_url)
+    // Get image (URL or base64 data URL).
+    let (temp_dir, img_path) = get_image(image_url)
         .await
         .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
 
@@ -179,7 +265,7 @@ pub async fn vlm_chat_completions(
     if req.stream {
         // Streaming mode
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (done_tx, _done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
         if vlm_tx.send(VlmRequest::RecognizeStream {
             img_path,
@@ -318,8 +404,8 @@ pub async fn vlm_generate(
         )
     })?;
 
-    // Download image.
-    let (temp_dir, img_path) = download_image(image_url)
+    // Get image (URL or base64 data URL).
+    let (temp_dir, img_path) = get_image(image_url)
         .await
         .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
 
@@ -332,7 +418,7 @@ pub async fn vlm_generate(
 
     if req.stream {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (done_tx, _done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
         if vlm_tx.send(VlmRequest::RecognizeStream {
             img_path,
@@ -405,6 +491,8 @@ pub async fn vlm_generate(
 // ─────────────────────────────────────────────────────────────
 
 pub struct Gemma4VlmRequest {
+    /// MUST stay alive until the VLM thread finishes.
+    pub temp_dir: Option<tempfile::TempDir>,
     pub img_path: std::path::PathBuf,
     pub text_prompt: String,
     pub max_tokens: usize,
@@ -412,6 +500,10 @@ pub struct Gemma4VlmRequest {
 }
 
 /// Gemma4VL chat completions handler.
+///
+/// For text-only requests, creates a 224x224 black PNG placeholder.
+/// The VLM needs a non-trivial image to generate non-zero image tokens.
+/// temp_dir is sent through the channel to stay alive until the thread finishes.
 pub async fn gemma4_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
@@ -420,10 +512,51 @@ pub async fn gemma4_vlm_chat_completions(
         make_error(StatusCode::INTERNAL_SERVER_ERROR, "Gemma4 VLM model not loaded")
     })?;
 
-    let (image_url, text_prompt) = extract_image_and_text(&req.messages, "Gemma4-VL")?;
-    let (_temp_dir, img_path) = download_image(&image_url)
-        .await
-        .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+    let image_url_opt = extract_first_image_url(&req.messages);
+    let text_prompt = extract_text_only(&req.messages)?;
+
+    // temp_dir MUST stay alive until the VLM thread finishes.
+    // We send it through the channel so it stays in scope.
+    let mut temp_dir: Option<tempfile::TempDir> = None;
+    let img_path: std::path::PathBuf = match image_url_opt {
+        Some(url) => {
+            let dir = tempfile::TempDir::new()
+                .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create temp dir: {e}")))?;
+            temp_dir = Some(dir);
+            let img_path = temp_dir.as_ref().unwrap().path().join("image.png");
+            if url.starts_with("data:") {
+                let (ext, bytes) = decode_base64_image(&url)
+                    .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+                let img_path = temp_dir.as_ref().unwrap().path().join(format!("image.{ext}"));
+                std::fs::write(&img_path, &bytes)
+                    .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Failed to write image: {e}")))?;
+                img_path
+            } else {
+                let client = reqwest::Client::new();
+                let resp = client.get(&url).send().await
+                    .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Failed to download image: {e}")))?;
+                let bytes = resp.bytes().await
+                    .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Failed to read image bytes: {e}")))?;
+                std::fs::write(&img_path, &bytes)
+                    .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Failed to write image: {e}")))?;
+                img_path
+            }
+        }
+        None => {
+            // Text-only: create a 224x224 black PNG placeholder.
+            // A 1x1 PNG produces 0 image tokens; 224x224 produces non-zero.
+            let dir = tempfile::TempDir::new()
+                .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create temp dir: {e}")))?;
+            temp_dir = Some(dir);
+            let placeholder = temp_dir.as_ref().unwrap().path().join("placeholder.png");
+            // 224x224 black PNG (valid PNG, black pixels -> zero image embeddings)
+            let png_data = base64::decode("iVBORw0KGgoAAAANSUhEUgAAAOAAAADgCAIAAACVT/22AAAAqUlEQVR4nO3BMQEAAADCoPVPbQlPoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAvgZM/gABE/clzwAAAABJRU5ErkJggg==")
+                .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Invalid placeholder: {e}")))?;
+            std::fs::write(&placeholder, png_data)
+                .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to write placeholder: {e}")))?;
+            placeholder
+        }
+    };
 
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
@@ -431,6 +564,7 @@ pub async fn gemma4_vlm_chat_completions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     if g4vlm_tx
         .send(Gemma4VlmRequest {
+            temp_dir,
             img_path,
             text_prompt,
             max_tokens,

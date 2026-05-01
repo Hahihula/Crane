@@ -30,10 +30,12 @@ pub struct Gemma4VLModel {
     pub tokenizer: TokenOutputStream,
     pub device: Device,
     pub dtype: DType,
-    vision_tower: Gemma4VisionModel,
+    pub image_token_id: u32,
+    pub language_model: Gemma4Model,
+    pub vision_tower: Gemma4VisionModel,
     embed_vision: Gemma4MultimodalEmbedder,
-    language_model: Gemma4Model,
-    image_token_id: u32,
+    stored_image_embeds: Option<Tensor>,
+    stored_num_image_tokens: usize,
 }
 
 impl Gemma4VLModel {
@@ -54,10 +56,8 @@ impl Gemma4VLModel {
         let model_vb = vb.pp("model");
 
         // Vision tower
-        let vision_tower = Gemma4VisionModel::new(
-            &config.vision_config,
-            model_vb.pp("vision_tower"),
-        )?;
+        let vision_tower =
+            Gemma4VisionModel::new(&config.vision_config, model_vb.pp("vision_tower"))?;
 
         // Vision → text projection
         let embed_vision = Gemma4MultimodalEmbedder::new(
@@ -82,23 +82,41 @@ impl Gemma4VLModel {
             embed_vision,
             language_model,
             image_token_id: config.image_token_id,
+            stored_image_embeds: None,
+            stored_num_image_tokens: 0,
         })
     }
 
     /// Run vision encoder on pixel values and project to text space.
+    /// If `max_tokens` is provided, only return the first `max_tokens` embeddings.
     pub fn encode_image(
         &self,
         pixel_values: &Tensor,
         pixel_position_ids: &Tensor,
         padding_positions: &Tensor,
+        max_tokens: Option<usize>,
     ) -> Result<Tensor> {
-        let vision_features = self.vision_tower.forward(
-            pixel_values,
-            pixel_position_ids,
-            padding_positions,
-        )?;
+        let vision_features =
+            self.vision_tower
+                .forward(pixel_values, pixel_position_ids, padding_positions)?;
         let projected = self.embed_vision.forward(&vision_features)?;
-        Ok(projected)
+        match max_tokens {
+            Some(n) => Ok(projected.narrow(1, 0, n)?),
+            None => Ok(projected),
+        }
+    }
+
+    /// Store image embeddings for use in generation.
+    /// This allows subsequent forward calls to use the stored image context.
+    pub fn store_image_embeddings(&mut self, image_embeds: &Tensor, num_image_tokens: usize) {
+        self.stored_image_embeds = Some(image_embeds.clone());
+        self.stored_num_image_tokens = num_image_tokens;
+    }
+
+    /// Clear stored image embeddings.
+    pub fn clear_stored_image_embeddings(&mut self) {
+        self.stored_image_embeds = None;
+        self.stored_num_image_tokens = 0;
     }
 
     /// Forward pass for VLM: embed text, splice in vision features, run decoder.
@@ -112,35 +130,75 @@ impl Gemma4VLModel {
         image_embeds: Option<&Tensor>,
         start_pos: usize,
     ) -> Result<Tensor> {
+        // Use stored embeddings if available and no embeddings passed
+        let img_emb = image_embeds.or(self.stored_image_embeds.as_ref());
+
         // HF replaces image token IDs with PAD before embedding.
         // This ensures the PLE (per-layer embeddings) use PAD's embedding
         // at image positions, not the image placeholder token's embedding.
         let pad_token_id = 0u32; // Gemma's pad_token_id
-        let llm_input_ids = if image_embeds.is_some() {
+        let llm_input_ids = if img_emb.is_some() {
             let ids: Vec<u32> = input_ids.flatten_all()?.to_vec1()?;
-            let masked: Vec<u32> = ids.iter().map(|&t| {
-                if t == self.image_token_id { pad_token_id } else { t }
-            }).collect();
+            let masked: Vec<u32> = ids
+                .iter()
+                .map(|&t| {
+                    if t == self.image_token_id {
+                        pad_token_id
+                    } else {
+                        t
+                    }
+                })
+                .collect();
             Tensor::new(masked.as_slice(), input_ids.device())?.reshape(input_ids.shape())?
         } else {
             input_ids.clone()
         };
 
         // Get text embeddings using masked IDs (PAD at image positions)
-        let mut hidden_states = self.language_model.embed(&llm_input_ids)?;
+        let text_embeds = self.language_model.embed(&llm_input_ids)?;
 
-        // Replace image token positions with vision embeddings
-        if let Some(img_emb) = image_embeds {
-            hidden_states = self.splice_image_features(
+        // First splice image embeddings into text embeddings to get full hidden_states
+        let hidden_states = if let Some(img) = img_emb {
+            self.splice_image_features(
                 input_ids, // original IDs to find image token positions
-                &hidden_states,
-                img_emb,
-            )?;
-        }
+                &text_embeds,
+                img,
+            )?
+        } else {
+            text_embeds.clone()
+        };
 
-        // Run text decoder with masked IDs (for PLE) and modified embeddings
+        // Compute PLE AFTER splicing image embeddings.
+        // This matches HF: PLE projection is computed from inputs_embeds (with actual image embeddings).
+        // The token-identity component uses llm_input_ids (PAD at image positions).
+        let per_layer_inputs = if img_emb.is_some() {
+            let ple_token_embeds = self.language_model.get_per_layer_inputs(&llm_input_ids)?;
+            // Use hidden_states (with actual image embeddings) for PLE projection, NOT text_embeds
+            let ple_projection = self
+                .language_model
+                .project_per_layer_inputs(&hidden_states)?;
+            let ple_dim = ple_token_embeds.dim(3)?;
+            let num_layers = ple_token_embeds.dim(2)?;
+            let ple_token_flat = ple_token_embeds.reshape((
+                ple_token_embeds.dim(0)?,
+                ple_token_embeds.dim(1)?,
+                ple_dim * num_layers,
+            ))?;
+            let ple_proj_flat = ple_projection.reshape((
+                ple_projection.dim(0)?,
+                ple_projection.dim(1)?,
+                ple_dim * num_layers,
+            ))?;
+            ((ple_token_flat + ple_proj_flat)? * (2.0_f64.powf(-0.5)))?
+        } else {
+            return self
+                .language_model
+                .forward_embeds(&llm_input_ids, text_embeds, start_pos)
+                .map_err(Into::into);
+        };
+
         self.language_model
-            .forward_embeds(&llm_input_ids, hidden_states, start_pos)
+            .forward_embeds_with_ple(&llm_input_ids, hidden_states, per_layer_inputs, start_pos)
             .map_err(Into::into)
     }
 
@@ -157,18 +215,15 @@ impl Gemma4VLModel {
         let mut result = text_embeds.clone();
         let mut img_offset = 0usize;
 
+        let image_token_count = ids.iter().filter(|&&t| t == self.image_token_id).count();
+
         for b in 0..b_sz {
             for s in 0..seq_len {
                 let token = ids[b * seq_len + s];
                 if token == self.image_token_id {
-                    // Get the image embedding for this position
-                    let img_emb = image_embeds
-                        .narrow(0, b, 1)?
-                        .narrow(1, img_offset, 1)?; // [1, 1, hidden_size]
-                    result = result.slice_assign(
-                        &[b..b + 1, s..s + 1, 0..hidden_size],
-                        &img_emb,
-                    )?;
+                    let img_emb = image_embeds.narrow(0, b, 1)?.narrow(1, img_offset, 1)?; // [1, 1, hidden_size]
+                    result =
+                        result.slice_assign(&[b..b + 1, s..s + 1, 0..hidden_size], &img_emb)?;
                     img_offset += 1;
                 }
             }

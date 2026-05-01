@@ -15,6 +15,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use chat_template::ChatTemplateProcessor;
@@ -83,6 +84,11 @@ struct Args {
     /// until existing ones complete and free memory.
     #[arg(long)]
     gpu_memory_limit: Option<String>,
+
+    /// Enable CORS (allow all origins, headers, and methods).
+    /// Useful for local testing with browser-based clients.
+    #[arg(long)]
+    cors: bool,
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -432,7 +438,7 @@ async fn main() -> Result<()> {
                     let preprocess_config = ImagePreprocessConfig::default();
 
                     while let Some(req) = g4vlm_rx.blocking_recv() {
-                        let Gemma4VlmRequest { img_path, text_prompt, max_tokens, tx } = req;
+                        let Gemma4VlmRequest { temp_dir: _, img_path, text_prompt, max_tokens, tx } = req;
                         {
                                 let res = (|| -> anyhow::Result<String> {
                                     // Preprocess image
@@ -445,6 +451,7 @@ async fn main() -> Result<()> {
                                         &preprocessed.pixel_values,
                                         &preprocessed.pixel_position_ids,
                                         &preprocessed.padding_positions,
+                                        Some(preprocessed.num_image_tokens),
                                     )?;
 
                                     // Build prompt in Gemma4-it chat format:
@@ -494,10 +501,17 @@ async fn main() -> Result<()> {
                                     // Simple greedy generation loop
                                     let mut tokens = prompt_ids.clone();
                                     let mut generated = Vec::new();
+                                    let logits_min = logits.min(0)?.to_scalar::<f32>()?;
+                                    let logits_max = logits.max(0)?.to_scalar::<f32>()?;
+                                    tracing::info!(
+                                        "Gemma4-VL prompt_len={} logits_range=[{:.2}, {:.2}]",
+                                        prompt_ids.len(), logits_min, logits_max,
+                                    );
                                     let mut next_token = {
                                         let probs = candle_nn::ops::softmax_last_dim(&logits)?;
                                         let next = probs.argmax(candle_core::D::Minus1)?
                                             .to_scalar::<u32>()?;
+                                        tracing::info!("Gemma4-VL first token: id={}", next);
                                         next
                                     };
                                     generated.push(next_token);
@@ -514,6 +528,7 @@ async fn main() -> Result<()> {
                                         next_token = candle_nn::ops::softmax_last_dim(&logits)?
                                             .argmax(candle_core::D::Minus1)?
                                             .to_scalar::<u32>()?;
+                                        tracing::info!("Gemma4-VL token {}: id={}", tokens.len(), next_token);
                                         generated.push(next_token);
                                         tokens.push(next_token);
                                     }
@@ -521,6 +536,7 @@ async fn main() -> Result<()> {
                                     let text = vlm.tokenizer.tokenizer
                                         .decode(&generated, true)
                                         .unwrap_or_default();
+                                    tracing::info!("Gemma4-VL generated tokens: {:?}, decoded: {:?}", &generated[..generated.len().min(10)], text);
                                     Ok(text)
                                 })();
 
@@ -677,7 +693,7 @@ async fn main() -> Result<()> {
         gpu_memory_limit: gpu_memory_limit_display,
     });
 
-    let app = build_router(state.clone());
+    let app = build_router(state.clone(), args.cors);
 
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -734,8 +750,8 @@ async fn main() -> Result<()> {
 }
 
 /// Build the Axum router with all endpoint families.
-fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+fn build_router(state: Arc<AppState>, enable_cors: bool) -> Router {
+    let router = Router::new()
         // ── Health & management ──
         .route("/health", get(handlers::common::health))
         .route("/v1/stats", get(handlers::common::stats))
@@ -757,7 +773,13 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/health_generate", get(handlers::sglang::health_generate))
         .route("/flush_cache", get(handlers::sglang::flush_cache).post(handlers::sglang::flush_cache))
         .route("/abort_request", post(handlers::sglang::abort_request))
-        .with_state(state)
+        .with_state(state);
+
+    if enable_cors {
+        router.layer(CorsLayer::permissive())
+    } else {
+        router
+    }
 }
 
 #[cfg(test)]
