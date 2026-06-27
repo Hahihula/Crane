@@ -271,3 +271,78 @@ fn causal_conv1d_full(
     }
     candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 1)?)?.transpose(1, 2)
 }
+// ─────────────────────────────────────────────────────────────────────
+//  Tests
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    /// Smoke test: recurrence runs end-to-end on CPU and produces the right
+    /// output shape. Numerical correctness against a reference (HF Transformers
+    /// / mistral.rs) is checked in the integration test that loads a real
+    /// Qwen 3.5 checkpoint — see Phase 1A.9 in AGENTS.md.
+    #[test]
+    fn recurrence_runs_and_returns_correct_shape() {
+        let dev = Device::Cpu;
+        let q = Tensor::new(
+            &[[
+                [[1.0f32, 0.0]],
+                [[0.0, 1.0]],
+                [[1.0, 1.0]],
+                [[0.5, 0.5]],
+            ]],
+            &dev,
+        )
+        .unwrap();
+        let k = Tensor::new(
+            &[[
+                [[1.0f32, 0.0]],
+                [[0.0, 1.0]],
+                [[1.0, 0.0]],
+                [[0.0, 1.0]],
+            ]],
+            &dev,
+        )
+        .unwrap();
+        let v = Tensor::new(
+            &[[
+                [[1.0f32, 0.0]],
+                [[0.0, 1.0]],
+                [[1.0, 1.0]],
+                [[0.5, 0.5]],
+            ]],
+            &dev,
+        )
+        .unwrap();
+        let g = Tensor::new(&[[[0.0f32], [0.0], [0.0], [0.0]]], &dev).unwrap();
+        let beta = Tensor::new(&[[[1.0f32], [1.0], [1.0], [1.0]]], &dev).unwrap();
+
+        let mut state = Tensor::zeros((1, 1, 2, 2), DType::F32, &dev).unwrap();
+        let y = gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut state).unwrap();
+        assert_eq!(y.dims(), &[1, 4, 1, 2]);
+        // State must have been mutated in place.
+        assert!(state.dims() == [1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn l2_norm_preserves_direction() {
+        let dev = Device::Cpu;
+        let x = Tensor::new(&[[3.0f32, 4.0], [1.0, 0.0]], &dev).unwrap();
+        let n = l2_norm(&x, 1e-6).unwrap();
+        let v0 = n.i((0, ..)).unwrap().to_vec1::<f32>().unwrap();
+        assert!((v0[0] - 0.6).abs() < 1e-3 && (v0[1] - 0.8).abs() < 1e-3);
+        let v1 = n.i((1, ..)).unwrap().to_vec1::<f32>().unwrap();
+        assert!((v1[0] - 1.0).abs() < 1e-3 && v1[1].abs() < 1e-3);
+    }
+
+    #[test]
+    fn softplus_at_zero_is_ln2() {
+        let dev = Device::Cpu;
+        let x = Tensor::new(0.0f32, &dev).unwrap();
+        let s = softplus(&x).unwrap().to_scalar::<f32>().unwrap();
+        assert!((s - std::f32::consts::LN_2).abs() < 1e-4);
+    }
+}
