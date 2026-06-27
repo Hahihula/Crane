@@ -147,6 +147,20 @@ impl Qwen3_5TextModel {
 
         let mut xs = self.embed_tokens.forward(input_ids)?;
 
+        // If no mask was supplied, build a causal mask so prefill doesn't
+        // leak future tokens into past positions. (Decode is `seq_len==1`,
+        // where every position trivially attends only to itself — the mask is
+        // a no-op there.)
+        let mask = match attention_mask {
+            Some(m) => Some(m.clone()),
+            None if !is_decode_step => {
+                let total = start_pos + seq_len;
+                Some(build_causal_mask(seq_len, total, xs.device(), xs.dtype())?)
+            }
+            None => None,
+        };
+        let mask_ref = mask.as_ref();
+
         let (cos, sin) = self.rotary.cos_sin(start_pos, seq_len)?;
         let rot_dim = self.rotary.rot_dim();
 
@@ -158,7 +172,7 @@ impl Qwen3_5TextModel {
                 &cos,
                 &sin,
                 rot_dim,
-                attention_mask,
+                mask_ref,
                 cache_slot,
                 is_decode_step,
             )?;
@@ -172,6 +186,29 @@ impl Qwen3_5TextModel {
         let logits = last.matmul(&self.lm_head)?;
         Ok(logits)
     }
+}
+
+/// Build a causal mask of shape `[1, 1, S_q, S_k]` where row `i` has `-inf`
+/// for columns `j > start_pos + i` (future tokens). Returned as f32 cast to
+/// the model's dtype.
+fn build_causal_mask(
+    seq_q: usize,
+    total_k: usize,
+    device: &candle_core::Device,
+    dtype: candle_core::DType,
+) -> candle_core::Result<candle_core::Tensor> {
+    // Standard lower-triangular mask of size total_k x total_k, then narrow
+    // to the last `seq_q` query rows and the full `total_k` key columns.
+    let mut data: Vec<f32> = Vec::with_capacity(total_k * total_k);
+    for q in 0..total_k {
+        for k in 0..total_k {
+            data.push(if k > q { f32::NEG_INFINITY } else { 0.0 });
+        }
+    }
+    let full = candle_core::Tensor::from_vec(data, (total_k, total_k), device)?
+        .to_dtype(dtype)?;
+    // Narrow to [start_pos..start_pos+seq_q] rows.
+    Ok(full.narrow(0, 0, seq_q)?.unsqueeze(0)?.unsqueeze(0)?)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -358,5 +395,69 @@ impl ModelForCausalLM for Model {
         }
         let _ = streamer_finalized;
         Ok(tokens)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Debug helpers
+// ─────────────────────────────────────────────────────────────────────
+
+impl Model {
+    /// Run a single forward on `input_ids` and print the top-K next-token
+    /// IDs + logits + decoded tokens. Used for correctness debugging
+    /// against an HF Transformers reference. Not part of the public SDK.
+    #[doc(hidden)]
+    pub fn debug_topk(&mut self, input_ids: &[u32], k: usize) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let logits = self
+            .forward_step(input_ids, 0)
+            .context("forward_step failed")?;
+        let logits = logits.squeeze(0)?.to_dtype(candle_core::DType::F32)?;
+        let v = logits.to_vec1::<f32>().context("to_vec1")?;
+        let nan_count = v.iter().filter(|x| x.is_nan()).count();
+        let inf_count = v.iter().filter(|x| x.is_infinite()).count();
+        let finite: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
+        let (min, max, mean) = if finite.is_empty() {
+            (f32::NAN, f32::NAN, f32::NAN)
+        } else {
+            let mn = finite.iter().cloned().fold(f32::INFINITY, f32::min);
+            let mx = finite.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let avg = finite.iter().sum::<f32>() / finite.len() as f32;
+            (mn, mx, avg)
+        };
+        println!(
+            "[crane] logits stats: shape=[{}], NaN={}, Inf={}, finite_min={:.4}, finite_max={:.4}, finite_mean={:.4}",
+            v.len(),
+            nan_count,
+            inf_count,
+            min,
+            max,
+            mean,
+        );
+
+        let mut idx: Vec<usize> = (0..v.len()).collect();
+        // Sort indices by descending logit value. `sort_by` is ascending,
+        // so we reverse `v[a]` and `v[b]` in the comparator.
+        idx.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap_or(std::cmp::Ordering::Equal));
+        // Note: do NOT reverse. With `v[b].partial_cmp(&v[a])` the comparator
+        // returns Less when v[b] < v[a], meaning a comes first when v[a] > v[b]
+        // — i.e. larger values first. Earlier revisions reversed after sort
+        // and got it backwards.
+        let topk: Vec<(u32, f32)> = idx
+            .iter()
+            .take(k)
+            .map(|&i| (i as u32, v[i]))
+            .collect();
+        println!("[crane] step-0 argmax: id={} logit={:.4}", topk[0].0, topk[0].1);
+        println!("[crane] step-0 top-{} (id, logit, decoded):", k);
+        for (id, logit) in &topk {
+            let decoded = self
+                .tokenizer
+                .tokenizer
+                .id_to_token(*id)
+                .unwrap_or_else(|| "<unk>".into());
+            println!("  {} ({:.4}) {:?}", id, logit, decoded);
+        }
+        Ok(())
     }
 }
