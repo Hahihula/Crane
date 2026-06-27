@@ -66,7 +66,18 @@ Unit tests live next to the code: `crane-serve/src/engine/{stats,sequence,types,
 
 ## Adding a new model
 
-Per the top-level README contribution guide, for a new architecture drop the implementation into `crane-core/src/models/<name>/` with its own `mod.rs`, and register the module in `crane-core/src/models/mod.rs`. Reference impls: `crane-core/src/models/qwen25/` (text-only, sequential decode), `crane-core/src/models/qwen3/` (full features), `crane-core/src/models/qwen3_tts/` (multi-stage pipeline). For a new multimodal arch that composes existing pieces, see `crane-core/src/models/hunyuanocr/` and the VLM wiring in `crane-serve/src/engine/backend.rs`.
+Per the top-level README contribution guide, for a new architecture drop the implementation into `crane-core/src/models/<name>/` with its own `mod.rs`, and register the module in `crane-core/src/models/mod.rs`. Reference impls: `crane-core/src/models/qwen25/` (text-only, sequential decode), `crane-core/src/models/qwen3/` (full features), `crane-core/src/models/qwen3_tts/` (multi-stage pipeline), `crane-core/src/models/qwen3_5/` (hybrid Mamba/Transformer — see Qwen 3.5 caveat below). For a new multimodal arch that composes existing pieces, see `crane-core/src/models/hunyuanocr/` and the VLM wiring in `crane-serve/src/engine/backend.rs`.
+
+## ⚠️ Qwen 3.5 (hybrid Mamba/Transformer) — partial support
+
+`crane-core/src/models/qwen3_5/` and `crane-core/src/gdn/` (Gated Delta Net) were added on the `feature/qwen35` branch and the server starts end-to-end against a real `Qwen3.5-0.8B` checkpoint, but **argmax is still off** (Crane picks `"\n\n"`, HF picks `"Hello"` for prompt `"user\\nHello\\n..."`). Layer-by-layer hidden-state stats track the reference within ~5% at the final layer, but the post-norm range is half of HF's, suggesting a residual norm or attention-mask issue still to localize. See commit history on the branch for the debug binary `qwen35_debug --layer-stats` and the per-step hidden-state printout (`CRANE_DEBUG_LAYER=1`). The `qwen3_5` backend caps `max_concurrent=1` since KV-swap and batch-decode aren't implemented yet.
+
+### Known implementation quirks learned during this port
+
+- **No `1/sqrt(K)` Q-scale in the GDN recurrence.** mistral.rs's reference applies this scale inside `gated_delta_rule_recurrence`, but the published GDN recurrence has no such factor and HF's reference is the ground truth — without the scale, hidden-state ranges are ~3-4x larger and track HF more closely.
+- **Causal mask required during prefill.** Without it, prefill tokens attend to future positions and produce nonsense outputs. The model auto-builds a lower-triangular mask when none is supplied (`qwen3_5::model::build_causal_mask`).
+- **Hybrid caches are not interchangeable.** Per-layer GDN state (`GdnLayerCache` — conv ring + recurrent f32 matrix) lives in the model and is reset between unrelated requests via `Model::clear_kv_cache`. The standard `KV swap` API in `ModelBackend` is bypassed for this backend (defaults to false).
+- **Gated RMSNorm ordering.** `RmsNormGated` computes `x / rms(x) * weight` first, *then* multiplies by `silu(gate)`. The order matters because silu's gradient flips sign near zero.
 
 ## Key files to read before changing things
 
