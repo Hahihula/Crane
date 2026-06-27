@@ -66,6 +66,16 @@ impl Qwen3_5TextModel {
         }
 
         let norm = rms_norm(text_cfg.hidden_size, text_cfg.rms_norm_eps, vb_lm.pp("norm"))?;
+        if std::env::var("CRANE_DEBUG_NORM").is_ok() {
+            if let Ok(w) = norm.weight().to_dtype(DType::F32) {
+                if let Ok(v) = w.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                    let mn = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let mx = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let mean = v.iter().sum::<f32>() / v.len() as f32;
+                    eprintln!("[crane-norm] FINAL norm.weight: shape={:?}, min={mn}, max={mx}, mean={mean}", w.dims());
+                }
+            }
+        }
 
         let embed_weight = embed_tokens.embeddings().clone();
         let lm_head_weight = vb_lm.get(text_cfg.vocab_size, "lm_head").ok();
@@ -233,6 +243,27 @@ fn print_layer_stats(name: &str, t: &candle_core::Tensor) -> anyhow::Result<()> 
         mx,
         mean,
     );
+    Ok(())
+}
+
+fn print_layer_stats_per_pos(name: &str, t: &candle_core::Tensor) -> anyhow::Result<()> {
+    // t is [B, S, H]; print per-position min/max for the last batch.
+    let dims = t.dims();
+    if dims.len() < 3 {
+        return Ok(());
+    }
+    let s = dims[1];
+    let h = dims[2];
+    let flat = t.to_dtype(candle_core::DType::F32)?.reshape((dims[0], s, h))?;
+    let data = flat.squeeze(0)?.to_vec2::<f32>()?;
+    println!("[crane] {name} per-position (S={s}, H={h}):");
+    for p in 0..s {
+        let row = &data[p];
+        let mn = row.iter().cloned().fold(f32::INFINITY, f32::min);
+        let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mean = row.iter().sum::<f32>() / row.len() as f32;
+        println!("  pos {}: min={}, max={}, mean={}", p, mn, mx, mean);
+    }
     Ok(())
 }
 
@@ -489,6 +520,7 @@ impl Model {
         let input = candle_core::Tensor::new(input_ids, &self.device)?.unsqueeze(0)?;
         let mut xs = self.inner.embed_tokens.forward(&input)?;
         print_layer_stats("after_embed", &xs)?;
+        print_layer_stats_per_pos("after_embed", &xs)?;
 
         let (cos, sin) = self.inner.rotary.cos_sin(0, seq_len)?;
         let rot_dim = self.inner.rotary.rot_dim();
@@ -511,11 +543,14 @@ impl Model {
                 cache_slot,
                 seq_len == 1,
             )?;
-            print_layer_stats(&format!("after_layer_{}", i), &xs)?;
+            if i == 0 || i == 3 || i == 7 || i == 11 || i == 15 || i == 19 || i == 23 {
+                print_layer_stats_per_pos(&format!("after_layer_{}", i), &xs)?;
+            }
         }
         let xs = self.inner.norm.forward(&xs)?;
         print_layer_stats("after_norm", &xs)?;
-        let _ = (cos, sin); // silence unused if mask_ref is None path
+        print_layer_stats_per_pos("after_norm", &xs)?;
+        let _ = (cos, sin);
         Ok(())
     }
 }

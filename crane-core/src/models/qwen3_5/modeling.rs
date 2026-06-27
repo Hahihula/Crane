@@ -189,6 +189,8 @@ impl FullAttention {
 
         let (q, gate) = if self.has_output_gate {
             let half = self.num_heads * self.head_dim;
+            // HF chunks `[Q | gate]` on the head_dim axis. First half = Q,
+            // second half = gate. Confirmed against the HF source.
             let q = q_out.narrow(D::Minus1, 0, half)?;
             let gate = q_out.narrow(D::Minus1, half, half)?;
             (q, Some(gate))
@@ -221,6 +223,7 @@ impl FullAttention {
             let (b, kv_heads, s, d) = k.dims4()?;
             k.unsqueeze(2)?
                 .expand((b, kv_heads, n_rep, s, d))?
+                .contiguous()?
                 .reshape((b, self.num_heads, s, d))?
         } else {
             k
@@ -229,12 +232,14 @@ impl FullAttention {
             let (b, kv_heads, s, d) = v.dims4()?;
             v.unsqueeze(2)?
                 .expand((b, kv_heads, n_rep, s, d))?
+                .contiguous()?
                 .reshape((b, self.num_heads, s, d))?
         } else {
             v
         };
 
-        let attn_weights = (q.matmul(&k_rep.transpose(D::Minus2, D::Minus1)?)? * scale)?;
+        let k_t = k_rep.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+        let attn_weights = (q.matmul(&k_t)? * scale)?;
         let attn_weights = match attention_mask {
             Some(mask) => attn_weights.broadcast_add(mask)?,
             None => attn_weights,
@@ -329,6 +334,16 @@ impl DecoderLayer {
         vb: VarBuilder,
     ) -> Result<Self> {
         let input_layernorm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        if std::env::var("CRANE_DEBUG_NORM").is_ok() {
+            if let Ok(w) = input_layernorm.weight().to_dtype(DType::F32) {
+                if let Ok(v) = w.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                    let mn = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let mx = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let mean = v.iter().sum::<f32>() / v.len() as f32;
+                    eprintln!("[crane-norm] input_layernorm.weight: shape={:?}, min={mn}, max={mx}, mean={mean}", w.dims());
+                }
+            }
+        }
         let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
@@ -397,6 +412,30 @@ impl DecoderLayer {
                 gdn.forward(&normed, dims, cache, is_decode_step)?
             }
         };
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let v = attn_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let (mn, mx) = v.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+            eprintln!("[crane-layer] post_attn_or_gdn (flat): min={mn}, max={mx}");
+            // Per-position for the last batch.
+            let dims = attn_out.dims();
+            if dims.len() >= 3 {
+                let flat = attn_out.to_dtype(DType::F32)?.reshape((dims[0], dims[1], dims[2]))?;
+                let data = flat.squeeze(0)?.to_vec2::<f32>()?;
+                for p in 0..dims[1].min(3) {
+                    let row = &data[p];
+                    let mn = row.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    eprintln!("[crane-layer] post_attn_or_gdn pos {p}: min={mn}, max={mx}");
+                }
+                if dims[1] > 3 {
+                    let p = dims[1] - 1;
+                    let row = &data[p];
+                    let mn = row.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    eprintln!("[crane-layer] post_attn_or_gdn pos {p} (last): min={mn}, max={mx}");
+                }
+            }
+        }
         if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
             let mn = attn_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);

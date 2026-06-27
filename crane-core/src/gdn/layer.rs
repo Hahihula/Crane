@@ -1,7 +1,7 @@
 //! Top-level `GatedDeltaNet` layer: orchestrates input projection, causal
 //! Conv1D, gated delta rule recurrence, gated RMSNorm, and output projection.
 
-use candle_core::{Module, Result, Tensor};
+use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::{linear_no_bias, Linear, VarBuilder};
 
 use super::backend::{apply_recurrence, causal_conv1d, compute_beta_g, l2_norm};
@@ -24,17 +24,49 @@ pub struct GatedDeltaNet {
 }
 
 impl GatedDeltaNet {
-    /// Load weights from `vb.pp("linear_attn")`.
-    ///
-    /// `cfg` supplies the dimensions; `projection_kind` selects the QKV/Z/B/A
-    /// weight layout (Qwen 3.5 uses [`GdnInputProjectionKind::Split`]).
-    pub fn load(
+/// Load weights from `vb.pp("linear_attn")`.
+///
+/// `cfg` supplies the dimensions; `projection_kind` selects the QKV/Z/B/A
+/// weight layout (Qwen 3.5 uses [`GdnInputProjectionKind::Split`]).
+pub fn load(
         vb: VarBuilder,
         cfg: &dyn GdnConfig,
         projection_kind: GdnInputProjectionKind,
-    ) -> Result<Self> {
+) -> Result<Self> {
         let dims = GdnDims::new(cfg);
         let vb_la = vb.pp("linear_attn");
+
+        if std::env::var("CRANE_DEBUG_GDN").is_ok() {
+            for (k, expected) in [
+                ("in_proj_qkv", dims.conv_dim),
+                ("in_proj_z", dims.value_dim),
+                ("in_proj_b", dims.num_v_heads),
+                ("in_proj_a", dims.num_v_heads),
+            ] {
+                if let Ok(w) = vb_la.get((expected, dims.hidden_size), &format!("{k}.weight")) {
+                    let v = w.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                    let mn = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let mx = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let mean = v.iter().sum::<f32>() / v.len() as f32;
+                    eprintln!("[crane-gdn] {k}.weight: shape={:?}, min={mn}, max={mx}, mean={mean}", w.dims());
+                }
+            }
+            // dt_bias
+            if let Ok(w) = vb_la.get(dims.num_v_heads, "dt_bias") {
+                let v = w.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let mn = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                let mx = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mean = v.iter().sum::<f32>() / v.len() as f32;
+                eprintln!("[crane-gdn] dt_bias: shape={:?}, min={mn}, max={mx}, mean={mean}", w.dims());
+            }
+            if let Ok(w) = vb_la.get(dims.num_v_heads, "A_log") {
+                let v = w.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let mn = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                let mx = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mean = v.iter().sum::<f32>() / v.len() as f32;
+                eprintln!("[crane-gdn] A_log: shape={:?}, min={mn}, max={mx}, mean={mean}", w.dims());
+            }
+        }
 
         let input_proj = GdnInputProjection::load(vb_la.clone(), &dims, projection_kind)?;
         let conv1d_weight = vb_la.get(
