@@ -39,22 +39,47 @@ pub struct MRotaryEmbedding {
 impl MRotaryEmbedding {
     pub fn new(cfg: &TextConfig, device: &Device) -> Result<Self> {
         let rot_dim = cfg.rot_dim();
+        let head_dim = cfg.head_dim;
         let base = cfg.rope_theta() as f32;
         let max_pos = cfg.max_position_embeddings;
 
-        let half = rot_dim / 2;
-        let inv: Vec<f32> = (0..half)
+        // cos/sin tables must have shape `[S, head_dim/2]` to satisfy
+        // `candle_nn::rotary_emb::rope`. The first `rot_dim / 2` entries are
+        // populated with the actual rotary frequencies; the remaining
+        // entries are padded with `cos=1, sin=0` so the trailing dimensions
+        // pass through the rotation unchanged.
+        let half_head = head_dim / 2;
+        let half_rot = rot_dim / 2;
+        let inv: Vec<f32> = (0..half_rot)
             .map(|i| 1.0 / base.powf(i as f32 * 2.0 / rot_dim as f32))
             .collect();
         let inv_freq = Tensor::new(inv.as_slice(), device)?;
 
         let positions: Vec<f32> = (0..max_pos).map(|i| i as f32).collect();
         let positions = Tensor::new(positions.as_slice(), device)?;
-        let freqs = positions.unsqueeze(1)?.matmul(&inv_freq.unsqueeze(0)?)?; // [max_pos, half]
+        let freqs = positions.unsqueeze(1)?.matmul(&inv_freq.unsqueeze(0)?)?; // [max_pos, half_rot]
+
+        let cos_rot = freqs.cos()?.contiguous()?;
+        let sin_rot = freqs.sin()?.contiguous()?;
+
+        // Pad to [max_pos, head_dim/2] with cos=1, sin=0 in the unused slots.
+        let pad = half_head - half_rot;
+        let cos_table = if pad > 0 {
+            let ones = Tensor::ones((max_pos, pad), DType::F32, device)?;
+            Tensor::cat(&[&cos_rot, &ones], D::Minus1)?.contiguous()?
+        } else {
+            cos_rot
+        };
+        let sin_table = if pad > 0 {
+            let zeros = Tensor::zeros((max_pos, pad), DType::F32, device)?;
+            Tensor::cat(&[&sin_rot, &zeros], D::Minus1)?.contiguous()?
+        } else {
+            sin_rot
+        };
 
         Ok(Self {
-            cos_table: freqs.cos()?.contiguous()?,
-            sin_table: freqs.sin()?.contiguous()?,
+            cos_table,
+            sin_table,
             rot_dim,
         })
     }
@@ -74,7 +99,9 @@ impl MRotaryEmbedding {
 /// Apply rotary embeddings to a query/key tensor `[B, H, S, D]`.
 ///
 /// Only the first `rot_dim` components of each head are rotated. The remaining
-/// components are passed through unchanged.
+/// components are passed through unchanged. `cos`/`sin` tables have shape
+/// `[S, D/2]`; the trailing `(D - rot_dim) / 2` entries are padding
+/// (`cos=1, `sin=0`) so the rope op leaves those dimensions alone.
 pub fn apply_mrope(
     x: &Tensor,
     cos: &Tensor,
@@ -85,25 +112,10 @@ pub fn apply_mrope(
     let device = x.device();
     let dtype = x.dtype();
 
-    let pad = head_dim - rot_dim;
-    let cos_full = if pad > 0 {
-        Tensor::cat(
-            &[cos, &Tensor::ones((seq_len, pad), dtype, device)?],
-            D::Minus1,
-        )?
-    } else {
-        cos.clone()
-    };
-    let sin_full = if pad > 0 {
-        Tensor::cat(
-            &[sin, &Tensor::zeros((seq_len, pad), dtype, device)?],
-            D::Minus1,
-        )?
-    } else {
-        sin.clone()
-    };
-
-    candle_nn::rotary_emb::rope(x, &cos_full, &sin_full)
+    // cos/sin already have shape [S, head_dim/2] (padded by the embedding
+    // module). Just pass through to `candle_nn::rotary_emb::rope`.
+    let _ = (seq_len, dtype, rot_dim);
+    candle_nn::rotary_emb::rope(x, cos, sin)
 }
 
 // ── Full-attention layer ────────────────────────────────────────────────
@@ -309,7 +321,7 @@ impl DecoderLayer {
             ),
             LayerType::LinearAttention => {
                 let dims = GdnDims::new(cfg);
-                let gdn = GatedDeltaNet::load(vb.pp("linear_attn"), cfg, GdnInputProjectionKind::Split)?;
+                let gdn = GatedDeltaNet::load(vb, cfg, GdnInputProjectionKind::Split)?;
                 (LayerImpl::LinearAttention(gdn), Some(dims))
             }
         };

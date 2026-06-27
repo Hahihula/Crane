@@ -112,9 +112,11 @@ impl GatedDeltaNet {
         batch_size: usize,
         seq_len: usize,
     ) -> Result<Tensor> {
-        // Reshape to 2D for the gated-norm, then back to 3D.
+        // y comes out of the recurrence as `[B, S, num_v_heads, head_v_dim]`.
+        // Flatten the head + head_v dims, gated-RMSNorm along head_v, then
+        // reshape back to `[B, S, value_dim]`.
         let head_v_dim = self.norm_head_dim();
-        let value_dim = y.dim(2)?;
+        let value_dim = y.dim(2)? * head_v_dim;
         let y_2d = y.reshape(((), head_v_dim))?;
         let z_2d = z.reshape(((), head_v_dim))?;
         let y_2d = self.norm.forward(&y_2d, &z_2d)?;

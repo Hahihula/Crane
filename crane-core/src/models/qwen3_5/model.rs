@@ -41,10 +41,20 @@ impl Qwen3_5TextModel {
     /// prefix and fall back to a flat layout.
     pub fn new(cfg: &Config, vb: VarBuilder, device: &Device, dtype: DType) -> Result<Self> {
         let text_cfg = cfg.text().clone();
-        let vb_lm = if vb.contains_tensor("language_model.model.embed_tokens.weight") {
-            vb.pp("language_model").pp("model")
-        } else {
+        // HF saves Qwen 3.5 weights with the prefix
+        //   model.language_model.layers.{i}.{linear_attn,self_attn}.*
+        // (the `model.` is the inner multimodal `Qwen3_5Model`, of which
+        // `language_model` is the text component). Older checkpoints and
+        // standalone text exports may drop the leading `model.`.
+        let vb_lm = if vb.contains_tensor("model.language_model.embed_tokens.weight") {
+            vb.pp("model").pp("language_model")
+        } else if vb.contains_tensor("language_model.embed_tokens.weight") {
+            vb.pp("language_model")
+        } else if vb.contains_tensor("model.embed_tokens.weight") {
             vb.pp("model")
+        } else {
+            // Last-resort: assume a flat layout, no prefix.
+            vb.clone()
         };
 
         let embed_tokens = embedding(text_cfg.vocab_size, text_cfg.hidden_size, vb_lm.pp("embed_tokens"))?;
@@ -59,7 +69,11 @@ impl Qwen3_5TextModel {
 
         let embed_weight = embed_tokens.embeddings().clone();
         let lm_head_weight = vb_lm.get(text_cfg.vocab_size, "lm_head").ok();
-        let lm_head = resolve_tied(cfg.tie_word_embeddings, embed_weight, lm_head_weight);
+        // Store `lm_head` already transposed (`[H, V]`) so the per-step matmul
+        // doesn't have to. `resolve_tied` returns either the dedicated lm_head
+        // weight or — when `tie_word_embeddings: true` — the embed table.
+        let lm_head_raw = resolve_tied(cfg.tie_word_embeddings, embed_weight, lm_head_weight);
+        let lm_head = lm_head_raw.t()?.contiguous()?.clone();
 
         let rotary = MRotaryEmbedding::new(&text_cfg, device)?;
 
@@ -151,8 +165,11 @@ impl Qwen3_5TextModel {
         }
 
         let xs = self.norm.forward(&xs)?;
-        // Matmul with lm_head: [B, S, H] @ [V, H]^T = [B, S, V]
-        let logits = xs.matmul(&self.lm_head.t()?)?;
+        // Matmul with lm_head on the LAST position only. The engine's
+        // sampling step expects `[B, V]` (1D logits for the next token).
+        let (b, s, _) = xs.dims3()?;
+        let last = xs.narrow(1, s - 1, 1)?.reshape((b, ()))?;
+        let logits = last.matmul(&self.lm_head)?;
         Ok(logits)
     }
 }
@@ -253,8 +270,10 @@ impl Model {
 
     /// Warm up the model with a small forward pass.
     pub fn warmup(&mut self) {
+        // Run a tiny decode-only forward (single token) so warmup succeeds
+        // regardless of how the generate loop is implemented.
         if let Err(e) = self.generate(
-            &[45, 546, 456],
+            &[45],
             &GenerationConfig::with_max_tokens(5),
             None,
         ) {
@@ -300,7 +319,7 @@ impl ModelForCausalLM for Model {
             let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
 
             let logits = self.forward_step(ctxt, start_pos)?;
-            let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+            let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
 
             let logits = if config.repetition_penalty == 1. {
                 logits

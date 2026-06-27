@@ -21,9 +21,12 @@ impl GdnLayerCache {
     /// Allocate zero-initialized state for a single sequence.
     pub fn new(cfg: &dyn super::config::GdnConfig, dtype: DType, device: &Device) -> Result<Self> {
         let dims = GdnDims::new(cfg);
-        let conv_state = Tensor::zeros((dims.conv_dim, dims.conv_kernel_size), dtype, device)?;
+        // 3D shape `[1, conv_dim, kernel_size]` — the leading dim lets the
+        // cache broadcast cleanly against per-batch QKV tensors in
+        // `causal_conv1d_full` / `_update`.
+        let conv_state = Tensor::zeros((1, dims.conv_dim, dims.conv_kernel_size), dtype, device)?;
         let recurrent_state = Tensor::zeros(
-            (dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
+            (1, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
             DType::F32,
             device,
         )?;

@@ -214,20 +214,22 @@ fn causal_conv1d_update(
 ) -> Result<Tensor> {
     let (_, seq_len, _) = x.dims3()?;
     let x_t = x.transpose(1, 2)?.contiguous()?;
-    let state_len = cache.conv_state.dim(1)?;
-    let hidden_new = Tensor::cat(&[cache.conv_state.clone(), x_t], 1)?;
-    let new_len = hidden_new.dim(1)?;
-    cache.conv_state = hidden_new.narrow(1, new_len - state_len, state_len)?;
+    // `conv_state` is shape `[1, conv_dim, kernel_size]` — the kernel-size
+    // dim is the LAST (matches mistral.rs).
+    let state_len = cache.conv_state.dim(2)?;
+    let hidden_new = Tensor::cat(&[cache.conv_state.clone(), x_t], 2)?;
+    let new_len = hidden_new.dim(2)?;
+    cache.conv_state = hidden_new.narrow(2, new_len - state_len, state_len)?;
 
     let weight = conv1d_weight.squeeze(1)?.to_dtype(hidden_new.dtype())?;
     let mut conv_outputs = Vec::with_capacity(seq_len);
-    let total_len = hidden_new.dim(1)?;
+    let total_len = hidden_new.dim(2)?;
     for i in (total_len - seq_len)..total_len {
-        let window = hidden_new.narrow(1, i + 1 - dims.conv_kernel_size, dims.conv_kernel_size)?;
+        let window = hidden_new.narrow(2, i + 1 - dims.conv_kernel_size, dims.conv_kernel_size)?;
         let out = (window * weight.unsqueeze(0)?)?.sum(D::Minus1)?;
         conv_outputs.push(out);
     }
-    candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 1)?)?.transpose(1, 2)
+    candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
 }
 
 /// Multi-step Conv1D used during prefill. Pads on the left by `kernel - 1`,
@@ -242,12 +244,14 @@ fn causal_conv1d_full(
     let (batch_size, seq_len, conv_dim) = x.dims3()?;
     let x_t = x.transpose(1, 2)?.contiguous()?;
 
+    // Pad on the time dim (the last) and capture the trailing `kernel - 1`
+    // tokens into the cache for the next decode step.
     let pad_width = dims.conv_kernel_size.saturating_sub(seq_len);
     cache.conv_state = if pad_width > 0 {
         let zeros = Tensor::zeros((batch_size, conv_dim, pad_width), x_t.dtype(), x_t.device())?;
-        Tensor::cat(&[zeros, x_t.clone()], 1)?
+        Tensor::cat(&[zeros, x_t.clone()], 2)?
     } else {
-        x_t.narrow(1, seq_len - dims.conv_kernel_size, dims.conv_kernel_size)?
+        x_t.narrow(2, seq_len - dims.conv_kernel_size, dims.conv_kernel_size)?
     };
 
     let padded_t = Tensor::cat(
@@ -259,17 +263,17 @@ fn causal_conv1d_full(
             )?,
             x_t,
         ],
-        1,
+        2,
     )?;
 
     let weight = conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
     let mut conv_outputs = Vec::with_capacity(seq_len);
     for i in 0..seq_len {
-        let window = padded_t.narrow(1, i, dims.conv_kernel_size)?;
+        let window = padded_t.narrow(2, i, dims.conv_kernel_size)?;
         let out = (window * weight.unsqueeze(0)?)?.sum(D::Minus1)?;
         conv_outputs.push(out);
     }
-    candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 1)?)?.transpose(1, 2)
+    candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
 }
 // ─────────────────────────────────────────────────────────────────────
 //  Tests
