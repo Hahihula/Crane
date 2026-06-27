@@ -273,10 +273,32 @@ impl Mlp {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let xn = x.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let (mn, mx) = xn
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            eprintln!("[crane-mlp] input: min={mn}, max={mx}");
+            let gw = self.gate_proj.weight().to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let (gmn, gmx) = gw.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            eprintln!("[crane-mlp] gate_proj.weight: shape={:?}, min={gmn}, max={gmx}", self.gate_proj.weight().dims());
+            let dw = self.down_proj.weight().to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let (dmn, dmx) = dw.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            eprintln!("[crane-mlp] down_proj.weight: shape={:?}, min={dmn}, max={dmx}", self.down_proj.weight().dims());
+        }
         let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?;
         let up = self.up_proj.forward(x)?;
         let h = gate.broadcast_mul(&up)?;
-        self.down_proj.forward(&h)
+        let out = self.down_proj.forward(&h)?;
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let hn = h.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let (hmn, hmx) = hn.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            eprintln!("[crane-mlp] post_silu_mul: min={hmn}, max={hmx}");
+            let on = out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let (omn, omx) = on.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            eprintln!("[crane-mlp] post_down_proj: min={omn}, max={omx}");
+        }
+        Ok(out)
     }
 }
 
@@ -353,6 +375,12 @@ impl DecoderLayer {
     ) -> Result<Tensor> {
         let residual = x;
         let normed = self.input_layernorm.forward(x)?;
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let mn = normed.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = mn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-layer] post_input_layernorm: min={min}, max={max}");
+        }
 
         let attn_out = match &self.layer_impl {
             LayerImpl::FullAttention(attn) => {
@@ -369,11 +397,38 @@ impl DecoderLayer {
                 gdn.forward(&normed, dims, cache, is_decode_step)?
             }
         };
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let mn = attn_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = mn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-layer] post_attn_or_gdn: min={min}, max={max}");
+        }
 
         let x = (residual + attn_out)?;
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let mn = x.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = mn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-layer] post_residual1: min={min}, max={max}");
+        }
+
         let residual2 = &x;
         let normed2 = self.post_attention_layernorm.forward(&x)?;
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let mn = normed2.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = mn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-layer] post_post_attention_layernorm: min={min}, max={max}");
+        }
+
         let mlp_out = self.mlp.forward(&normed2)?;
+        if std::env::var("CRANE_DEBUG_LAYER").is_ok() {
+            let mn = mlp_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = mn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-layer] post_mlp: min={min}, max={max}");
+        }
+
         residual2 + mlp_out
     }
 }

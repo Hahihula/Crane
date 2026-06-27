@@ -197,8 +197,6 @@ fn build_causal_mask(
     device: &candle_core::Device,
     dtype: candle_core::DType,
 ) -> candle_core::Result<candle_core::Tensor> {
-    // Standard lower-triangular mask of size total_k x total_k, then narrow
-    // to the last `seq_q` query rows and the full `total_k` key columns.
     let mut data: Vec<f32> = Vec::with_capacity(total_k * total_k);
     for q in 0..total_k {
         for k in 0..total_k {
@@ -207,8 +205,35 @@ fn build_causal_mask(
     }
     let full = candle_core::Tensor::from_vec(data, (total_k, total_k), device)?
         .to_dtype(dtype)?;
-    // Narrow to [start_pos..start_pos+seq_q] rows.
     Ok(full.narrow(0, 0, seq_q)?.unsqueeze(0)?.unsqueeze(0)?)
+}
+
+fn print_layer_stats(name: &str, t: &candle_core::Tensor) -> anyhow::Result<()> {
+    let v = t
+        .to_dtype(candle_core::DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let finite: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    let nan = v.iter().filter(|x| x.is_nan()).count();
+    let inf = v.iter().filter(|x| x.is_infinite()).count();
+    let (mn, mx, mean) = if finite.is_empty() {
+        (f32::NAN, f32::NAN, f32::NAN)
+    } else {
+        let mn = finite.iter().cloned().fold(f32::INFINITY, f32::min);
+        let mx = finite.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let avg = finite.iter().sum::<f32>() / finite.len() as f32;
+        (mn, mx, avg)
+    };
+    println!(
+        "[crane] {name}: shape={:?}, NaN={}, Inf={}, min={:.4}, max={:.4}, mean={:.4}",
+        t.dims(),
+        nan,
+        inf,
+        mn,
+        mx,
+        mean,
+    );
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -436,13 +461,7 @@ impl Model {
         );
 
         let mut idx: Vec<usize> = (0..v.len()).collect();
-        // Sort indices by descending logit value. `sort_by` is ascending,
-        // so we reverse `v[a]` and `v[b]` in the comparator.
         idx.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap_or(std::cmp::Ordering::Equal));
-        // Note: do NOT reverse. With `v[b].partial_cmp(&v[a])` the comparator
-        // returns Less when v[b] < v[a], meaning a comes first when v[a] > v[b]
-        // — i.e. larger values first. Earlier revisions reversed after sort
-        // and got it backwards.
         let topk: Vec<(u32, f32)> = idx
             .iter()
             .take(k)
@@ -458,6 +477,45 @@ impl Model {
                 .unwrap_or_else(|| "<unk>".into());
             println!("  {} ({:.4}) {:?}", id, logit, decoded);
         }
+        Ok(())
+    }
+
+    /// Dump the hidden-state stats after each layer + the post-norm state.
+    /// Used to localize which layer first diverges from the HF reference.
+    #[doc(hidden)]
+    pub fn debug_layer_stats(&mut self, input_ids: &[u32]) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let seq_len = input_ids.len();
+        let input = candle_core::Tensor::new(input_ids, &self.device)?.unsqueeze(0)?;
+        let mut xs = self.inner.embed_tokens.forward(&input)?;
+        print_layer_stats("after_embed", &xs)?;
+
+        let (cos, sin) = self.inner.rotary.cos_sin(0, seq_len)?;
+        let rot_dim = self.inner.rotary.rot_dim();
+        let mask = build_causal_mask(seq_len, seq_len, &self.device, self.dtype)?;
+        let mask_ref: Option<&candle_core::Tensor> = if seq_len > 1 {
+            Some(&mask)
+        } else {
+            None
+        };
+
+        for i in 0..self.inner.layers.len() {
+            let layer = &mut self.inner.layers[i];
+            let cache_slot = self.inner.gdn_caches[i].as_mut();
+            xs = layer.forward(
+                &xs,
+                &cos,
+                &sin,
+                rot_dim,
+                mask_ref,
+                cache_slot,
+                seq_len == 1,
+            )?;
+            print_layer_stats(&format!("after_layer_{}", i), &xs)?;
+        }
+        let xs = self.inner.norm.forward(&xs)?;
+        print_layer_stats("after_norm", &xs)?;
+        let _ = (cos, sin); // silence unused if mask_ref is None path
         Ok(())
     }
 }
