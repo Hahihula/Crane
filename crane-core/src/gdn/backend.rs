@@ -160,8 +160,11 @@ pub fn compute_beta_g(
 
 /// Compute β and g, run the gated delta rule recurrence, return the output.
 ///
-/// Dispatches to the CUDA/Metal fast paths when available; falls back to the
-/// CPU reference otherwise.
+/// The recurrence is written in pure-Candle tensor ops, so it runs on any
+/// device (CPU/CUDA/Metal) — every op has a native backend kernel. On GPU the
+/// per-timestep loop is functional but not yet throughput-optimal; a fused
+/// kernel (Phase 1B/1C, mirroring mistralrs `gdn.cu` / `gdn.metal`) is the
+/// performance follow-up and would dispatch from here when available.
 #[allow(unused_variables)]
 pub fn apply_recurrence(
     q: &Tensor,
@@ -175,22 +178,7 @@ pub fn apply_recurrence(
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
-    // CUDA path placeholder (Phase 1B).
-    #[cfg(feature = "cuda")]
-    if q.device().is_cuda() {
-        candle_core::bail!("GDN CUDA recurrence not yet wired up (Phase 1B)")
-    }
-
-    // Metal path placeholder (Phase 1C).
-    // `metal` is enabled by Crane's target-specific deps on macOS aarch64, not
-    // as a Cargo feature, so we gate on the device directly instead of via
-    // `#[cfg(feature = "metal")]`.
-    #[cfg(target_os = "macos")]
-    if q.device().is_metal() {
-        candle_core::bail!("GDN Metal recurrence not yet wired up (Phase 1C)")
-    }
-
-    // CPU fallback.
+    // Device-portable reference (runs on CPU/CUDA/Metal).
     gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)
 }
 

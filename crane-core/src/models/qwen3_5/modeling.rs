@@ -142,12 +142,19 @@ pub fn apply_mrope(
     rot_dim: usize,
 ) -> Result<Tensor> {
     let (_b, _h, _seq_len, head_dim) = x.dims4()?;
+    let dtype = x.dtype();
+    // `cos`/`sin` are kept in f32; the rope op requires its inputs to share a
+    // dtype, so for half-precision activations (F16/BF16 on GPU) we rotate in
+    // f32 and cast back. This also matches HF, which applies RoPE in float.
+    let rope_f32 = |t: &Tensor| -> Result<Tensor> {
+        let r = candle_nn::rotary_emb::rope(&t.to_dtype(DType::F32)?.contiguous()?, cos, sin)?;
+        r.to_dtype(dtype)
+    };
     if rot_dim == head_dim {
-        return candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin);
+        return rope_f32(x);
     }
-    let x_rot = x.narrow(D::Minus1, 0, rot_dim)?.contiguous()?;
+    let x_rot = rope_f32(&x.narrow(D::Minus1, 0, rot_dim)?)?;
     let x_pass = x.narrow(D::Minus1, rot_dim, head_dim - rot_dim)?;
-    let x_rot = candle_nn::rotary_emb::rope(&x_rot, cos, sin)?;
     Tensor::cat(&[&x_rot, &x_pass], D::Minus1)?.contiguous()
 }
 

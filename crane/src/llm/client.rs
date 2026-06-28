@@ -95,11 +95,9 @@ impl LlmClient {
                 LoadedModel::Qwen3 { model, tokenizer }
             }
             LlmModelType::Qwen35 => {
-                if !matches!(config.device, DeviceConfig::Cpu) {
-                    return Err(CraneError::ConfigError(
-                        "Qwen3.5 (Gated Delta Net) is CPU-only for now; set device to Cpu".to_string(),
-                    ));
-                }
+                // Runs on CPU/CUDA/Metal. The Gated Delta Net recurrence uses
+                // the device-portable Candle path on GPU (functional; a fused
+                // kernel is the throughput follow-up).
                 let tokenizer = crane_core::autotokenizer::AutoTokenizer::from_pretrained(
                     &config.model_path,
                     None,

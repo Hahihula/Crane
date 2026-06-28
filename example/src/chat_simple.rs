@@ -9,16 +9,23 @@ use crane::prelude::*;
 fn main() -> CraneResult<()> {
     // Create a simple chat configuration.
     //
-    // Qwen 3.5 (hybrid Gated Delta Net + attention) is CPU-only for now, so use
-    // DeviceConfig::Cpu (dtype is forced to F32 on CPU). For Qwen3 / Qwen2.5 you
-    // can switch model_type and use DeviceConfig::Metal / Cuda(0) with F16.
+    // Qwen 3.5 (hybrid Gated Delta Net + attention) runs on CPU/CUDA/Metal.
+    // Picks the best available target: CUDA (F16) when built `--features cuda`,
+    // Metal (F16) on macOS, otherwise CPU (F32).
+    #[cfg(feature = "cuda")]
+    let (device, dtype) = (DeviceConfig::Cuda(0), DataType::F16);
+    #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
+    let (device, dtype) = (DeviceConfig::Metal, DataType::F16);
+    #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
+    let (device, dtype) = (DeviceConfig::Cpu, DataType::F32);
+
     let config = ChatConfig {
         common: CommonConfig {
             // Update this path to your local Qwen 3.5 checkpoint.
             model_path: "/home/hahihula/mywork/ai/additional_models/Qwen3.5-0.8B".to_string(),
             model_type: LlmModelType::Qwen35,
-            device: DeviceConfig::Cpu,
-            dtype: DataType::F32,
+            device,
+            dtype,
             max_memory: None,
         },
         generation: GenerationConfig {

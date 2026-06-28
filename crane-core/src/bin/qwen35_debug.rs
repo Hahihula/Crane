@@ -21,13 +21,21 @@ fn main() -> Result<()> {
     let mut ids_csv = String::new();
     let mut topk: usize = 10;
     let mut layer_stats = false;
+    let mut device_arg = String::from("cpu");
+    let mut dtype_arg = String::from("f32");
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--model-path" => model_path = args[i + 1].clone(),
             "--ids" => ids_csv = args[i + 1].clone(),
             "--topk" => topk = args[i + 1].parse().unwrap_or(10),
-            "--layer-stats" => layer_stats = true,
+            "--device" => device_arg = args[i + 1].clone(),
+            "--dtype" => dtype_arg = args[i + 1].clone(),
+            "--layer-stats" => {
+                layer_stats = true;
+                i += 1;
+                continue;
+            }
             _ => {}
         }
         i += 2;
@@ -45,8 +53,19 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("parse ids: {e}"))?;
     println!("[crane] input_ids: {ids:?}");
 
-    let device = Device::Cpu;
-    let dtype = candle_core::DType::F32;
+    let device = match device_arg.as_str() {
+        "cpu" => Device::Cpu,
+        "cuda" => Device::new_cuda(0).context("init CUDA device")?,
+        "metal" => Device::new_metal(0).context("init Metal device")?,
+        other => anyhow::bail!("unknown --device {other} (cpu|cuda|metal)"),
+    };
+    let dtype = match dtype_arg.as_str() {
+        "f32" => candle_core::DType::F32,
+        "f16" => candle_core::DType::F16,
+        "bf16" => candle_core::DType::BF16,
+        other => anyhow::bail!("unknown --dtype {other} (f32|f16|bf16)"),
+    };
+    println!("[crane] device={device_arg} dtype={dtype_arg}");
     let mut model = Model::new(&model_path, &device, &dtype).context("loading model")?;
     if layer_stats {
         model.debug_layer_stats(&ids)?;
