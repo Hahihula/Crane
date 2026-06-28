@@ -182,10 +182,22 @@ impl FullAttention {
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
+        let debug_attn = std::env::var("CRANE_DEBUG_ATTN").is_ok();
+
+        if debug_attn {
+            dump_to_file("layer_input", x);
+        }
 
         let q_out = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
+        let k_proj_out = self.k_proj.forward(x)?;
+        let v_proj_out = self.v_proj.forward(x)?;
+        if debug_attn {
+            dump_to_file("q_proj", &q_out);
+            dump_to_file("k_proj", &k_proj_out);
+            dump_to_file("v_proj", &v_proj_out);
+        }
+        let k = k_proj_out;
+        let v = v_proj_out;
 
         let (q, gate) = if self.has_output_gate {
             let half = self.num_heads * self.head_dim;
@@ -197,6 +209,15 @@ impl FullAttention {
         } else {
             (q_out, None)
         };
+
+        if debug_attn {
+            let w = self.q_proj.weight().to_dtype(DType::F32)?;
+            dump_to_file("q_proj_weight", &w);
+            let w = self.k_proj.weight().to_dtype(DType::F32)?;
+            dump_to_file("k_proj_weight", &w);
+            let w = self.v_proj.weight().to_dtype(DType::F32)?;
+            dump_to_file("v_proj_weight", &w);
+        }
 
         let q = q
             .reshape((b_sz, seq_len, self.num_heads, self.head_dim))?
@@ -212,9 +233,11 @@ impl FullAttention {
 
         let q = self.q_norm.forward(&q)?;
         let k = self.k_norm.forward(&k)?;
+        if debug_attn { dump_to_file("q_norm", &q); dump_to_file("k_norm", &k); }
 
         let q = apply_mrope(&q, cos, sin, rot_dim)?;
         let k = apply_mrope(&k, cos, sin, rot_dim)?;
+        if debug_attn { dump_to_file("q_after_mrope", &q); dump_to_file("k_after_mrope", &k); }
 
         let n_rep = self.num_heads / self.num_kv_heads;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
@@ -237,15 +260,19 @@ impl FullAttention {
         } else {
             v
         };
+        if debug_attn { dump_to_file("k_rep", &k_rep); dump_to_file("v_rep", &v_rep); }
 
         let k_t = k_rep.transpose(D::Minus2, D::Minus1)?.contiguous()?;
-        let attn_weights = (q.matmul(&k_t)? * scale)?;
+        let attn_logits = (q.matmul(&k_t)? * scale)?;
+        if debug_attn { dump_to_file("attn_logits", &attn_logits); }
         let attn_weights = match attention_mask {
-            Some(mask) => attn_weights.broadcast_add(mask)?,
-            None => attn_weights,
+            Some(mask) => attn_weights_with_mask(&attn_logits, mask)?,
+            None => attn_logits,
         };
         let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        if debug_attn { dump_to_file("attn_weights_post_softmax", &attn_weights); }
         let y = attn_weights.matmul(&v_rep)?;
+        if debug_attn { dump_to_file("attn_output_pre_gate", &y); }
 
         let y = y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?;
 
@@ -255,8 +282,49 @@ impl FullAttention {
         } else {
             y
         };
+        if debug_attn { dump_to_file("attn_output_post_gate", &y); }
 
         self.o_proj.forward(&y)
+    }
+}
+
+fn attn_weights_with_mask(
+    attn_logits: &Tensor,
+    mask: &Tensor,
+) -> Result<Tensor> {
+    // HF applies the mask (shape `[B, 1, S_q, S_k]` for additive causal mask)
+    // via `attn_weights + mask` and softmax. We do the same.
+    Ok(attn_logits.broadcast_add(mask)?)
+}
+
+fn dump_to_file(name: &str, t: &candle_core::Tensor) {
+    use std::io::Write;
+    let dir = "/tmp/opencode/crane_attn_dump";
+    let _ = std::fs::create_dir_all(dir);
+    let v = match t.to_dtype(candle_core::DType::F32).and_then(|x| x.flatten_all()) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let data: Vec<f32> = match v.to_vec1() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = format!("{dir}/{name}.bin");
+    let mut f = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    // Header: name, shape (4 dims), dtype tag (0=f32)
+    let dims = t.dims();
+    let name_bytes = name.as_bytes();
+    let _ = f.write_all(&(name_bytes.len() as u32).to_le_bytes());
+    let _ = f.write_all(name_bytes);
+    let _ = f.write_all(&(dims.len() as u32).to_le_bytes());
+    for d in dims {
+        let _ = f.write_all(&(*d as u64).to_le_bytes());
+    }
+    for x in &data {
+        let _ = f.write_all(&x.to_le_bytes());
     }
 }
 
@@ -395,6 +463,24 @@ impl DecoderLayer {
             let min = mn.iter().cloned().fold(f32::INFINITY, f32::min);
             let max = mn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             eprintln!("[crane-layer] post_input_layernorm: min={min}, max={max}");
+        }
+        if std::env::var("CRANE_DEBUG_ATTN").is_ok() {
+            let w = self.input_layernorm.weight().to_dtype(DType::F32)?;
+            dump_to_file("input_layernorm_weight", &w);
+            dump_to_file("input_layernorm_output", &normed);
+            // Sanity: confirm they're different
+            let w_min = w.to_vec1::<f32>()?.iter().cloned().fold(f32::INFINITY, f32::min);
+            let w_max = w.to_vec1::<f32>()?.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let w_mean = w.to_vec1::<f32>()?.iter().sum::<f32>() / w.to_vec1::<f32>()?.len() as f32;
+            eprintln!("[crane-norm] LAYER 3 input_layernorm.weight: min={w_min:.4}, max={w_max:.4}, mean={w_mean:.4}");
+            let xn = normed.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let xn_min = xn.iter().cloned().fold(f32::INFINITY, f32::min);
+            let xn_max = xn.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-norm] LAYER 3 normed: min={xn_min:.4}, max={xn_max:.4}");
+            let xi = x.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let xi_min = xi.iter().cloned().fold(f32::INFINITY, f32::min);
+            let xi_max = xi.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!("[crane-norm] LAYER 3 input (pre-norm): min={xi_min:.4}, max={xi_max:.4}");
         }
 
         let attn_out = match &self.layer_impl {

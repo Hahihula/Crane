@@ -543,8 +543,8 @@ impl Model {
                 cache_slot,
                 seq_len == 1,
             )?;
-            if i == 0 || i == 3 || i == 7 || i == 11 || i == 15 || i == 19 || i == 23 {
-                print_layer_stats_per_pos(&format!("after_layer_{}", i), &xs)?;
+            if i < 4 {
+                print_layer_stats(&format!("after_layer_{}", i), &xs)?;
             }
         }
         let xs = self.inner.norm.forward(&xs)?;
