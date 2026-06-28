@@ -11,9 +11,11 @@
 //! supported for weight loading, but vision weights are ignored).
 
 mod config;
+mod kv_cache;
 mod model;
 mod modeling;
 
 pub use config::{load_config, Config, LayerType, TextConfig};
+pub use kv_cache::KvCache;
 pub use model::{Model, ModelFormat, Qwen3_5TextModel};
 pub use modeling::{apply_mrope, DecoderLayer, FullAttention, Mlp, MRotaryEmbedding, Qwen35RmsNorm};

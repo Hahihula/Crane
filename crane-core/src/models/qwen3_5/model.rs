@@ -10,6 +10,7 @@ use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
 use super::config::{load_config, Config, TextConfig};
+use super::kv_cache::KvCache;
 use super::modeling::{resolve_tied, DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm};
 use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
@@ -29,6 +30,8 @@ pub struct Qwen3_5TextModel {
     lm_head: Tensor,
     rotary: MRotaryEmbedding,
     gdn_caches: Vec<Option<crate::gdn::GdnLayerCache>>,
+    /// Per-layer K/V cache; `Some` for full-attention blocks, `None` for GDN.
+    attn_caches: Vec<Option<KvCache>>,
     device: Device,
     dtype: DType,
 }
@@ -87,15 +90,19 @@ impl Qwen3_5TextModel {
 
         let rotary = MRotaryEmbedding::new(&text_cfg, device)?;
 
-        // Pre-allocate GDN caches for linear-attention layers.
+        // Pre-allocate per-layer caches: GDN recurrent state for linear blocks,
+        // K/V cache for full-attention blocks (mutually exclusive per layer).
         let mut gdn_caches = Vec::with_capacity(layers.len());
+        let mut attn_caches = Vec::with_capacity(layers.len());
         for layer in &layers {
             if layer.is_linear() {
                 gdn_caches.push(Some(crate::gdn::GdnLayerCache::new(
                     &text_cfg, dtype, device,
                 )?));
+                attn_caches.push(None);
             } else {
                 gdn_caches.push(None);
+                attn_caches.push(Some(KvCache::new()));
             }
         }
 
@@ -107,6 +114,7 @@ impl Qwen3_5TextModel {
             lm_head,
             rotary,
             gdn_caches,
+            attn_caches,
             device: device.clone(),
             dtype,
         })
@@ -137,6 +145,9 @@ impl Qwen3_5TextModel {
     pub fn reset_gdn_caches(&mut self) -> Result<()> {
         for slot in self.gdn_caches.iter_mut().flatten() {
             slot.reset()?;
+        }
+        for slot in self.attn_caches.iter_mut().flatten() {
+            slot.reset();
         }
         Ok(())
     }
@@ -175,15 +186,17 @@ impl Qwen3_5TextModel {
         let rot_dim = self.rotary.rot_dim();
 
         for i in 0..self.layers.len() {
-            let layer = &mut self.layers[i];
-            let cache_slot = self.gdn_caches[i].as_mut();
+            let layer = &self.layers[i];
+            let gdn_slot = self.gdn_caches[i].as_mut();
+            let attn_slot = self.attn_caches[i].as_mut();
             xs = layer.forward(
                 &xs,
                 &cos,
                 &sin,
                 rot_dim,
                 mask_ref,
-                cache_slot,
+                gdn_slot,
+                attn_slot,
                 is_decode_step,
             )?;
         }
@@ -416,13 +429,11 @@ impl ModelForCausalLM for Model {
             .or_else(|| self.tokenizer.get_token(""));
         let mut streamer_finalized = false;
 
-        // The full-attention layers have no KV cache yet, so incremental decode
-        // (feeding only the last token) starves them of history. Until a KV
-        // cache lands, recompute the full context each step (O(n^2) but
-        // correct): reset the GDN caches and re-run the whole prefix. Default
-        // ON for correctness; set CRANE_INCREMENTAL_DECODE=1 to opt into the
-        // (currently incorrect) fast path for benchmarking.
-        let full_recompute = std::env::var("CRANE_INCREMENTAL_DECODE").is_err();
+        // Incremental decode now works: GDN layers carry recurrent state and
+        // full-attention layers carry a K/V cache, so feeding one token per
+        // step is correct. `CRANE_FULL_RECOMPUTE=1` forces the O(n^2)
+        // reset-and-reprocess path instead (kept as a debugging cross-check).
+        let full_recompute = std::env::var("CRANE_FULL_RECOMPUTE").is_ok();
 
         let start_gen = std::time::Instant::now();
         for index in 0..config.max_new_tokens {
@@ -555,15 +566,17 @@ impl Model {
         };
 
         for i in 0..self.inner.layers.len() {
-            let layer = &mut self.inner.layers[i];
-            let cache_slot = self.inner.gdn_caches[i].as_mut();
+            let layer = &self.inner.layers[i];
+            let gdn_slot = self.inner.gdn_caches[i].as_mut();
+            let attn_slot = self.inner.attn_caches[i].as_mut();
             xs = layer.forward(
                 &xs,
                 &cos,
                 &sin,
                 rot_dim,
                 mask_ref,
-                cache_slot,
+                gdn_slot,
+                attn_slot,
                 seq_len == 1,
             )?;
             if i == 0 || i == 3 || i == 11 || i == 23 {

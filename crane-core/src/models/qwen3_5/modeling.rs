@@ -59,6 +59,7 @@ impl Module for Qwen35RmsNorm {
 }
 
 use super::config::{LayerType, TextConfig};
+use super::kv_cache::KvCache;
 use crate::gdn::{GatedDeltaNet, GdnDims, GdnInputProjectionKind, GdnLayerCache};
 
 // ── MRoPE rotary embedding ─────────────────────────────────────────────
@@ -212,6 +213,7 @@ impl FullAttention {
         sin: &Tensor,
         rot_dim: usize,
         attention_mask: Option<&Tensor>,
+        kv_cache: Option<&mut KvCache>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
         let debug_attn = std::env::var("CRANE_DEBUG_ATTN").is_ok();
@@ -281,6 +283,14 @@ impl FullAttention {
         let q = apply_mrope(&q, cos, sin, rot_dim)?;
         let k = apply_mrope(&k, cos, sin, rot_dim)?;
         if debug_attn { dump_to_file("q_after_mrope", &q); dump_to_file("k_after_mrope", &k); }
+
+        // Append this step's K/V to the cache (post-RoPE, pre-GQA-expand) and
+        // continue with the full cached K/V. During incremental decode this is
+        // what lets the attention see the whole context from a single token.
+        let (k, v) = match kv_cache {
+            Some(cache) => cache.append(&k, &v)?,
+            None => (k, v),
+        };
 
         let n_rep = self.num_heads / self.num_kv_heads;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
@@ -487,8 +497,9 @@ impl DecoderLayer {
         matches!(self.layer_impl, LayerImpl::LinearAttention(_))
     }
 
-    /// Forward pass. `gdn_cache` is `Some(&mut cache)` only for
-    /// `LinearAttention` blocks; pass `None` for full-attention blocks.
+    /// Forward pass. For `LinearAttention` blocks pass `Some(gdn_cache)` and
+    /// `None` for `attn_cache`; for `FullAttention` blocks pass `Some(attn_cache)`
+    /// and `None` for `gdn_cache`.
     pub fn forward(
         &self,
         x: &Tensor,
@@ -497,6 +508,7 @@ impl DecoderLayer {
         rot_dim: usize,
         attention_mask: Option<&Tensor>,
         gdn_cache: Option<&mut GdnLayerCache>,
+        attn_cache: Option<&mut KvCache>,
         is_decode_step: bool,
     ) -> Result<Tensor> {
         let residual = x;
@@ -529,9 +541,10 @@ impl DecoderLayer {
         let attn_out = match &self.layer_impl {
             LayerImpl::FullAttention(attn) => {
                 debug_assert!(gdn_cache.is_none(), "full-attention layer should not receive a GDN cache");
-                attn.forward(&normed, cos, sin, rot_dim, attention_mask)?
+                attn.forward(&normed, cos, sin, rot_dim, attention_mask, attn_cache)?
             }
             LayerImpl::LinearAttention(gdn) => {
+                debug_assert!(attn_cache.is_none(), "linear-attention layer should not receive a KV cache");
                 let cache = gdn_cache.ok_or_else(|| {
                     candle_core::Error::Msg("GDN cache missing for linear-attention layer".into())
                 })?;
