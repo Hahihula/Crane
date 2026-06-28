@@ -5,12 +5,12 @@ use std::io::Write;
 
 use anyhow::{Context, Error as E, Result};
 use candle_core::{DType, Device, Module, Tensor};
-use candle_nn::{embedding, rms_norm, Embedding, RmsNorm, VarBuilder};
+use candle_nn::{embedding, Embedding, VarBuilder};
 use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
 use super::config::{load_config, Config, TextConfig};
-use super::modeling::{resolve_tied, DecoderLayer, MRotaryEmbedding};
+use super::modeling::{resolve_tied, DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm};
 use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
 use crate::utils::token_output_stream::TokenOutputStream;
@@ -25,7 +25,7 @@ pub struct Qwen3_5TextModel {
     cfg: TextConfig,
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
-    norm: RmsNorm,
+    norm: Qwen35RmsNorm,
     lm_head: Tensor,
     rotary: MRotaryEmbedding,
     gdn_caches: Vec<Option<crate::gdn::GdnLayerCache>>,
@@ -65,7 +65,7 @@ impl Qwen3_5TextModel {
             layers.push(DecoderLayer::load(&text_cfg, layer_type, vb_lm.pp("layers").pp(idx))?);
         }
 
-        let norm = rms_norm(text_cfg.hidden_size, text_cfg.rms_norm_eps, vb_lm.pp("norm"))?;
+        let norm = Qwen35RmsNorm::load(text_cfg.hidden_size, text_cfg.rms_norm_eps, vb_lm.pp("norm"))?;
         if std::env::var("CRANE_DEBUG_NORM").is_ok() {
             if let Ok(w) = norm.weight().to_dtype(DType::F32) {
                 if let Ok(v) = w.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
@@ -340,6 +340,18 @@ impl Model {
         })
     }
 
+    /// Tokenize a prompt string into input IDs (mirrors `qwen3::Model`).
+    pub fn prepare_inputs(&self, inputs: &str) -> Result<Vec<u32>> {
+        let input_ids = self
+            .tokenizer
+            .tokenizer
+            .encode(inputs, true)
+            .map_err(E::msg)?
+            .get_ids()
+            .to_vec();
+        Ok(input_ids)
+    }
+
     /// Run a single forward step, returning raw logits `[1, S, vocab]`.
     pub fn forward_step(
         &mut self,
@@ -404,13 +416,24 @@ impl ModelForCausalLM for Model {
             .or_else(|| self.tokenizer.get_token(""));
         let mut streamer_finalized = false;
 
+        // The full-attention layers have no KV cache yet, so incremental decode
+        // (feeding only the last token) starves them of history. Until a KV
+        // cache lands, recompute the full context each step (O(n^2) but
+        // correct): reset the GDN caches and re-run the whole prefix. Default
+        // ON for correctness; set CRANE_INCREMENTAL_DECODE=1 to opt into the
+        // (currently incorrect) fast path for benchmarking.
+        let full_recompute = std::env::var("CRANE_INCREMENTAL_DECODE").is_err();
+
         let start_gen = std::time::Instant::now();
         for index in 0..config.max_new_tokens {
-            let context_size = if index > 0 { 1 } else { tokens.len() };
+            let context_size = if index > 0 && !full_recompute { 1 } else { tokens.len() };
             let start_pos = tokens.len().saturating_sub(context_size);
             let ctxt = &tokens[start_pos..];
             let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
 
+            if full_recompute {
+                self.clear_kv_cache();
+            }
             let logits = self.forward_step(ctxt, start_pos)?;
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
 
@@ -543,8 +566,8 @@ impl Model {
                 cache_slot,
                 seq_len == 1,
             )?;
-            if i < 4 {
-                print_layer_stats(&format!("after_layer_{}", i), &xs)?;
+            if i == 0 || i == 3 || i == 11 || i == 23 {
+                print_layer_stats_per_pos(&format!("after_layer_{}", i), &xs)?;
             }
         }
         let xs = self.inner.norm.forward(&xs)?;

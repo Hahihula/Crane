@@ -44,6 +44,8 @@ impl GenerationConfig {
 pub enum LlmModelType {
     Qwen25,
     Qwen3,
+    /// Qwen 3.5 hybrid (Gated Delta Net + full attention). CPU-only for now.
+    Qwen35,
     Qwen3VL,
     DeepSeek,
     HunyuanDense,

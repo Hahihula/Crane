@@ -16,4 +16,4 @@ mod modeling;
 
 pub use config::{load_config, Config, LayerType, TextConfig};
 pub use model::{Model, ModelFormat, Qwen3_5TextModel};
-pub use modeling::{apply_mrope, DecoderLayer, FullAttention, Mlp, MRotaryEmbedding};
+pub use modeling::{apply_mrope, DecoderLayer, FullAttention, Mlp, MRotaryEmbedding, Qwen35RmsNorm};

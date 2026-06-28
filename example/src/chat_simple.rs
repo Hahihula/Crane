@@ -7,17 +7,22 @@ use crane::llm::{GenerationConfig, LlmModelType};
 use crane::prelude::*;
 
 fn main() -> CraneResult<()> {
-    // Create a simple chat configuration
+    // Create a simple chat configuration.
+    //
+    // Qwen 3.5 (hybrid Gated Delta Net + attention) is CPU-only for now, so use
+    // DeviceConfig::Cpu (dtype is forced to F32 on CPU). For Qwen3 / Qwen2.5 you
+    // can switch model_type and use DeviceConfig::Metal / Cuda(0) with F16.
     let config = ChatConfig {
         common: CommonConfig {
-            model_path: "checkpoints/Qwen3-0.6B-Instruct".to_string(), // Update this path to your model
-            model_type: LlmModelType::Qwen3,
-            device: DeviceConfig::Metal, // Use DeviceConfig::Cuda(0) for GPU
-            dtype: DataType::F16,
+            // Update this path to your local Qwen 3.5 checkpoint.
+            model_path: "/home/hahihula/mywork/ai/additional_models/Qwen3.5-0.8B".to_string(),
+            model_type: LlmModelType::Qwen35,
+            device: DeviceConfig::Cpu,
+            dtype: DataType::F32,
             max_memory: None,
         },
         generation: GenerationConfig {
-            max_new_tokens: 100, // Keep responses short for demo
+            max_new_tokens: 48, // Keep responses short for demo (CPU, O(n^2) decode)
             temperature: Some(0.7),
             ..Default::default()
         },

@@ -15,7 +15,48 @@
 //! layer), so that continuous-batching can save/restore state per request.
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{linear_no_bias, rms_norm, RmsNorm, VarBuilder};
+use candle_nn::{linear_no_bias, VarBuilder};
+
+// ── Qwen 3.5 RMSNorm (unit-offset) ───────────────────────────────────────
+
+/// RMSNorm as used by Qwen 3.5: `x / rms(x) * (1 + weight)`.
+///
+/// Unlike the standard (Llama/Qwen3) RMSNorm — which scales by `weight` — Qwen
+/// 3.5 adds a unit offset (`1 + weight`, Gemma-style). HF source:
+/// `output = self._norm(x.float()) * (1.0 + self.weight.float())`. The stored
+/// weights have mean ~0.24, so omitting the `+1` shrinks every normalized
+/// activation ~5x and compounds across layers. Computed in f32 then cast back.
+///
+/// This is NOT used by the GDN gated norm ([`crate::gdn::RmsNormGated`]), which
+/// scales by plain `weight` in HF.
+#[derive(Clone)]
+pub struct Qwen35RmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl Qwen35RmsNorm {
+    pub fn load(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+        let weight = vb.get(size, "weight")?;
+        Ok(Self { weight, eps })
+    }
+
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+}
+
+impl Module for Qwen35RmsNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let dtype = x.dtype();
+        let x = x.to_dtype(DType::F32)?;
+        let var = x.sqr()?.mean_keepdim(D::Minus1)?;
+        let x_normed = x.broadcast_div(&(var + self.eps)?.sqrt()?)?;
+        // `1 + weight` (unit offset), in f32.
+        let scale = self.weight.to_dtype(DType::F32)?.affine(1.0, 1.0)?;
+        x_normed.broadcast_mul(&scale)?.to_dtype(dtype)
+    }
+}
 
 use super::config::{LayerType, TextConfig};
 use crate::gdn::{GatedDeltaNet, GdnDims, GdnInputProjectionKind, GdnLayerCache};
@@ -39,16 +80,17 @@ pub struct MRotaryEmbedding {
 impl MRotaryEmbedding {
     pub fn new(cfg: &TextConfig, device: &Device) -> Result<Self> {
         let rot_dim = cfg.rot_dim();
-        let head_dim = cfg.head_dim;
         let base = cfg.rope_theta() as f32;
         let max_pos = cfg.max_position_embeddings;
 
-        // cos/sin tables must have shape `[S, head_dim/2]` to satisfy
-        // `candle_nn::rotary_emb::rope`. The first `rot_dim / 2` entries are
-        // populated with the actual rotary frequencies; the remaining
-        // entries are padded with `cos=1, sin=0` so the trailing dimensions
-        // pass through the rotation unchanged.
-        let half_head = head_dim / 2;
+        // cos/sin tables have shape `[S, rot_dim/2]` — exactly the slice of the
+        // head that receives rotary embeddings. `apply_mrope` rotates only the
+        // first `rot_dim` components of each head (HF's partial-rotary scheme:
+        // `q_rot = q[..., :rot_dim]`), so the tables must NOT be padded to
+        // `head_dim/2`. Padding them to the full head and rotating the whole
+        // head (the previous approach) pairs dim `i` with dim `i+head_dim/2`,
+        // whereas HF pairs `i` with `i+rot_dim/2` inside the rotary slice — a
+        // different rotation entirely.
         let half_rot = rot_dim / 2;
         let inv: Vec<f32> = (0..half_rot)
             .map(|i| 1.0 / base.powf(i as f32 * 2.0 / rot_dim as f32))
@@ -59,23 +101,8 @@ impl MRotaryEmbedding {
         let positions = Tensor::new(positions.as_slice(), device)?;
         let freqs = positions.unsqueeze(1)?.matmul(&inv_freq.unsqueeze(0)?)?; // [max_pos, half_rot]
 
-        let cos_rot = freqs.cos()?.contiguous()?;
-        let sin_rot = freqs.sin()?.contiguous()?;
-
-        // Pad to [max_pos, head_dim/2] with cos=1, sin=0 in the unused slots.
-        let pad = half_head - half_rot;
-        let cos_table = if pad > 0 {
-            let ones = Tensor::ones((max_pos, pad), DType::F32, device)?;
-            Tensor::cat(&[&cos_rot, &ones], D::Minus1)?.contiguous()?
-        } else {
-            cos_rot
-        };
-        let sin_table = if pad > 0 {
-            let zeros = Tensor::zeros((max_pos, pad), DType::F32, device)?;
-            Tensor::cat(&[&sin_rot, &zeros], D::Minus1)?.contiguous()?
-        } else {
-            sin_rot
-        };
+        let cos_table = freqs.cos()?.contiguous()?;
+        let sin_table = freqs.sin()?.contiguous()?;
 
         Ok(Self {
             cos_table,
@@ -98,24 +125,29 @@ impl MRotaryEmbedding {
 
 /// Apply rotary embeddings to a query/key tensor `[B, H, S, D]`.
 ///
-/// Only the first `rot_dim` components of each head are rotated. The remaining
-/// components are passed through unchanged. `cos`/`sin` tables have shape
-/// `[S, D/2]`; the trailing `(D - rot_dim) / 2` entries are padding
-/// (`cos=1, `sin=0`) so the rope op leaves those dimensions alone.
+/// Only the first `rot_dim` components of each head are rotated; the remaining
+/// `D - rot_dim` components are passed through unchanged. This mirrors HF's
+/// partial-rotary scheme (`q_rot = q[..., :rot_dim]`, `q_pass = q[..., rot_dim:]`).
+/// `cos`/`sin` tables have shape `[S, rot_dim/2]`.
+///
+/// `candle_nn::rotary_emb::rope` is the rotate-half (non-interleaved / GPT-NeoX)
+/// variant — it pairs component `i` with `i + rot_dim/2` *within the slice we
+/// hand it*, which matches HF's `rotate_half` over the rotary slice. We must
+/// slice first; rotating the full head would pair `i` with `i + head_dim/2`.
 pub fn apply_mrope(
     x: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
     rot_dim: usize,
 ) -> Result<Tensor> {
-    let (_b, _h, seq_len, head_dim) = x.dims4()?;
-    let device = x.device();
-    let dtype = x.dtype();
-
-    // cos/sin already have shape [S, head_dim/2] (padded by the embedding
-    // module). Just pass through to `candle_nn::rotary_emb::rope`.
-    let _ = (seq_len, dtype, rot_dim);
-    candle_nn::rotary_emb::rope(x, cos, sin)
+    let (_b, _h, _seq_len, head_dim) = x.dims4()?;
+    if rot_dim == head_dim {
+        return candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin);
+    }
+    let x_rot = x.narrow(D::Minus1, 0, rot_dim)?.contiguous()?;
+    let x_pass = x.narrow(D::Minus1, rot_dim, head_dim - rot_dim)?;
+    let x_rot = candle_nn::rotary_emb::rope(&x_rot, cos, sin)?;
+    Tensor::cat(&[&x_rot, &x_pass], D::Minus1)?.contiguous()
 }
 
 // ── Full-attention layer ────────────────────────────────────────────────
@@ -132,8 +164,8 @@ pub struct FullAttention {
     k_proj: candle_nn::Linear,
     v_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    q_norm: Qwen35RmsNorm,
+    k_norm: Qwen35RmsNorm,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -156,8 +188,8 @@ impl FullAttention {
         let v_proj = linear_no_bias(cfg.hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"))?;
         let o_proj = linear_no_bias(num_heads * head_dim, cfg.hidden_size, vb.pp("o_proj"))?;
 
-        let q_norm = rms_norm(head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?;
-        let k_norm = rms_norm(head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?;
+        let q_norm = Qwen35RmsNorm::load(head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?;
+        let k_norm = Qwen35RmsNorm::load(head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?;
 
         Ok(Self {
             q_proj,
@@ -200,11 +232,22 @@ impl FullAttention {
         let v = v_proj_out;
 
         let (q, gate) = if self.has_output_gate {
-            let half = self.num_heads * self.head_dim;
-            // HF chunks `[Q | gate]` on the head_dim axis. First half = Q,
-            // second half = gate. Confirmed against the HF source.
-            let q = q_out.narrow(D::Minus1, 0, half)?;
-            let gate = q_out.narrow(D::Minus1, half, half)?;
+            // HF splits `[query | gate]` PER HEAD, not on the flat axis:
+            //   q_proj(x).view(B, S, num_heads, head_dim*2).chunk(2, dim=-1)
+            // so for each head the first `head_dim` is the query and the next
+            // `head_dim` is the gate. Splitting the flat 4096 in half instead
+            // interleaves heads' query/gate and scrambles q_norm. Re-flatten
+            // both back to `[B, S, num_heads*head_dim]` in head order.
+            let flat = self.num_heads * self.head_dim;
+            let qh = q_out.reshape((b_sz, seq_len, self.num_heads, self.head_dim * 2))?;
+            let q = qh
+                .narrow(D::Minus1, 0, self.head_dim)?
+                .contiguous()?
+                .reshape((b_sz, seq_len, flat))?;
+            let gate = qh
+                .narrow(D::Minus1, self.head_dim, self.head_dim)?
+                .contiguous()?
+                .reshape((b_sz, seq_len, flat))?;
             (q, Some(gate))
         } else {
             (q_out, None)
@@ -383,8 +426,8 @@ impl Mlp {
 /// (a `&mut Option<GdnLayerCache>`); the model holds the canonical cache array.
 pub struct DecoderLayer {
     layer_impl: LayerImpl,
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
+    input_layernorm: Qwen35RmsNorm,
+    post_attention_layernorm: Qwen35RmsNorm,
     mlp: Mlp,
     /// Pre-computed dims for the GDN path. `None` for full-attention blocks.
     gdn_dims: Option<GdnDims>,
@@ -401,7 +444,7 @@ impl DecoderLayer {
         layer_type: LayerType,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let input_layernorm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let input_layernorm = Qwen35RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
         if std::env::var("CRANE_DEBUG_NORM").is_ok() {
             if let Ok(w) = input_layernorm.weight().to_dtype(DType::F32) {
                 if let Ok(v) = w.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
@@ -412,7 +455,7 @@ impl DecoderLayer {
                 }
             }
         }
-        let post_attention_layernorm = rms_norm(
+        let post_attention_layernorm = Qwen35RmsNorm::load(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),

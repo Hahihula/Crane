@@ -66,11 +66,15 @@ pub fn gated_delta_rule_recurrence(
 ) -> Result<Tensor> {
     let dtype = q.dtype();
 
-    // NOTE: mistral.rs's reference applies a `1/sqrt(K)` scale to Q here. We
-    // deliberately omit it — the published GDN recurrence has no such scale,
-    // and matching HF's reference (which is the ground truth) confirms this is
-    // a mistral.rs quirk we should not propagate.
-    let q = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+    // HF's gated delta rule scales Q by `1/sqrt(head_k_dim)` before the
+    // recurrence (`scale = 1 / query.shape[-1]**0.5` in both
+    // `torch_chunk_gated_delta_rule` and `torch_recurrent_gated_delta_rule`).
+    // Omitting it leaves the recurrence output a factor of `sqrt(K)` too large
+    // (verified: cos=1.0 vs HF but ~11.3x = sqrt(128) magnitude), which is NOT
+    // washed out downstream because the gated RMSNorm's eps and the silu gate
+    // make it observable. mistral.rs applies the same scale.
+    let scale = 1.0 / (q.dim(D::Minus1)? as f64).sqrt();
+    let q = (q.affine(scale, 0.0)?).transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
     let k = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
     let v = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
     let g = g.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
