@@ -49,13 +49,16 @@ pub enum KvCacheKind {
     Fp,
     /// Per-token symmetric int8 (~2x smaller).
     Int8,
+    /// Per-token symmetric int4, nibble-packed (~4x smaller).
+    Int4,
 }
 
 impl KvCacheKind {
-    /// Read from `CRANE_KV_QUANT` (`int8` → Int8, anything else → Fp).
+    /// Read from `CRANE_KV_QUANT` (`int8` → Int8, `int4` → Int4, else Fp).
     pub fn from_env() -> Self {
         match std::env::var("CRANE_KV_QUANT").as_deref() {
             Ok("int8") => Self::Int8,
+            Ok("int4") => Self::Int4,
             _ => Self::Fp,
         }
     }
@@ -66,35 +69,36 @@ impl KvCacheKind {
 #[derive(Debug)]
 pub enum KvCache {
     Fp(FpKvCache),
-    Int8(Int8KvCache),
+    Quant(QuantKvCache),
 }
 
 impl KvCache {
     pub fn new(kind: KvCacheKind) -> Self {
         match kind {
             KvCacheKind::Fp => Self::Fp(FpKvCache::new()),
-            KvCacheKind::Int8 => Self::Int8(Int8KvCache::new()),
+            KvCacheKind::Int8 => Self::Quant(QuantKvCache::new(8)),
+            KvCacheKind::Int4 => Self::Quant(QuantKvCache::new(4)),
         }
     }
 
     pub fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         match self {
             Self::Fp(c) => c.append(k, v),
-            Self::Int8(c) => c.append(k, v),
+            Self::Quant(c) => c.append(k, v),
         }
     }
 
     pub fn reset(&mut self) {
         match self {
             Self::Fp(c) => c.reset(),
-            Self::Int8(c) => c.reset(),
+            Self::Quant(c) => c.reset(),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
             Self::Fp(c) => c.len(),
-            Self::Int8(c) => c.len(),
+            Self::Quant(c) => c.len(),
         }
     }
 
@@ -183,18 +187,22 @@ impl KvCacheBackend for FpKvCache {
     }
 }
 
-// ── Int8 backend (per-token symmetric) ────────────────────────────────────
+// ── Quantized backend (per-token symmetric int8 / int4) ───────────────────
 
-/// Per-token symmetric int8 K/V cache. Each `[B,H,S,head_dim]` slice is stored
-/// as u8 codes plus an f32 per-token scale (`amax / 127`); on read the filled
-/// span is dequantized to the compute dtype, so attention is unchanged. ~2x
-/// smaller than f16 (the f32 scale adds ~1.5% at head_dim=256).
+/// Per-token symmetric quantized K/V cache, `bits` ∈ {4, 8}.
 ///
-/// Note: read dequantizes the whole filled cache each step — this trades some
-/// decode bandwidth for the memory win that lets long context fit at all. A
-/// fused dequantize-in-attention kernel is the perf follow-up.
-#[derive(Debug, Default)]
-pub struct Int8KvCache {
+/// Each `[B,H,S,head_dim]` slice is quantized per token (one f32 scale =
+/// `amax / (2^(bits-1)-1)` per position+head) and stored as u8 codes:
+/// - 8-bit: one code per element (`[B,H,S,head_dim]`), ~2x smaller than f16.
+/// - 4-bit: two nibbles packed per byte (`[B,H,S,head_dim/2]`), ~4x smaller.
+///
+/// On read the filled span is dequantized to the compute dtype, so attention is
+/// unchanged. Read dequantizes the whole filled cache each step — trading
+/// decode bandwidth for the memory win that lets long context fit; a fused
+/// dequantize-in-attention kernel is the perf follow-up.
+#[derive(Debug)]
+pub struct QuantKvCache {
+    bits: u32,
     k_codes: Option<Tensor>,
     k_scale: Option<Tensor>,
     v_codes: Option<Tensor>,
@@ -204,41 +212,83 @@ pub struct Int8KvCache {
     dtype: Option<DType>,
 }
 
-impl Int8KvCache {
-    pub fn new() -> Self {
-        Self::default()
+impl QuantKvCache {
+    pub fn new(bits: u32) -> Self {
+        assert!(bits == 4 || bits == 8, "QuantKvCache supports 4 or 8 bits");
+        Self {
+            bits,
+            k_codes: None,
+            k_scale: None,
+            v_codes: None,
+            v_scale: None,
+            seq_len: 0,
+            dtype: None,
+        }
     }
 }
 
-/// Quantize `[B,H,S,D]` per-token (symmetric): returns `(u8 codes, f32 scale)`.
-/// `scale = amax/127 (+eps)` guarantees `|x/scale| <= 127`, so no clamp needed;
-/// codes are stored as `q + 128` in `[1,255]`.
-fn quantize_per_token(x: &Tensor) -> Result<(Tensor, Tensor)> {
+/// Quantize `[B,H,S,D]` per-token (symmetric) to unsigned codes in
+/// `[1, 2^bits-1]` plus an f32 per-token scale. `scale = amax/qmax (+eps)`
+/// guarantees `|x/scale| <= qmax`, so no clamp is needed. For 4-bit the codes
+/// are nibble-packed into `[B,H,S,D/2]` (requires even D).
+fn quantize_per_token(x: &Tensor, bits: u32) -> Result<(Tensor, Tensor)> {
+    let qmax = ((1u32 << (bits - 1)) - 1) as f64; // 127 or 7
+    let offset = (1u32 << (bits - 1)) as f64; // 128 or 8
     let x = x.to_dtype(DType::F32)?;
     let amax = x.abs()?.max_keepdim(D::Minus1)?; // [B,H,S,1]
-    let scale = amax.affine(1.0 / 127.0, 1e-8)?; // amax/127 + eps
-    let q = x.broadcast_div(&scale)?.round()?;
-    let codes = q.affine(1.0, 128.0)?.to_dtype(DType::U8)?; // q + 128
+    let scale = amax.affine(1.0 / qmax, 1e-8)?;
+    let codes = x.broadcast_div(&scale)?.round()?.affine(1.0, offset)?; // q + offset, in [1, 2*qmax+1]
+    let codes = if bits == 8 {
+        codes.to_dtype(DType::U8)?
+    } else {
+        pack_nibbles(&codes)? // f32 in [1,15] -> u8 [B,H,S,D/2]
+    };
     Ok((codes, scale))
 }
 
 /// Inverse of [`quantize_per_token`] into `dtype`.
-fn dequantize_per_token(codes: &Tensor, scale: &Tensor, dtype: DType) -> Result<Tensor> {
-    codes
-        .to_dtype(DType::F32)?
-        .affine(1.0, -128.0)? // codes - 128
+fn dequantize_per_token(codes: &Tensor, scale: &Tensor, bits: u32, dtype: DType) -> Result<Tensor> {
+    let offset = (1u32 << (bits - 1)) as f64;
+    let q = if bits == 8 {
+        codes.to_dtype(DType::F32)?
+    } else {
+        unpack_nibbles(codes)? // u8 [.., D/2] -> f32 [.., D] in [1,15]
+    };
+    q.affine(1.0, -offset)? // codes - offset
         .broadcast_mul(scale)?
         .to_dtype(dtype)
 }
 
-impl KvCacheBackend for Int8KvCache {
+/// Pack an even-length last dim of f32 nibbles `[1,15]` into u8 `[.., D/2]`:
+/// `byte = lo + hi*16` for adjacent (even, odd) pairs.
+fn pack_nibbles(codes: &Tensor) -> Result<Tensor> {
+    let dims = codes.dims4()?;
+    let (b, h, s, d) = dims;
+    debug_assert!(d % 2 == 0, "int4 packing needs even head_dim");
+    let pairs = codes.reshape((b, h, s, d / 2, 2))?;
+    let lo = pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
+    let hi = pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?;
+    (lo + hi.affine(16.0, 0.0)?)?.to_dtype(DType::U8)
+}
+
+/// Inverse of [`pack_nibbles`]: u8 `[.., D/2]` -> f32 `[.., D]` of nibbles.
+fn unpack_nibbles(codes: &Tensor) -> Result<Tensor> {
+    let (b, h, s, d2) = codes.dims4()?;
+    let byte = codes.to_dtype(DType::F32)?;
+    let hi = byte.affine(1.0 / 16.0, 0.0)?.floor()?;
+    let lo = (byte - hi.affine(16.0, 0.0)?)?;
+    // Interleave back: stack on a new last axis -> [.., D/2, 2] -> [.., D].
+    Tensor::stack(&[&lo, &hi], D::Minus1)?.reshape((b, h, s, d2 * 2))
+}
+
+impl KvCacheBackend for QuantKvCache {
     fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         let dtype = *self.dtype.get_or_insert(k.dtype());
         let add = k.dim(2)?;
         let filled = self.seq_len;
 
-        let (kc, ks) = quantize_per_token(k)?;
-        let (vc, vs) = quantize_per_token(v)?;
+        let (kc, ks) = quantize_per_token(k, self.bits)?;
+        let (vc, vs) = quantize_per_token(v, self.bits)?;
 
         let kc_full = grow_append(&mut self.k_codes, &kc, filled)?;
         let ks_full = grow_append(&mut self.k_scale, &ks, filled)?;
@@ -246,8 +296,8 @@ impl KvCacheBackend for Int8KvCache {
         let vs_full = grow_append(&mut self.v_scale, &vs, filled)?;
         self.seq_len += add;
 
-        let k_full = dequantize_per_token(&kc_full, &ks_full, dtype)?;
-        let v_full = dequantize_per_token(&vc_full, &vs_full, dtype)?;
+        let k_full = dequantize_per_token(&kc_full, &ks_full, self.bits, dtype)?;
+        let v_full = dequantize_per_token(&vc_full, &vs_full, self.bits, dtype)?;
         Ok((k_full, v_full))
     }
 
