@@ -146,6 +146,16 @@ impl Qwen3_5TextModel {
         self.layers.len()
     }
 
+    /// Total bytes held by the full-attention K/V caches across all layers
+    /// (incl. headroom + quant scales). The context-scaling memory term.
+    pub fn attn_cache_bytes(&self) -> usize {
+        self.attn_caches
+            .iter()
+            .flatten()
+            .map(|c| c.byte_size())
+            .sum()
+    }
+
     pub fn device(&self) -> &Device {
         &self.device
     }
@@ -438,6 +448,11 @@ impl Model {
 
     pub fn num_layers(&self) -> usize {
         self.inner.num_layers()
+    }
+
+    /// Total bytes held by the full-attention K/V caches (context-scaling term).
+    pub fn attn_cache_bytes(&self) -> usize {
+        self.inner.attn_cache_bytes()
     }
 
     /// Warm up the model with a small forward pass.

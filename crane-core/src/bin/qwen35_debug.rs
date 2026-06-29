@@ -15,6 +15,66 @@ use anyhow::{Context, Result};
 use candle_core::Device;
 use crane_core::models::qwen3_5::Model;
 
+/// Used GPU memory in MiB (whole device), via nvidia-smi. 0 if unavailable.
+fn gpu_used_mib() -> u64 {
+    std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.lines().next().and_then(|l| l.trim().parse::<u64>().ok()))
+        .unwrap_or(0)
+}
+
+fn argmax(logits: &candle_core::Tensor) -> Result<u32> {
+    let v = logits.squeeze(0)?.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
+    let mut best = 0usize;
+    for (i, &x) in v.iter().enumerate() {
+        if x > v[best] {
+            best = i;
+        }
+    }
+    Ok(best as u32)
+}
+
+/// Decode `total` tokens from `ids`, checkpointing KV-cache bytes + GPU memory
+/// against context length, then print the tail for a coherence eyeball.
+fn run_measure(model: &mut Model, ids: &[u32], total: usize) -> Result<()> {
+    model.clear_kv_cache();
+    let mut tokens = ids.to_vec();
+    println!("[measure] baseline GPU used (weights loaded): {} MiB", gpu_used_mib());
+    println!("[measure] ctx\tKV_MB\tGPU_MiB\tKV_B/tok");
+
+    let logits = model.forward_step(&tokens, 0)?;
+    tokens.push(argmax(&logits)?);
+
+    let checkpoint = |model: &Model, ctx: usize| {
+        let kv = model.attn_cache_bytes();
+        println!(
+            "[measure] {ctx}\t{:.1}\t{}\t{}",
+            kv as f64 / 1e6,
+            gpu_used_mib(),
+            kv / ctx.max(1),
+        );
+    };
+    checkpoint(model, tokens.len());
+
+    for step in 1..total {
+        let start = tokens.len() - 1;
+        let logits = model.forward_step(&tokens[start..], start)?;
+        tokens.push(argmax(&logits)?);
+        if (step + 1) % 1024 == 0 {
+            checkpoint(model, tokens.len());
+        }
+    }
+    checkpoint(model, tokens.len());
+
+    let tail = &tokens[tokens.len().saturating_sub(80)..];
+    let text = model.tokenizer.tokenizer.decode(tail, true).unwrap_or_default();
+    println!("[measure] last 80 tokens:\n{text}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut model_path = String::new();
@@ -112,6 +172,13 @@ fn main() -> Result<()> {
         Some(r) => model.prepare_inputs(&r).context("tokenize prompt")?,
         None => ids,
     };
+
+    // --measure N: incrementally decode N tokens (building the K/V cache) and
+    // checkpoint exact KV-cache bytes + real GPU memory vs context length.
+    let measure_n = arg_after("--measure").and_then(|s| s.parse::<usize>().ok());
+    if let Some(total) = measure_n {
+        return run_measure(&mut model, &ids, total);
+    }
 
     if let Some(max_new) = gen_n {
         use crane_core::generation::based::ModelForCausalLM;

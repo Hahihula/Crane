@@ -40,6 +40,14 @@ pub trait KvCacheBackend {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Bytes currently allocated for this layer's K/V (incl. headroom + scales).
+    fn byte_size(&self) -> usize;
+}
+
+fn tensor_bytes(t: &Option<Tensor>) -> usize {
+    t.as_ref()
+        .map(|x| x.elem_count() * x.dtype().size_in_bytes())
+        .unwrap_or(0)
 }
 
 /// Which cache representation to use. Selected once per model load.
@@ -104,6 +112,13 @@ impl KvCache {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn byte_size(&self) -> usize {
+        match self {
+            Self::Fp(c) => c.byte_size(),
+            Self::Quant(c) => c.byte_size(),
+        }
     }
 }
 
@@ -184,6 +199,10 @@ impl KvCacheBackend for FpKvCache {
 
     fn len(&self) -> usize {
         self.seq_len
+    }
+
+    fn byte_size(&self) -> usize {
+        tensor_bytes(&self.k) + tensor_bytes(&self.v)
     }
 }
 
@@ -312,5 +331,12 @@ impl KvCacheBackend for QuantKvCache {
 
     fn len(&self) -> usize {
         self.seq_len
+    }
+
+    fn byte_size(&self) -> usize {
+        tensor_bytes(&self.k_codes)
+            + tensor_bytes(&self.k_scale)
+            + tensor_bytes(&self.v_codes)
+            + tensor_bytes(&self.v_scale)
     }
 }
