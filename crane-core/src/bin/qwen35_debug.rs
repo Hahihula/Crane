@@ -40,9 +40,10 @@ fn main() -> Result<()> {
         }
         i += 2;
     }
-    if model_path.is_empty() || ids_csv.is_empty() {
-        eprintln!("Usage: qwen35_debug --model-path <dir> --ids <csv> [--topk N] [--layer-stats]");
-        anyhow::bail!("--model-path and --ids required");
+    let has_prompt = std::env::args().any(|a| a == "--prompt" || a == "--messages");
+    if model_path.is_empty() || (ids_csv.is_empty() && !has_prompt) {
+        eprintln!("Usage: qwen35_debug --model-path <dir> (--ids <csv> | --prompt <text>) [--topk N] [--gen N] [--layer-stats]");
+        anyhow::bail!("--model-path and one of --ids/--prompt required");
     }
 
     let ids: Vec<u32> = ids_csv
@@ -51,7 +52,46 @@ fn main() -> Result<()> {
         .map(|s| s.trim().parse::<u32>())
         .collect::<Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("parse ids: {e}"))?;
-    println!("[crane] input_ids: {ids:?}");
+
+    let arg_after = |name: &str| {
+        std::env::args()
+            .position(|a| a == name)
+            .and_then(|i| std::env::args().nth(i + 1))
+    };
+    let gen_n = arg_after("--gen").and_then(|s| s.parse::<usize>().ok());
+
+    // Chat-template rendering via Crane's AutoTokenizer (the SDK path):
+    //   --prompt "text"           single user message
+    //   --messages '<json array>' full conversation
+    //   --tools '<json array>'    optional OpenAI-style tool specs
+    //   --render-only             print the rendered prompt and exit (no model)
+    let prompt = arg_after("--prompt");
+    let messages_json = arg_after("--messages");
+    let tools_json = arg_after("--tools");
+    let render_only = std::env::args().any(|a| a == "--render-only");
+
+    let rendered = if prompt.is_some() || messages_json.is_some() {
+        let tok = crane_core::autotokenizer::AutoTokenizer::from_pretrained(&model_path, None)
+            .map_err(|e| anyhow::anyhow!("autotokenizer: {e}"))?;
+        let messages: serde_json::Value = match messages_json {
+            Some(j) => serde_json::from_str(&j).context("parse --messages json")?,
+            None => serde_json::json!([{ "role": "user", "content": prompt.unwrap() }]),
+        };
+        let tools: Option<serde_json::Value> = match tools_json {
+            Some(j) => Some(serde_json::from_str(&j).context("parse --tools json")?),
+            None => None,
+        };
+        let r = tok
+            .apply_chat_template_with_tools(&messages, tools, true)
+            .map_err(|e| anyhow::anyhow!("apply_chat_template: {e}"))?;
+        println!("=== rendered prompt ===\n{r}\n=== end rendered ===");
+        Some(r)
+    } else {
+        None
+    };
+    if render_only {
+        return Ok(());
+    }
 
     let device = match device_arg.as_str() {
         "cpu" => Device::Cpu,
@@ -68,10 +108,10 @@ fn main() -> Result<()> {
     println!("[crane] device={device_arg} dtype={dtype_arg}");
     let mut model = Model::new(&model_path, &device, &dtype).context("loading model")?;
 
-    let gen_n = std::env::args()
-        .position(|a| a == "--gen")
-        .and_then(|i| std::env::args().nth(i + 1))
-        .and_then(|s| s.parse::<usize>().ok());
+    let ids = match rendered {
+        Some(r) => model.prepare_inputs(&r).context("tokenize prompt")?,
+        None => ids,
+    };
 
     if let Some(max_new) = gen_n {
         use crane_core::generation::based::ModelForCausalLM;
