@@ -41,6 +41,8 @@
 mod backend;
 mod cache;
 mod config;
+#[cfg(feature = "cuda")]
+mod cuda_backend;
 mod layer;
 mod norm;
 mod projection;

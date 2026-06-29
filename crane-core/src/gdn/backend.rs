@@ -178,8 +178,72 @@ pub fn apply_recurrence(
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
+    // Fused single-launch CUDA kernel (set CRANE_GDN_PORTABLE=1 to force the
+    // portable op-by-op path instead, e.g. to cross-check numerics).
+    #[cfg(feature = "cuda")]
+    if q.device().is_cuda() && std::env::var("CRANE_GDN_PORTABLE").is_err() {
+        return cuda_recurrence(q, k, v, g, beta, dims, batch_size, seq_len, cache, dtype);
+    }
+
     // Device-portable reference (runs on CPU/CUDA/Metal).
     gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)
+}
+
+/// Prepare tensors and launch the fused CUDA recurrence kernel.
+///
+/// Lays inputs out as the kernel expects (`[BH, S, *]`, contiguous f32),
+/// applies the `1/sqrt(K)` query scale here (the kernel takes plain q), then
+/// reshapes the result back to the portable path's `[B, S, num_v_heads, V]`.
+#[cfg(feature = "cuda")]
+fn cuda_recurrence(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    g: &Tensor,
+    beta: &Tensor,
+    dims: &GdnDims,
+    batch_size: usize,
+    seq_len: usize,
+    cache: &mut GdnLayerCache,
+    dtype: DType,
+) -> Result<Tensor> {
+    let (hv, kd, vd) = (dims.num_v_heads, dims.head_k_dim, dims.head_v_dim);
+    let bh = batch_size * hv;
+    let scale = 1.0 / (kd as f64).sqrt();
+
+    // [B, S, Hv, *] -> [B, Hv, S, *] -> [BH, S, *], contiguous f32.
+    let prep3 = |t: &Tensor| -> Result<Tensor> {
+        t.to_dtype(DType::F32)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((bh, seq_len, ()))
+    };
+    let prep2 = |t: &Tensor| -> Result<Tensor> {
+        t.to_dtype(DType::F32)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((bh, seq_len))
+    };
+    let q3 = prep3(q)?.affine(scale, 0.0)?;
+    let k3 = prep3(k)?;
+    let v3 = prep3(v)?;
+    let g2 = prep2(g)?;
+    let beta2 = prep2(beta)?;
+    let state3 = cache
+        .recurrent_state
+        .to_dtype(DType::F32)?
+        .reshape((bh, kd, vd))?
+        .contiguous()?;
+
+    let (y, state_out) =
+        super::cuda_backend::gdn_recurrence_cuda(&q3, &k3, &v3, &g2, &beta2, &state3)?;
+
+    cache.recurrent_state = state_out.reshape((batch_size, hv, kd, vd))?;
+    // [BH, S, V] -> [B, Hv, S, V] -> [B, S, Hv, V], back to model dtype.
+    y.reshape((batch_size, hv, seq_len, vd))?
+        .transpose(1, 2)?
+        .contiguous()?
+        .to_dtype(dtype)
 }
 
 /// Causal Conv1D over the QKV channels. Dispatches to a kernel-based
