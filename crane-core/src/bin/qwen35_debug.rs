@@ -67,7 +67,30 @@ fn main() -> Result<()> {
     };
     println!("[crane] device={device_arg} dtype={dtype_arg}");
     let mut model = Model::new(&model_path, &device, &dtype).context("loading model")?;
-    if layer_stats {
+
+    let gen_n = std::env::args()
+        .position(|a| a == "--gen")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .and_then(|s| s.parse::<usize>().ok());
+
+    if let Some(max_new) = gen_n {
+        use crane_core::generation::based::ModelForCausalLM;
+        use crane_core::generation::GenerationConfig;
+        let cfg = GenerationConfig {
+            max_new_tokens: max_new,
+            temperature: None, // greedy (argmax)
+            report_speed: true,
+            ..Default::default()
+        };
+        let out = model.generate(&ids, &cfg, None).context("generate")?;
+        let new_ids = &out[ids.len()..];
+        let text = model
+            .tokenizer
+            .tokenizer
+            .decode(new_ids, true)
+            .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+        println!("[crane] generated {} tokens:\n{text}", new_ids.len());
+    } else if layer_stats {
         model.debug_layer_stats(&ids)?;
     } else {
         model.debug_topk(&ids, topk)?;

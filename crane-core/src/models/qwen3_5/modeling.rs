@@ -621,16 +621,6 @@ impl DecoderLayer {
     }
 }
 
-/// Choose between a dedicated `lm_head` weight and the tied `embed_tokens`
-/// weight, based on `tie_word_embeddings`.
-pub fn resolve_tied(tie: bool, embed_weight: Tensor, lm_head_weight: Option<Tensor>) -> Tensor {
-    match lm_head_weight {
-        Some(w) => w,
-        None if tie => embed_weight,
-        None => embed_weight,
-    }
-}
-
 // Touch unused imports so the file type-checks even before all paths are wired.
 #[allow(dead_code)]
 fn _touch_unused(_: DType, _: Device) {}

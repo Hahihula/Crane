@@ -11,7 +11,7 @@ use tokenizers::Tokenizer;
 
 use super::config::{load_config, Config, TextConfig};
 use super::kv_cache::KvCache;
-use super::modeling::{resolve_tied, DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm};
+use super::modeling::{DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm};
 use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
 use crate::utils::token_output_stream::TokenOutputStream;
@@ -80,13 +80,29 @@ impl Qwen3_5TextModel {
             }
         }
 
+        // Resolve the output projection. With `tie_word_embeddings: true`
+        // (0.8B/4B) it's the embedding table; untied models (e.g. Ornith-9B)
+        // ship a dedicated `lm_head.weight` of shape `[vocab, hidden]`. That
+        // tensor lives at the checkpoint ROOT, not under the `language_model`
+        // prefix, so probe `vb` first and fall back to `vb_lm`.
         let embed_weight = embed_tokens.embeddings().clone();
-        let lm_head_weight = vb_lm.get(text_cfg.vocab_size, "lm_head").ok();
-        // Store `lm_head` already transposed (`[H, V]`) so the per-step matmul
-        // doesn't have to. `resolve_tied` returns either the dedicated lm_head
-        // weight or — when `tie_word_embeddings: true` — the embed table.
-        let lm_head_raw = resolve_tied(cfg.tie_word_embeddings, embed_weight, lm_head_weight);
-        let lm_head = lm_head_raw.t()?.contiguous()?.clone();
+        let lm_head_raw = if cfg.tie_word_embeddings {
+            embed_weight
+        } else {
+            let shape = (text_cfg.vocab_size, text_cfg.hidden_size);
+            vb.get(shape, "lm_head.weight")
+                .or_else(|_| vb_lm.get(shape, "lm_head.weight"))
+                .or_else(|_| {
+                    eprintln!(
+                        "[qwen3_5] tie_word_embeddings=false but no lm_head.weight found; \
+                         falling back to tied embeddings"
+                    );
+                    Ok::<_, candle_core::Error>(embed_weight)
+                })?
+        };
+        // Store `lm_head` already transposed (`[hidden, vocab]`) so the per-step
+        // matmul doesn't have to.
+        let lm_head = lm_head_raw.t()?.contiguous()?;
 
         let rotary = MRotaryEmbedding::new(&text_cfg, device)?;
 
@@ -231,6 +247,35 @@ fn build_causal_mask(
     Ok(full.narrow(0, 0, seq_q)?.unsqueeze(0)?.unsqueeze(0)?)
 }
 
+/// Read EOS token id(s) from `generation_config.json` (preferred) then
+/// `config.json`. The field may be a single integer or a list; returns an empty
+/// vec if absent.
+fn read_eos_token_ids(model_path: &str) -> Vec<u32> {
+    fn from_value(v: &serde_json::Value) -> Vec<u32> {
+        match v {
+            serde_json::Value::Number(n) => {
+                n.as_u64().map(|x| vec![x as u32]).unwrap_or_default()
+            }
+            serde_json::Value::Array(a) => {
+                a.iter().filter_map(|e| e.as_u64().map(|x| x as u32)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+    for fname in ["generation_config.json", "config.json"] {
+        let path = std::path::Path::new(model_path).join(fname);
+        let Ok(data) = std::fs::read(&path) else { continue };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else { continue };
+        if let Some(eos) = json.get("eos_token_id") {
+            let ids = from_value(eos);
+            if !ids.is_empty() {
+                return ids;
+            }
+        }
+    }
+    Vec::new()
+}
+
 fn print_layer_stats(name: &str, t: &candle_core::Tensor) -> anyhow::Result<()> {
     let v = t
         .to_dtype(candle_core::DType::F32)?
@@ -300,6 +345,10 @@ pub struct Model {
     pub tokenizer: TokenOutputStream,
     pub device: Device,
     pub dtype: DType,
+    /// Stop tokens read from `generation_config.json` / `config.json` (Qwen3.5
+    /// and Ornith both use multi-id EOS, e.g. `[248044, 248046]`). Used when the
+    /// caller's `GenerationConfig` doesn't pin its own `eos_token_id`.
+    eos_token_ids: Vec<u32>,
     inner: Qwen3_5TextModel,
 }
 
@@ -343,12 +392,15 @@ impl Model {
         let config_path = std::path::Path::new(model_path).join("config.json");
         let cfg = load_config(config_path.to_str().context("non-UTF8 model path")?)?;
 
+        let eos_token_ids = read_eos_token_ids(model_path);
+
         let inner = Qwen3_5TextModel::new(&cfg, vb, device, *dtype)?;
 
         Ok(Self {
             tokenizer: TokenOutputStream::new(tokenizer),
             device: device.clone(),
             dtype: *dtype,
+            eos_token_ids,
             inner,
         })
     }
@@ -422,11 +474,20 @@ impl ModelForCausalLM for Model {
         std::io::stdout().flush()?;
 
         let mut generated_tokens = 0usize;
-        // Qwen 3.5 / Qwen 3 EOS tokens: 151645 () and 151643 ().
-        let eos_token: Option<u32> = config
-            .eos_token_id
-            .or_else(|| self.tokenizer.get_token(""))
-            .or_else(|| self.tokenizer.get_token(""));
+        // Stop tokens: an explicit `eos_token_id` on the request wins; otherwise
+        // use the model's configured EOS set (Qwen3.5/Ornith use multiple, e.g.
+        // [248044, 248046]); last-resort, look up `<|im_end|>` in the tokenizer.
+        let mut stop_ids: Vec<u32> = match config.eos_token_id {
+            Some(e) => vec![e],
+            None if !self.eos_token_ids.is_empty() => self.eos_token_ids.clone(),
+            None => self
+                .tokenizer
+                .get_token("<|im_end|>")
+                .into_iter()
+                .collect(),
+        };
+        stop_ids.sort_unstable();
+        stop_ids.dedup();
         let mut streamer_finalized = false;
 
         // Incremental decode now works: GDN layers carry recurrent state and
@@ -463,7 +524,7 @@ impl ModelForCausalLM for Model {
             tokens.push(next_token);
             generated_tokens += 1;
 
-            if eos_token == Some(next_token) {
+            if stop_ids.binary_search(&next_token).is_ok() {
                 if let Some(ref mut s) = streamer {
                     s.finalize()?;
                 }
