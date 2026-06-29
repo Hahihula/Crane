@@ -10,7 +10,7 @@ use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
 use super::config::{load_config, Config, TextConfig};
-use super::kv_cache::KvCache;
+use super::kv_cache::{KvCache, KvCacheKind};
 use super::modeling::{DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm};
 use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
@@ -108,6 +108,8 @@ impl Qwen3_5TextModel {
 
         // Pre-allocate per-layer caches: GDN recurrent state for linear blocks,
         // K/V cache for full-attention blocks (mutually exclusive per layer).
+        // The K/V representation (fp / int8 / …) is chosen once here.
+        let kv_kind = KvCacheKind::from_env();
         let mut gdn_caches = Vec::with_capacity(layers.len());
         let mut attn_caches = Vec::with_capacity(layers.len());
         for layer in &layers {
@@ -118,7 +120,7 @@ impl Qwen3_5TextModel {
                 attn_caches.push(None);
             } else {
                 gdn_caches.push(None);
-                attn_caches.push(Some(KvCache::new()));
+                attn_caches.push(Some(KvCache::new(kv_kind)));
             }
         }
 
