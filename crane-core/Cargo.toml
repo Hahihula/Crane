@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# CUDA-only micro-benchmark for the fused GDN recurrence kernel.
+[[bin]]
+name = "gdn_bench"
+required-features = ["cuda"]
+
 [dependencies]
 anyhow = "1.0.97"
 

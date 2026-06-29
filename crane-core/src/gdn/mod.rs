@@ -50,6 +50,8 @@ mod projection;
 pub use backend::{
     causal_conv1d, gated_delta_rule_recurrence, l2_norm, softplus, apply_recurrence,
 };
+#[cfg(feature = "cuda")]
+pub use cuda_backend::gdn_recurrence_cuda;
 pub use cache::GdnLayerCache;
 pub use config::{defaults, GdnConfig, GdnDims};
 pub use layer::GatedDeltaNet;
