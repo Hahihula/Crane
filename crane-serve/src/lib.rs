@@ -23,7 +23,7 @@ use engine::model_factory::{ModelFormat, ModelType};
 use engine::{EngineHandle, InferenceEngine, MemoryConfig};
 use handlers::asr::AsrTranscribeRequest;
 use handlers::tts::TtsGenerateRequest;
-use handlers::vlm::{Gemma4VlmRequest, VlmRequest};
+use handlers::vlm::{Gemma4VlmRequest, Qwen3_5VlmRequest, VlmRequest};
 use openai_api::ErrorResponse;
 
 #[derive(Parser, Debug, Clone)]
@@ -71,6 +71,7 @@ pub struct AppState {
     pub server_start_time: u64,
     pub vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>>,
     pub gemma4_vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>>,
+    pub qwen3_5_vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>>,
     pub tts_tx: Option<tokio::sync::mpsc::UnboundedSender<TtsGenerateRequest>>,
     /// Channel to the ASR engine thread; `None` unless an ASR model is loaded.
     pub asr_tx: Option<tokio::sync::mpsc::UnboundedSender<AsrTranscribeRequest>>,
@@ -336,6 +337,7 @@ pub async fn run(args: Args) -> Result<()> {
         chat_template,
         vlm_tx_opt,
         gemma4_vlm_tx_opt,
+        qwen3_5_vlm_tx_opt,
         tts_tx_opt,
         asr_tx_opt,
     ): (
@@ -345,6 +347,7 @@ pub async fn run(args: Args) -> Result<()> {
         Box<dyn ChatTemplateProcessor>,
         Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>>,
+        Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<TtsGenerateRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<AsrTranscribeRequest>>,
     ) = if is_tts {
@@ -393,7 +396,7 @@ pub async fn run(args: Args) -> Result<()> {
             });
         let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
         let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, Some(tts_tx), None)
+        (None, tokenizer, vec![eos_id], chat_template, None, None, None, Some(tts_tx), None)
     } else if is_asr {
         info!("Loading ASR model ({:?}) from: {}", resolved_type, args.model_path);
         let model_path_clone = args.model_path.clone();
@@ -440,7 +443,7 @@ pub async fn run(args: Args) -> Result<()> {
             });
         let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
         let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, None, Some(asr_tx))
+        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, Some(asr_tx))
     } else if is_vlm {
         let use_cpu = args.cpu || {
             #[cfg(feature = "cuda")]
@@ -461,7 +464,44 @@ pub async fn run(args: Args) -> Result<()> {
         let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
         let mut vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>> = None;
         let mut gemma4_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>> = None;
-        if resolved_type == engine::model_factory::ModelType::Gemma4VL {
+        let mut qwen3_5_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>> = None;
+        if resolved_type == engine::model_factory::ModelType::Qwen3_5VL {
+            info!("Loading Qwen 3.5 VL model from: {}", args.model_path);
+            let model_path_clone = args.model_path.clone();
+            let device_clone = device.clone();
+            let dtype_clone = dtype;
+            let (q35vlm_tx, mut q35vlm_rx) = tokio::sync::mpsc::unbounded_channel::<Qwen3_5VlmRequest>();
+            std::thread::Builder::new().name("qwen3_5-vlm-engine".into()).spawn(move || {
+                use crane_core::models::qwen3_5::{Qwen3_5VLModel, VlGenerationConfig};
+                let mut vlm = match Qwen3_5VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::error!("Failed to load Qwen 3.5 VL model: {e}");
+                        return;
+                    }
+                };
+                info!("Qwen 3.5 VL engine thread started");
+                while let Some(req) = q35vlm_rx.blocking_recv() {
+                    let Qwen3_5VlmRequest { img_path, text_prompt, max_tokens, tx } = req;
+                    let res = (|| -> anyhow::Result<String> {
+                        let img = image::open(&img_path)?;
+                        let cfg = VlGenerationConfig {
+                            max_new_tokens: max_tokens,
+                            ..Default::default()
+                        };
+                        let started = std::time::Instant::now();
+                        let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
+                        tracing::info!("Qwen 3.5 VL request completed in {:?}", started.elapsed());
+                        Ok(out)
+                    })();
+                    if let Err(ref e) = res {
+                        tracing::error!("Qwen 3.5 VL request failed: {e}");
+                    }
+                    let _ = tx.send(res.map_err(|e| e.to_string()));
+                }
+            }).expect("Failed to spawn Qwen 3.5 VL thread");
+            qwen3_5_vlm_tx_opt_inner = Some(q35vlm_tx);
+        } else if resolved_type == engine::model_factory::ModelType::Gemma4VL {
             info!("Loading Gemma4 VLM model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let device_clone = device.clone();
@@ -557,7 +597,7 @@ pub async fn run(args: Args) -> Result<()> {
         }
         info!("VLM model routing established (type: {:?})", resolved_type);
         let eos_id = tokenizer.token_to_id("</s>").or_else(|| tokenizer.token_to_id("<end_of_turn>")) .or_else(|| tokenizer.token_to_id("<|end_of_sentence|>")) .unwrap_or(1);
-        (None, tokenizer, vec![eos_id], chat_template, vlm_tx_opt_inner, gemma4_vlm_tx_opt_inner, None, None)
+        (None, tokenizer, vec![eos_id], chat_template, vlm_tx_opt_inner, gemma4_vlm_tx_opt_inner, qwen3_5_vlm_tx_opt_inner, None, None)
     } else {
         // Only one of the TTS/ASR/VLM/LLM branches runs per process, so each is
         // the sole long-lived consumer of candle's process-wide rayon pool.
@@ -576,7 +616,7 @@ pub async fn run(args: Args) -> Result<()> {
         let (engine, handle) = InferenceEngine::new(backend, args.max_concurrent, args.decode_tokens_per_seq, memory_config);
         std::thread::Builder::new().name("inference-engine".into()).spawn(move || engine.run()).expect("Failed to spawn engine thread");
         info!("Inference engine started (max_concurrent={}, decode_tokens_per_seq={})", args.max_concurrent, args.decode_tokens_per_seq);
-        (Some(handle), tokenizer, eos_token_id, chat_template, None, None, None, None)
+        (Some(handle), tokenizer, eos_token_id, chat_template, None, None, None, None, None)
     };
 
     let model_name = args.model_name.clone().unwrap_or_else(|| {
@@ -595,6 +635,7 @@ pub async fn run(args: Args) -> Result<()> {
         server_start_time: now_epoch(),
         vlm_tx: vlm_tx_opt,
         gemma4_vlm_tx: gemma4_vlm_tx_opt,
+        qwen3_5_vlm_tx: qwen3_5_vlm_tx_opt,
         tts_tx: tts_tx_opt,
         asr_tx: asr_tx_opt,
         model_path: args.model_path.clone(),

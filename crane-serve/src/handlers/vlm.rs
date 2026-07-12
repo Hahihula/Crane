@@ -45,11 +45,40 @@ pub enum VlmRequest {
 //  Image downloading
 // ─────────────────────────────────────────────────────────────
 
-/// Download an image from a URL to a temporary file.
-/// Returns the path to the temp file (the file persists until the TempDir is dropped).
+/// Decode an image from either an HTTP(S) URL or a `data:image/...;base64,...`
+/// inline URI to a temporary file. Returns the path to the temp file (the
+/// file persists until the TempDir is dropped).
 async fn download_image(url: &str) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
     let dir = tempfile::TempDir::new()
         .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    // Handle inline `data:image/<mime>;base64,<payload>` URIs by decoding
+    // the base64 payload directly to a temp file.
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (meta, b64) = rest
+            .split_once(',')
+            .ok_or_else(|| format!("Malformed data URI (missing comma): {url}"))?;
+        let mime = meta.strip_prefix("image/").unwrap_or("png");
+        let ext = match mime.split(';').next().unwrap_or("png") {
+            "png" => "png",
+            "webp" => "webp",
+            "jpeg" | "jpg" => "jpg",
+            "gif" => "gif",
+            "bmp" => "bmp",
+            other => {
+                return Err(format!("Unsupported image MIME in data URI: {other}"));
+            }
+        };
+        // Standard base64 (no URL-safe alphabet).
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("Failed to decode base64 image: {e}"))?;
+        let img_path = dir.path().join(format!("image.{ext}"));
+        std::fs::write(&img_path, &bytes)
+            .map_err(|e| format!("Failed to write image to temp file: {e}"))?;
+        return Ok((dir, img_path));
+    }
 
     let client = reqwest::Client::new();
     let resp = client
@@ -406,6 +435,78 @@ pub struct Gemma4VlmRequest {
     pub text_prompt: String,
     pub max_tokens: usize,
     pub tx: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Qwen 3.5 VL Request Channel
+// ─────────────────────────────────────────────────────────────
+
+pub struct Qwen3_5VlmRequest {
+    pub img_path: std::path::PathBuf,
+    pub text_prompt: String,
+    pub max_tokens: usize,
+    pub tx: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
+/// Qwen 3.5 VL chat completions handler.
+pub async fn qwen3_5_vlm_chat_completions(
+    state: Arc<AppState>,
+    req: ChatCompletionRequest,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let q35vlm_tx = state.qwen3_5_vlm_tx.as_ref().ok_or_else(|| {
+        make_error(StatusCode::INTERNAL_SERVER_ERROR, "Qwen 3.5 VL model not loaded")
+    })?;
+
+    let (image_url, text_prompt) = extract_image_and_text(&req.messages, "Qwen3_5-VL")?;
+    let (_temp_dir, img_path) = download_image(&image_url)
+        .await
+        .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+
+    let max_tokens = req.max_tokens;
+    let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if q35vlm_tx
+        .send(Qwen3_5VlmRequest {
+            img_path,
+            text_prompt,
+            max_tokens,
+            tx,
+        })
+        .is_err()
+    {
+        return Err(make_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Qwen 3.5 VL engine thread crashed",
+        ));
+    }
+
+    let result = rx
+        .await
+        .map_err(|_| make_error(StatusCode::INTERNAL_SERVER_ERROR, "channel closed"))?;
+
+    let text = result.map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let response = ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion".into(),
+        created: now_epoch(),
+        model: state.model_name.clone(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: ChatMessageContent::Text(text),
+            },
+            finish_reason: Some("stop".into()),
+        }],
+        usage: Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        },
+    };
+    Ok(Json(response).into_response())
 }
 
 /// Gemma4VL chat completions handler.

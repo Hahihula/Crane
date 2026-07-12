@@ -81,7 +81,7 @@ fn default_true() -> bool {
 pub struct Config {
     pub text_config: TextConfig,
     #[serde(default)]
-    pub vision_config: Option<serde_json::Value>,
+    pub vision_config: Option<VisionConfig>,
     #[serde(default)]
     pub image_token_id: Option<u32>,
     #[serde(default)]
@@ -92,6 +92,69 @@ pub struct Config {
     pub vision_end_token_id: Option<u32>,
     #[serde(default)]
     pub tie_word_embeddings: bool,
+}
+
+/// Qwen 3.5 vision tower config. The architecture is identical to the
+/// Qwen2.5-VL / Qwen3-VL ViT: Conv3d patch embed (temporal×spatial×spatial)
+/// with bias, 12-layer transformer with per-block LayerNorm, fast (flash)
+/// attention, and a `PatchMerger` MLP that 2×2-spacially-merges the patch
+/// grid and projects to `out_hidden_size` (== text hidden size for Qwen 3.5).
+#[derive(Debug, Clone, Deserialize)]
+pub struct VisionConfig {
+    pub depth: usize,
+    pub hidden_size: usize,
+    pub out_hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_heads: usize,
+    pub in_channels: usize,
+    pub patch_size: usize,
+    pub spatial_merge_size: usize,
+    pub temporal_patch_size: usize,
+    #[serde(default)]
+    pub num_position_embeddings: usize,
+    /// ViT MLP activation (Qwen 3.5 ships `gelu_pytorch_tanh` — exact GELU with
+    /// the tanh approximation, as used by every Qwen2.5/3 ViT).
+    #[serde(default = "default_vision_hidden_act")]
+    pub hidden_act: VisionHiddenAct,
+    /// Qwen 3.5 always sets this to `[]` (no deepstack injection).
+    #[serde(default)]
+    pub deepstack_visual_indexes: Vec<usize>,
+}
+
+fn default_vision_hidden_act() -> VisionHiddenAct {
+    VisionHiddenAct::GeluPytorchTanh
+}
+
+/// Vision MLP activation function. Only `gelu_pytorch_tanh` is observed in
+/// the wild for the Qwen ViT family, but we keep the enum open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionHiddenAct {
+    Gelu,
+    GeluPytorchTanh,
+    Relu,
+    Silu,
+}
+
+impl VisionConfig {
+    pub fn merged_hidden_size(&self) -> usize {
+        self.hidden_size * self.spatial_merge_size.pow(2)
+    }
+}
+
+impl VisionHiddenAct {
+    /// Map to candle_nn::Activation.
+    pub fn to_activation(self) -> candle_nn::Activation {
+        use candle_nn::Activation;
+        match self {
+            VisionHiddenAct::Gelu => Activation::Gelu,
+            // `gelu_pytorch_tanh`: exact GELU with the tanh approximation,
+            // matching nn.GELU(approximate='tanh') used by the Qwen ViT MLP.
+            VisionHiddenAct::GeluPytorchTanh => Activation::Gelu,
+            VisionHiddenAct::Relu => Activation::Relu,
+            VisionHiddenAct::Silu => Activation::Silu,
+        }
+    }
 }
 
 impl Config {

@@ -345,6 +345,13 @@ impl Qwen3_5TextModel {
         Ok(())
     }
 
+    /// Embed `input_ids` and return the hidden states `[B, S, hidden_size]`.
+    /// Used by the multimodal wrapper to compute text embeddings before
+    /// splicing image features over the `<|image_pad|>` placeholders.
+    pub fn embed_only(&self, input_ids: &Tensor) -> Result<Tensor> {
+        Ok(self.embed_tokens.forward(input_ids)?)
+    }
+
     /// Forward pass over `input_ids` of shape `[B, S]`. `start_pos` is the
     /// absolute position of the first token (used for rotary slicing).
     /// `attention_mask` is broadcastable to `[B, 1, S, S_total]` (or `None`).
@@ -360,11 +367,35 @@ impl Qwen3_5TextModel {
         let is_decode_step = seq_len == 1;
 
         let mut xs = self.embed_tokens.forward(input_ids)?;
+        self.forward_through_layers(xs, start_pos, attention_mask, is_decode_step, None)
+    }
 
-        // If no mask was supplied, build a causal mask so prefill doesn't
-        // leak future tokens into past positions. (Decode is `seq_len==1`,
-        // where every position trivially attends only to itself — the mask is
-        // a no-op there.)
+    /// Forward pass with **pre-computed hidden states** (vision path).
+    ///
+    /// `hidden_states` already has image embeddings spliced in at the
+    /// `image_token_id` positions; the caller is responsible for embedding
+    /// the text tokens (or a placeholder at image positions) and stitching
+    /// them together. `position_ids` of shape `[3, S]` enables per-token
+    /// 3D MRoPE for vision tokens (T/H/W positions).
+    ///
+    /// `start_pos` is still required for the K/V cache offset. For
+    /// prefill with images this is `0`; for decode it advances one per
+    /// generated token (the caller already supplies sequential positions
+    /// on the three axes).
+    ///
+    /// Returns logits of shape `[B, V]` (only the last position is projected,
+    /// matching the text-only forward).
+    pub fn forward_embeds(
+        &mut self,
+        hidden_states: &Tensor,
+        position_ids: &Tensor,
+        start_pos: usize,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let (_b, seq_len, _h) = hidden_states.dims3()?;
+        let is_decode_step = seq_len == 1;
+        let xs = hidden_states.clone();
+
         let mask = match attention_mask {
             Some(m) => Some(m.clone()),
             None if !is_decode_step => {
@@ -375,7 +406,60 @@ impl Qwen3_5TextModel {
         };
         let mask_ref = mask.as_ref();
 
-        let (cos, sin) = self.rotary.cos_sin(start_pos, seq_len)?;
+        let (cos, sin) = self.rotary.cos_sin_with_position_ids(position_ids)?;
+        let rot_dim = self.rotary.rot_dim();
+
+        let mut xs = xs;
+        for i in 0..self.layers.len() {
+            let layer = &self.layers[i];
+            let gdn_slot = self.gdn_caches[i].as_mut();
+            let attn_slot = self.attn_caches[i].as_mut();
+            xs = layer.forward(
+                &xs,
+                &cos,
+                &sin,
+                rot_dim,
+                mask_ref,
+                gdn_slot,
+                attn_slot,
+                is_decode_step,
+            )?;
+        }
+
+        let xs = self.norm.forward(&xs)?;
+        let (b, s, _) = xs.dims3()?;
+        let last = xs.narrow(1, s - 1, 1)?.reshape((b, ()))?;
+        let logits = self.lm_head.forward(&last)?;
+        Ok(logits)
+    }
+
+    /// Shared body of `forward` and `forward_embeds`: run the decoder stack
+    /// + norm + lm_head projection on the last position.
+    fn forward_through_layers(
+        &mut self,
+        mut xs: Tensor,
+        start_pos: usize,
+        attention_mask: Option<&Tensor>,
+        is_decode_step: bool,
+        position_ids: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let seq_len = xs.dim(1)?;
+        let mask = match attention_mask {
+            Some(m) => Some(m.clone()),
+            None if !is_decode_step => {
+                let total = start_pos + seq_len;
+                Some(build_causal_mask(seq_len, total, xs.device(), xs.dtype())?)
+            }
+            None => None,
+        };
+        let mask_ref = mask.as_ref();
+
+        // Path 1 (text-only): cos/sin from a 1D position slice.
+        // Path 2 (vision): cos/sin from per-token 3D positions.
+        let (cos, sin) = match position_ids {
+            Some(p) => self.rotary.cos_sin_with_position_ids(p)?,
+            None => self.rotary.cos_sin(start_pos, seq_len)?,
+        };
         let rot_dim = self.rotary.rot_dim();
 
         for i in 0..self.layers.len() {
@@ -395,8 +479,6 @@ impl Qwen3_5TextModel {
         }
 
         let xs = self.norm.forward(&xs)?;
-        // Project with lm_head on the LAST position only. The engine's
-        // sampling step expects `[B, V]` (1D logits for the next token).
         let (b, s, _) = xs.dims3()?;
         let last = xs.narrow(1, s - 1, 1)?.reshape((b, ()))?;
         let logits = self.lm_head.forward(&last)?;

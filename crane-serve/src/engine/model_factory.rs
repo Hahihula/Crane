@@ -27,6 +27,7 @@ pub enum ModelType {
     Qwen25,
     Qwen3,
     Qwen3_5,
+    Qwen3_5VL,
     Qwen3TTS,
     VoxtralTTS,
     PaddleOcrVl,
@@ -46,6 +47,9 @@ impl ModelType {
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
             "qwen3" => Self::Qwen3,
             "qwen3_5" | "qwen3.5" | "qwen35" | "qwen3_5_dense" => Self::Qwen3_5,
+            "qwen3_5_vl" | "qwen3.5_vl" | "qwen3_5-vl" | "qwen3_5vl" | "qwen35_vl" => {
+                Self::Qwen3_5VL
+            }
             "qwen3_tts" | "qwen3tts" | "qwen3-tts" | "tts" => Self::Qwen3TTS,
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
             "paddleocr_vl" | "paddleocrv" | "paddleocr" | "paddle_ocr_vl" | "paddleocrvl" => Self::PaddleOcrVl,
@@ -64,6 +68,7 @@ impl ModelType {
             Self::Qwen25 => "qwen25",
             Self::Qwen3 => "qwen3",
             Self::Qwen3_5 => "qwen3_5",
+            Self::Qwen3_5VL => "qwen3_5_vl",
             Self::Qwen3TTS => "qwen3_tts",
             Self::VoxtralTTS => "voxtral_tts",
             Self::PaddleOcrVl => "paddleocr_vl",
@@ -74,7 +79,7 @@ impl ModelType {
     /// Whether this model type is a vision-language model.
     #[must_use]
     pub fn is_vlm(&self) -> bool {
-        matches!(self, Self::PaddleOcrVl | Self::Gemma4VL)
+        matches!(self, Self::PaddleOcrVl | Self::Gemma4VL | Self::Qwen3_5VL)
     }
 
     /// Whether this model type is a TTS model.
@@ -157,7 +162,13 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 "qwen2" | "qwen2.5" => return ModelType::Qwen25,
                 "qwen3" => return ModelType::Qwen3,
-                "qwen3_5" | "qwen3.5" => return ModelType::Qwen3_5,
+                "qwen3_5" | "qwen3.5" => {
+                    return if config.vision_config.is_some() {
+                        ModelType::Qwen3_5VL
+                    } else {
+                        ModelType::Qwen3_5
+                    };
+                }
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
                 "qwen3_asr" | "qwen3asr" => return ModelType::Qwen3ASR,
                 m if m.contains("hunyuan") => return ModelType::HunyuanDense,
@@ -184,6 +195,11 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 if a.contains("qwen3asrforconditional") || a.contains("qwen3_asr") {
                     return ModelType::Qwen3ASR;
+                }
+                // Qwen3_5ForConditionalGeneration is the multimodal class;
+                // Qwen3_5ForCausalLM (or any other Qwen3_5*) is text-only.
+                if a.contains("qwen3_5forconditional") || a.contains("qwen3.5forconditional") {
+                    return ModelType::Qwen3_5VL;
                 }
                 if a.contains("qwen3_5") || a.contains("qwen3.5") {
                     return ModelType::Qwen3_5;
@@ -235,6 +251,8 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::Qwen3ASR
     } else if path_lower.contains("qwen3.5") || path_lower.contains("qwen3_5") || path_lower.contains("qwen35") {
         ModelType::Qwen3_5
+    } else if path_lower.contains("qwen3_5_vl") || path_lower.contains("qwen3.5_vl") || path_lower.contains("qwen3.5-vl") || path_lower.contains("qwen35_vl") {
+        ModelType::Qwen3_5VL
     } else if path_lower.contains("qwen3") {
         ModelType::Qwen3
     } else if path_lower.contains("qwen2") || path_lower.contains("qwen25") {
@@ -349,6 +367,9 @@ pub fn create_backend(
         }
         ModelType::Gemma4VL => {
             anyhow::bail!("Gemma4-VL is a VLM model — use the VLM endpoint instead of create_backend()")
+        }
+        ModelType::Qwen3_5VL => {
+            anyhow::bail!("Qwen3_5-VL is a VLM model — use the Qwen3_5-VL endpoint instead of create_backend()")
         }
         ModelType::Qwen3TTS => {
             anyhow::bail!("Qwen3-TTS is a TTS model — use create_tts() instead of create_backend()")
