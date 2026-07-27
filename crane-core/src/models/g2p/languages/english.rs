@@ -2,16 +2,18 @@
 
 //! English (`en_us`) grapheme-to-phoneme engine.
 //!
-//! Currently a single tier: lexicon lookup. Words missing from the lexicon
-//! fall back to their normalized spelling as a placeholder — the OOV model
-//! and hand-written rule fallbacks are added in later steps.
+//! Two tiers so far: lexicon lookup, then hand-written letter-to-sound
+//! rules for words the lexicon misses. An OOV model tier is added later.
 
 use anyhow::Result;
 
 use crate::models::g2p::lexicon::Lexicon;
 use crate::models::g2p::text_normalize::normalize_word_for_lookup;
 
-/// English grapheme-to-phoneme engine: lexicon lookup only, for now.
+use super::english_rules::hand_oov_rules_ipa;
+
+/// English grapheme-to-phoneme engine: lexicon lookup, then hand-written
+/// rule fallback.
 #[derive(Debug)]
 pub struct EnglishG2p {
     /// Word-to-IPA lexicon, built from a `word\tIPA` TSV at construction.
@@ -35,9 +37,9 @@ impl EnglishG2p {
     /// Converts `text` to a space-joined IPA phoneme string.
     ///
     /// Each word is normalized and looked up in the lexicon. Words not
-    /// found in the lexicon pass through as their normalized spelling
-    /// (placeholder until the OOV model and hand-written rules land).
-    /// Tokens that normalize to nothing (all-punctuation) are skipped.
+    /// found in the lexicon fall back to the hand-written rule engine
+    /// (an OOV model tier is added later). Tokens that normalize to
+    /// nothing (all-punctuation) are skipped.
     ///
     /// # Errors
     ///
@@ -55,7 +57,7 @@ impl EnglishG2p {
             }
             match self.lexicon.get(&word) {
                 Some(word_ipa) => ipa.push_str(word_ipa),
-                None => ipa.push_str(&word),
+                None => ipa.push_str(&hand_oov_rules_ipa(&word)),
             }
         }
         Ok(ipa)
@@ -78,9 +80,9 @@ mod tests {
     }
 
     #[test]
-    fn lexicon_miss_returns_normalized_word() {
+    fn lexicon_miss_falls_back_to_hand_rules() {
         let engine = test_engine();
-        assert_eq!(engine.text_to_ipa("xyzzy").unwrap(), "xyzzy");
+        assert_eq!(engine.text_to_ipa("xyzzy").unwrap(), "ksɪzˈaɪ");
     }
 
     #[test]
@@ -104,7 +106,7 @@ mod tests {
     #[test]
     fn mixed_hit_and_miss_words() {
         let engine = test_engine();
-        assert_eq!(engine.text_to_ipa("hello there").unwrap(), "həlˈoʊ there");
+        assert_eq!(engine.text_to_ipa("hello there").unwrap(), "həlˈoʊ ðˈɛɹ");
     }
 
     #[test]

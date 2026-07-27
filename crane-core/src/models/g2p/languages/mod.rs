@@ -12,6 +12,7 @@ use anyhow::Result;
 use english::EnglishG2p;
 
 pub mod english;
+mod english_rules;
 
 /// Language identifiers currently registered in [`LanguageG2p`].
 ///
