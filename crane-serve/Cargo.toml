@@ -49,6 +49,7 @@ accelerate = [
     "candle-nn/accelerate",
     "candle-transformers/accelerate",
 ]
+onnx = ["crane-core/onnx", "crane/onnx"]
 cuda = ["crane-core/cuda", "crane/cuda"]
 cudnn = ["crane-core/cudnn", "crane/cudnn"]
 mkl = ["crane-core/mkl", "crane/mkl"]
