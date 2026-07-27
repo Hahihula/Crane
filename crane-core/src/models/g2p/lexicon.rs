@@ -59,7 +59,7 @@ impl std::fmt::Debug for Lexicon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Lexicon")
             .field("len", &self.fst.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
