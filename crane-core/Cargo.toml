@@ -33,6 +33,7 @@ base64 = "0.22"
 fancy-regex = "0.18"
 tekken-rs = "0.1.1"
 zip = "8"
+fst = { workspace = true }
 
 
 intel-mkl-src = { version = "0.8.1", optional = true }
