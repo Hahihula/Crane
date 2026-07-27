@@ -47,9 +47,6 @@ pub struct MoonshineG2p {
     /// Loaded per-language engines, keyed by language identifier (e.g. `"en_us"`).
     /// Keys are always drawn from [`SUPPORTED_LANGUAGES`], so `&'static str`
     /// avoids an owned-`String` allocation per loaded language.
-    // `LanguageG2p` is currently zero-sized (a single unit variant); this
-    // will stop applying once real per-language engines are added.
-    #[allow(clippy::zero_sized_map_values)]
     languages: HashMap<&'static str, LanguageG2p>,
 }
 
@@ -58,6 +55,19 @@ impl MoonshineG2p {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Registers a language engine, keyed by [`LanguageG2p::language`].
+    ///
+    /// Replaces any engine previously registered for the same language,
+    /// returning it.
+    pub fn add_language(&mut self, engine: LanguageG2p) -> Option<LanguageG2p> {
+        debug_assert!(
+            SUPPORTED_LANGUAGES.contains(&engine.language()),
+            "{:?} is not in SUPPORTED_LANGUAGES",
+            engine.language()
+        );
+        self.languages.insert(engine.language(), engine)
     }
 }
 
@@ -89,6 +99,16 @@ mod tests {
     fn new_phonemizer_has_no_languages_loaded() {
         let phonemizer = MoonshineG2p::new();
         assert!(phonemizer.text_to_ipa("hello", "en_us").is_err());
+    }
+
+    #[test]
+    fn add_language_enables_text_to_ipa() {
+        let mut phonemizer = MoonshineG2p::new();
+        let english = languages::english::EnglishG2p::new("hello\thəlˈoʊ\n").unwrap();
+        phonemizer.add_language(LanguageG2p::English(english));
+
+        assert_eq!(phonemizer.text_to_ipa("hello", "en_us").unwrap(), "həlˈoʊ");
+        assert!(phonemizer.text_to_ipa("hello", "de").is_err());
     }
 
     #[test]

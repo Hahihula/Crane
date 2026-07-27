@@ -7,7 +7,11 @@
 //! lookup and rule logic on the hot `text_to_ipa` call path instead of going
 //! through a vtable on every call.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use english::EnglishG2p;
+
+pub mod english;
 
 /// Language identifiers currently registered in [`LanguageG2p`].
 ///
@@ -22,9 +26,8 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &["en_us"];
 /// each language is implemented.
 #[derive(Debug)]
 pub enum LanguageG2p {
-    /// English (`en_us`). Placeholder variant — the lexicon/rules engine is
-    /// not implemented yet; this establishes the enum shape for later steps.
-    English,
+    /// English (`en_us`) engine.
+    English(EnglishG2p),
 }
 
 impl LanguageG2p {
@@ -32,13 +35,11 @@ impl LanguageG2p {
     ///
     /// # Errors
     ///
-    /// Returns an error if the underlying language engine is not yet
-    /// implemented, or if it fails to phonemize the input.
+    /// Returns an error if the underlying language engine fails to
+    /// phonemize the input.
     pub fn text_to_ipa(&self, text: &str) -> Result<String> {
         match self {
-            Self::English => {
-                bail!("English G2P engine is not yet implemented (input: {text:?})")
-            }
+            Self::English(engine) => engine.text_to_ipa(text),
         }
     }
 
@@ -46,7 +47,7 @@ impl LanguageG2p {
     #[must_use]
     pub fn language(&self) -> &'static str {
         match self {
-            Self::English => "en_us",
+            Self::English(_) => "en_us",
         }
     }
 }
@@ -62,14 +63,18 @@ mod tests {
         assert_send_sync::<LanguageG2p>();
     }
 
-    #[test]
-    fn english_language_identifier() {
-        assert_eq!(LanguageG2p::English.language(), "en_us");
+    fn test_language() -> LanguageG2p {
+        LanguageG2p::English(EnglishG2p::new("hello\thəlˈoʊ\n").unwrap())
     }
 
     #[test]
-    fn english_text_to_ipa_not_yet_implemented() {
-        assert!(LanguageG2p::English.text_to_ipa("hello").is_err());
+    fn english_language_identifier() {
+        assert_eq!(test_language().language(), "en_us");
+    }
+
+    #[test]
+    fn english_text_to_ipa_delegates_to_engine() {
+        assert_eq!(test_language().text_to_ipa("hello").unwrap(), "həlˈoʊ");
     }
 
     #[test]

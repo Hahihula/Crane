@@ -7,6 +7,8 @@
 //! normalizing a `CMUdict`-style key by stripping alternate-pronunciation
 //! markers.
 
+use std::borrow::Cow;
+
 /// Splits `text` on runs of ASCII whitespace, returning non-empty tokens.
 ///
 /// Whitespace is `u8::is_ascii_whitespace` (space, tab, `\n`, `\r`, form
@@ -35,14 +37,17 @@ fn is_word_char(c: char) -> bool {
 ///
 /// Returns an empty string if the token has no word characters at all.
 ///
+/// Returns a borrowed slice when `token` is already trimmed and contains no
+/// uppercase ASCII bytes, avoiding an allocation on the common case.
+///
 /// # Panics
 ///
 /// Never panics: if a leading word character is found, a trailing one is
 /// guaranteed to exist too (the same character, at minimum).
 #[must_use]
-pub fn normalize_word_for_lookup(token: &str) -> String {
+pub fn normalize_word_for_lookup(token: &str) -> Cow<'_, str> {
     let Some((start, _)) = token.char_indices().find(|&(_, c)| is_word_char(c)) else {
-        return String::new();
+        return Cow::Borrowed("");
     };
     let (end, last_char) = token
         .char_indices()
@@ -50,7 +55,12 @@ pub fn normalize_word_for_lookup(token: &str) -> String {
         .find(|&(_, c)| is_word_char(c))
         .expect("start match implies a matching char exists from the end too");
 
-    token[start..end + last_char.len_utf8()].to_ascii_lowercase()
+    let trimmed = &token[start..end + last_char.len_utf8()];
+    if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(trimmed.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(trimmed)
+    }
 }
 
 /// Normalizes a `CMUdict`-style dictionary key.
