@@ -4,3 +4,4 @@
 
 pub mod benchmark;
 pub mod lexicon;
+pub mod text_normalize;
