@@ -112,6 +112,33 @@ const LITERALS: &[(&str, &str)] = &[
     ("gg", "ɡ"),
 ];
 
+/// Known English suffixes and their fixed IPA, longest first. Matched
+/// against the whole word before the main grapheme scan runs, so the stem
+/// can be phonemized independently of the suffix. `-tion`/`-sion`/`-sure`/
+/// `-ture` are deliberately absent — they're already handled as [`LITERALS`]
+/// entries and must not be duplicated here.
+///
+/// Known limitation: `-ment` can false-positive on words where "ment" is
+/// part of the root rather than a suffix (e.g. "comment" -> stem "com" is
+/// non-empty and has a vowel, so [`strip_suffix`]'s vowel guard doesn't
+/// catch it, unlike the consonant-only "thr"/"str" stems the guard does
+/// catch). Rare in practice; not worth an exception list yet.
+const SUFFIXES: &[(&str, &str)] = &[
+    ("ness", "nəs"),
+    ("ment", "mənt"),
+    ("able", "əbəl"),
+    ("ible", "əbəl"),
+    ("less", "ləs"),
+    ("ful", "fəl"),
+    ("ous", "əs"),
+    ("ive", "ɪv"),
+    ("ly", "li"),
+];
+
+/// Minimum stem length left after stripping a suffix — prevents
+/// over-stripping short words like "able", "only", "fly".
+const MIN_STEM_LEN: usize = 3;
+
 /// Priority order for locating the syllable that gets the primary stress
 /// mark when none is already present: the first prefix in this list that
 /// occurs anywhere in the IPA string wins, regardless of byte position.
@@ -302,9 +329,32 @@ fn th_voiced_word(w: &str) -> bool {
     )
 }
 
+/// Tries to strip a known suffix (see [`SUFFIXES`]) from `letters`. Returns
+/// `Some((stem, suffix_ipa))` when a suffix matches, the remaining stem is
+/// at least [`MIN_STEM_LEN`] characters, and the stem contains a vowel;
+/// `None` otherwise.
+///
+/// The vowel check rejects splits like "thrive" -> "thr" + "-ive": every
+/// English syllable needs a vowel nucleus, so a consonant-only "stem" means
+/// the suffix boundary is wrong and the word should fall through to the
+/// letter-by-letter rules (where magic-e correctly produces "thrive"'s
+/// /aɪ/ diphthong) instead.
+fn strip_suffix(letters: &str) -> Option<(&str, &str)> {
+    for &(suffix, ipa) in SUFFIXES {
+        if letters.len() >= suffix.len() + MIN_STEM_LEN && letters.ends_with(suffix) {
+            let stem = &letters[..letters.len() - suffix.len()];
+            if stem.bytes().any(is_vowel) {
+                return Some((stem, ipa));
+            }
+        }
+    }
+    None
+}
+
 /// Greedily converts an already-normalized word into IPA: function-word
-/// overrides first, then a left-to-right scan matching multi-letter
-/// graphemes, then single vowel/consonant rules for anything left over.
+/// overrides first, then known-suffix decomposition, then a left-to-right
+/// scan matching multi-letter graphemes, then single vowel/consonant rules
+/// for anything left over.
 ///
 /// Expects `word` to already be normalized via `normalize_word_for_lookup`
 /// (the sole caller, [`hand_oov_rules_ipa`], is only ever invoked with
@@ -319,6 +369,24 @@ fn oov_grapheme_to_ipa(word: &str) -> String {
 
     if let Some(&(_, ipa)) = FUNCTION_WORDS.iter().find(|&&(k, _)| k == letters) {
         return ipa.to_string();
+    }
+
+    // Suffix decomposition: strip a known suffix, phonemize the stem
+    // recursively (this also lets a doubly-suffixed stem like
+    // "hopelessly" -> "hopeless" -> "hope" shed a second suffix), then
+    // append the suffix's fixed IPA. Bounded recursion: every suffix is at
+    // least 2 characters and the stem must stay >= MIN_STEM_LEN, so depth
+    // is capped by word length.
+    //
+    // The stem gets its own primary stress mark here, before the suffix is
+    // appended — otherwise `hand_oov_rules_ipa`'s final stress pass would
+    // search the whole (stem + suffix) string by vowel-quality priority and
+    // could land the stress inside the suffix instead of the stem (e.g. the
+    // schwa in "-ness" outranks most stem vowels in that priority order).
+    if let Some((stem, suffix_ipa)) = strip_suffix(&letters) {
+        let mut stem_ipa = add_primary_stress_if_missing(oov_grapheme_to_ipa(stem));
+        stem_ipa.push_str(suffix_ipa);
+        return stem_ipa;
     }
 
     let voiced_th = th_voiced_word(&letters);
@@ -399,14 +467,16 @@ fn oov_grapheme_to_ipa(word: &str) -> String {
 }
 
 /// Inserts a primary stress mark before the highest-priority vowel found in
-/// `ipa`, unless it already starts with a stress mark.
+/// `ipa`, unless it already contains a stress mark anywhere (not just at the
+/// start — a suffix-stripped stem's own stress, appended before the suffix
+/// IPA in [`oov_grapheme_to_ipa`], must not be overridden by a second stress
+/// mark landing inside the suffix).
 ///
 /// This is a rough heuristic: it picks by vowel-quality priority rather
 /// than syllable position, so it will disagree with real English stress
 /// patterns for many multi-syllable words.
 fn add_primary_stress_if_missing(ipa: String) -> String {
-    if ipa.is_empty() || ipa.starts_with(IPA_PRIMARY_STRESS) || ipa.starts_with(IPA_SECONDARY_STRESS)
-    {
+    if ipa.is_empty() || ipa.contains(IPA_PRIMARY_STRESS) || ipa.contains(IPA_SECONDARY_STRESS) {
         return ipa;
     }
 
@@ -472,6 +542,121 @@ mod tests {
             assert!(
                 hand_oov_rules_ipa(word).contains('ð'),
                 "{word} should have voiced th"
+            );
+        }
+    }
+
+    #[test]
+    fn suffix_ness_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("sadness");
+        assert!(ipa.ends_with("nəs"), "expected -ness IPA /nəs/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_ly_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("quickly");
+        assert!(ipa.ends_with("li"), "expected -ly IPA /li/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_able_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("readable");
+        assert!(ipa.ends_with("əbəl"), "expected -able IPA /əbəl/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_not_stripped_from_short_words() {
+        // "only" (4 letters) ends in "ly" but the stem "on" is only 2
+        // letters, below MIN_STEM_LEN, so no suffix should be stripped —
+        // regression check that this doesn't panic and still produces a
+        // vowel sound.
+        let ipa = hand_oov_rules_ipa("only");
+        assert!(contains_vowel_sound(&ipa), "{ipa}");
+    }
+
+    #[test]
+    fn double_suffix_is_stripped_recursively() {
+        // "hopelessly" -> strip "-ly" -> "hopeless" -> strip "-less" ->
+        // "hope", each suffix's fixed IPA appended in order.
+        let ipa = hand_oov_rules_ipa("hopelessly");
+        assert!(ipa.ends_with("ləsli"), "expected -less-ly IPA: {ipa}");
+    }
+
+    #[test]
+    fn suffix_ment_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("enjoyment");
+        assert!(ipa.ends_with("mənt"), "expected -ment IPA /mənt/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_ful_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("hopeful");
+        assert!(ipa.ends_with("fəl"), "expected -ful IPA /fəl/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_ous_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("dangerous");
+        assert!(ipa.ends_with("əs"), "expected -ous IPA /əs/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_ible_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("horrible");
+        assert!(ipa.ends_with("əbəl"), "expected -ible IPA /əbəl/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_less_is_stripped_and_appended() {
+        let ipa = hand_oov_rules_ipa("homeless");
+        assert!(ipa.ends_with("ləs"), "expected -less IPA /ləs/: {ipa}");
+    }
+
+    #[test]
+    fn suffix_ive_is_stripped_from_genuine_suffix_words() {
+        // "executive" -> stem "execut" has a vowel, so -ive is stripped.
+        let ipa = hand_oov_rules_ipa("executive");
+        assert!(ipa.ends_with("ɪv"), "expected -ive IPA /ɪv/: {ipa}");
+    }
+
+    #[test]
+    fn thrive_produces_correct_diphthong_not_suffix_stripped() {
+        // "thrive" must NOT be suffix-stripped as "thr" + "-ive": the stem
+        // "thr" has no vowels. Without stripping, magic-e fires on i-v-e
+        // giving the correct /aɪv/ ending instead of the suffix's fixed
+        // /ɪv/ (which would drop the diphthong's /a/ onset).
+        let ipa = hand_oov_rules_ipa("thrive");
+        assert_eq!(ipa, "θɹˈaɪv");
+    }
+
+    #[test]
+    fn strive_produces_correct_diphthong_not_suffix_stripped() {
+        // Same consonant-only-stem class as "thrive": stem "str".
+        let ipa = hand_oov_rules_ipa("strive");
+        assert!(ipa.contains("aɪ"), "expected /aɪ/ diphthong: {ipa}");
+    }
+
+    #[test]
+    fn strip_suffix_rejects_vowelless_stem() {
+        assert_eq!(strip_suffix("thrive"), None);
+        assert_eq!(strip_suffix("strive"), None);
+    }
+
+    #[test]
+    fn strip_suffix_accepts_stem_with_vowels() {
+        assert_eq!(strip_suffix("executive"), Some(("execut", "ɪv")));
+    }
+
+    #[test]
+    fn suffixes_are_sorted_by_descending_length() {
+        // strip_suffix's first-match loop needs longer (more specific)
+        // suffixes to be tried before shorter ones.
+        for window in SUFFIXES.windows(2) {
+            assert!(
+                window[0].0.len() >= window[1].0.len(),
+                "SUFFIXES out of order: {:?} before {:?}",
+                window[0].0,
+                window[1].0,
             );
         }
     }
