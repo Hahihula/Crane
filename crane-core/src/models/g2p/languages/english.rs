@@ -6,6 +6,7 @@
 //! is loaded and produces non-empty output), then hand-written
 //! letter-to-sound rules as the final fallback.
 
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::sync::{Mutex, PoisonError};
 
@@ -37,8 +38,12 @@ pub struct EnglishG2p {
     /// the note on [`LanguageG2p`](super::LanguageG2p) — since TTS runs on a
     /// single dedicated thread per the existing Crane TTS serving pattern.
     /// Only successful, non-empty OOV results are cached — see
-    /// [`Self::try_oov_model_into`].
+    /// [`Self::text_to_ipa`].
     oov_cache: Mutex<LruCache<String, String>>,
+    /// When a lexicon hit has multiple pronunciations (a heteronym) whose
+    /// alternatives split along US/UK dialect lines, prefer the UK-style
+    /// alternative over the US-style one — see [`pick_heteronym_ipa`].
+    prefer_british_heteronyms: bool,
 }
 
 impl std::fmt::Debug for EnglishG2p {
@@ -50,6 +55,7 @@ impl std::fmt::Debug for EnglishG2p {
                 "oov_cache_len",
                 &self.oov_cache.lock().map(|c| c.len()).unwrap_or_default(),
             )
+            .field("prefer_british_heteronyms", &self.prefer_british_heteronyms)
             .finish()
     }
 }
@@ -58,15 +64,24 @@ impl EnglishG2p {
     /// Builds an English G2P engine from lexicon TSV content
     /// (`word\tIPA` lines, no header) and an optional OOV fallback model.
     ///
+    /// `prefer_british_heteronyms` selects the UK-style pronunciation for
+    /// heteronyms whose alternatives split along US/UK dialect lines (see
+    /// [`pick_heteronym_ipa`]); pass `false` for US English.
+    ///
     /// # Errors
     ///
     /// Returns an error if `lexicon_tsv` is malformed — see
     /// [`Lexicon::from_tsv`].
-    pub fn new(lexicon_tsv: &str, oov_model: Option<oov_onnx::Model>) -> Result<Self> {
+    pub fn new(
+        lexicon_tsv: &str,
+        oov_model: Option<oov_onnx::Model>,
+        prefer_british_heteronyms: bool,
+    ) -> Result<Self> {
         Ok(Self {
             lexicon: Lexicon::from_tsv(lexicon_tsv)?,
             oov_model,
             oov_cache: Mutex::new(LruCache::new(DEFAULT_OOV_CACHE_CAPACITY)),
+            prefer_british_heteronyms,
         })
     }
 
@@ -78,76 +93,165 @@ impl EnglishG2p {
     /// fallback. Tokens that normalize to nothing (all-punctuation) are
     /// skipped.
     ///
+    /// Runs in three passes rather than resolving each word as it's seen:
+    /// (1) classify every word as a lexicon hit, an OOV-cache hit, an
+    /// over-length/no-model case that goes straight to hand rules, or a
+    /// pending OOV lookup; (2) run every pending OOV word through
+    /// [`oov_onnx::Model::predict_phonemes_batch`] in a single batched call
+    /// instead of one autoregressive decode per word; (3) reassemble the
+    /// output in original word order. This is what lets multiple OOV words
+    /// in one `text_to_ipa` call share decode steps instead of each paying
+    /// for its own full decode loop — see
+    /// [`oov_onnx::Model::predict_phonemes_batch`] for why that's the real
+    /// latency win.
+    ///
     /// # Errors
     ///
     /// Currently infallible; returns `Result` to satisfy the
     /// [`Phonemizer`](crate::models::g2p::Phonemizer) trait contract other
     /// language engines rely on.
     pub fn text_to_ipa(&self, text: &str) -> Result<String> {
-        let mut ipa = String::with_capacity(text.len());
-        for token in text.split_ascii_whitespace() {
-            let word = normalize_word_for_lookup(token);
-            if word.is_empty() {
+        /// Per-word classification decided in the first pass, resolved into
+        /// IPA in the third. `Lexicon` borrows directly from `self.lexicon`;
+        /// the others own their data since it comes from the cache or a
+        /// batched inference call made after the borrow would need to end.
+        enum WordSource<'a> {
+            Lexicon(&'a str),
+            Cached(String),
+            Oov(usize),
+            HandRules,
+        }
+
+        let words: Vec<Cow<'_, str>> = text
+            .split_ascii_whitespace()
+            .map(normalize_word_for_lookup)
+            .filter(|word| !word.is_empty())
+            .collect();
+
+        let mut sources = Vec::with_capacity(words.len());
+        let mut oov_words: Vec<&str> = Vec::new();
+        for word in &words {
+            let word: &str = word;
+            if let Some(alts) = self.lexicon.get_all(word) {
+                let word_ipa = pick_heteronym_ipa(alts, self.prefer_british_heteronyms);
+                sources.push(WordSource::Lexicon(word_ipa));
                 continue;
             }
+            let Some(model) = self.oov_model.as_ref() else {
+                sources.push(WordSource::HandRules);
+                continue;
+            };
+            if word.chars().count() > model.config.max_seq_len {
+                sources.push(WordSource::HandRules);
+                continue;
+            }
+            let cached = self
+                .oov_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(word)
+                .cloned();
+            if let Some(cached) = cached {
+                sources.push(WordSource::Cached(cached));
+                continue;
+            }
+            // A word repeated within one `text_to_ipa` call (e.g. "wibbly
+            // wibbly") shares a single batch slot instead of decoding twice
+            // — the cache above isn't populated until after the batch runs,
+            // so it can't catch this on its own.
+            if let Some(idx) = oov_words.iter().position(|&w| w == word) {
+                sources.push(WordSource::Oov(idx));
+                continue;
+            }
+            sources.push(WordSource::Oov(oov_words.len()));
+            oov_words.push(word);
+        }
+
+        let oov_results = match self.oov_model.as_ref() {
+            Some(model) if !oov_words.is_empty() => {
+                let results = model.predict_phonemes_batch(&oov_words);
+                let mut cache = self
+                    .oov_cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                for (&word, result) in oov_words.iter().zip(&results) {
+                    if let Some(ipa) = result {
+                        cache.put(word.to_owned(), ipa.clone());
+                    }
+                }
+                results
+            }
+            _ => Vec::new(),
+        };
+
+        let mut ipa = String::with_capacity(text.len());
+        for (word, source) in words.iter().zip(sources) {
+            let word: &str = word;
             if !ipa.is_empty() {
                 ipa.push(' ');
             }
-            if let Some(word_ipa) = self.lexicon.get(&word) {
-                ipa.push_str(word_ipa);
-            } else if !self.try_oov_model_into(&word, &mut ipa) {
-                ipa.push_str(&hand_oov_rules_ipa(&word));
+            match source {
+                WordSource::Lexicon(word_ipa) => ipa.push_str(word_ipa),
+                WordSource::Cached(cached) => ipa.push_str(&cached),
+                WordSource::Oov(idx) => match &oov_results[idx] {
+                    Some(word_ipa) => ipa.push_str(word_ipa),
+                    None => ipa.push_str(&hand_oov_rules_ipa(word)),
+                },
+                WordSource::HandRules => ipa.push_str(&hand_oov_rules_ipa(word)),
             }
         }
         Ok(ipa)
     }
+}
 
-    /// Attempts OOV model inference for `word`, checking the OOV result
-    /// cache first, and appends the resolved IPA to `out` on success.
-    ///
-    /// Returns `false` if no OOV model is loaded, if `word` is longer than
-    /// the model's `max_seq_len` (its input would be truncated, producing a
-    /// meaningless result), if inference fails, or if the model produces an
-    /// empty result — all four fall through to hand rules. A single word's
-    /// OOV failure must never abort phonemization of the rest of the
-    /// sentence, so inference errors are swallowed here rather than
-    /// propagated. Only successful, non-empty results within the model's
-    /// length limit are cached — a transient inference failure isn't worth
-    /// remembering, and an overlong word would otherwise let unbounded
-    /// cache keys in.
-    fn try_oov_model_into(&self, word: &str, out: &mut String) -> bool {
-        let Some(model) = self.oov_model.as_ref() else {
-            return false;
-        };
-        if word.chars().count() > model.config.max_seq_len {
-            return false;
-        }
-
-        {
-            let mut cache = self
-                .oov_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(cached) = cache.get(word) {
-                out.push_str(cached);
-                return true;
-            }
-        }
-
-        let Ok(ipa) = model.predict_phonemes(word) else {
-            return false;
-        };
-        if ipa.is_empty() {
-            return false;
-        }
-
-        out.push_str(&ipa);
-        self.oov_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .put(word.to_owned(), ipa);
-        true
+/// Picks among a heteronym's IPA alternatives, matching Moonshine's
+/// `pick_english_heteronym_ipa()`.
+///
+/// Some CMU-style heteronyms (e.g. "tomato") have alternatives that split
+/// along US/UK dialect lines: a US-style reading with a stressed `ˈeɪ`
+/// diphthong, and a UK-style reading with a stressed open-back `ˈɑ` (and no
+/// `ˈeɪ`). Only when *both* patterns are present among the alternatives does
+/// `prefer_british` decide which one wins; otherwise (most heteronyms, e.g.
+/// "read"/"lead", don't follow this dialect split at all) this falls back to
+/// the lexicographically-first alternative. `alternatives` is assumed
+/// already sorted, matching [`Lexicon::get_all`]'s contract.
+fn pick_heteronym_ipa<'a>(
+    alternatives: impl Iterator<Item = &'a str>,
+    prefer_british: bool,
+) -> &'a str {
+    let alts: Vec<&str> = alternatives.collect();
+    let Some(&first) = alts.first() else {
+        return "";
+    };
+    if alts.len() == 1 {
+        return first;
     }
+
+    let american_reading_present = alts.iter().copied().any(has_stressed_ei);
+    let british_reading_present = alts.iter().copied().any(has_stressed_open_back);
+    if american_reading_present && british_reading_present {
+        let picked = if prefer_british {
+            alts.iter().copied().find(|&s| has_stressed_open_back(s))
+        } else {
+            alts.iter().copied().find(|&s| has_stressed_ei(s))
+        };
+        if let Some(s) = picked {
+            return s;
+        }
+    }
+    first
+}
+
+/// `true` if `s` has a US-style stressed `ˈeɪ` diphthong — see
+/// [`pick_heteronym_ipa`].
+fn has_stressed_ei(s: &str) -> bool {
+    s.contains("ˈeɪ")
+}
+
+/// `true` if `s` has a UK-style stressed open-back `ˈɑ` and no `ˈeɪ` — see
+/// [`pick_heteronym_ipa`].
+fn has_stressed_open_back(s: &str) -> bool {
+    s.contains("ˈɑ") && !has_stressed_ei(s)
 }
 
 #[cfg(test)]
@@ -156,7 +260,7 @@ mod tests {
 
     fn test_engine() -> EnglishG2p {
         let tsv = "hello\thəlˈoʊ\nworld\twˈɜɹld\n";
-        EnglishG2p::new(tsv, None).unwrap()
+        EnglishG2p::new(tsv, None, false).unwrap()
     }
 
     #[test]
@@ -197,15 +301,43 @@ mod tests {
 
     #[test]
     fn new_propagates_malformed_lexicon_error() {
-        assert!(EnglishG2p::new("no-tab-here\n", None).is_err());
+        assert!(EnglishG2p::new("no-tab-here\n", None, false).is_err());
     }
 
     #[test]
-    fn try_oov_model_returns_none_when_no_model_loaded() {
-        let engine = test_engine();
-        let mut out = String::new();
-        assert!(!engine.try_oov_model_into("xyzzy", &mut out));
-        assert!(out.is_empty());
+    fn heteronym_us_uk_split_picks_stressed_ei_by_default() {
+        let tsv = "tomato\ttəmˈeɪtˌoʊ\ntomato\ttəmˈɑtˌoʊ\n";
+        let engine = EnglishG2p::new(tsv, None, false).unwrap();
+        assert_eq!(engine.text_to_ipa("tomato").unwrap(), "təmˈeɪtˌoʊ");
+    }
+
+    #[test]
+    fn heteronym_us_uk_split_picks_stressed_open_back_when_prefer_british() {
+        let tsv = "tomato\ttəmˈeɪtˌoʊ\ntomato\ttəmˈɑtˌoʊ\n";
+        let engine = EnglishG2p::new(tsv, None, true).unwrap();
+        assert_eq!(engine.text_to_ipa("tomato").unwrap(), "təmˈɑtˌoʊ");
+    }
+
+    #[test]
+    fn heteronym_without_us_uk_pattern_falls_back_to_lexicographic_first() {
+        // "read"/"lead"-style heteronyms don't follow the US/UK stress
+        // split, so both prefer_british settings must agree on the
+        // lexicographically-first alternative.
+        let tsv = "read\trˈɛd\nread\trˈid\n";
+        for prefer_british in [false, true] {
+            let engine = EnglishG2p::new(tsv, None, prefer_british).unwrap();
+            assert_eq!(engine.text_to_ipa("read").unwrap(), "rˈid");
+        }
+    }
+
+    #[test]
+    fn pick_heteronym_ipa_single_alternative_passes_through() {
+        assert_eq!(pick_heteronym_ipa(["həlˈoʊ"].into_iter(), false), "həlˈoʊ");
+    }
+
+    #[test]
+    fn pick_heteronym_ipa_empty_input_returns_empty_string() {
+        assert_eq!(pick_heteronym_ipa(std::iter::empty(), false), "");
     }
 
     /// An OOV model wrapping an empty ONNX graph, so `predict_phonemes`
@@ -232,6 +364,7 @@ mod tests {
         let engine = EnglishG2p::new(
             "hello\thəlˈoʊ\nworld\twˈɜɹld\n",
             Some(failing_oov_model()),
+            false,
         )
         .unwrap();
         // "xyzzy" misses the lexicon; the OOV model errors on an empty
@@ -241,13 +374,31 @@ mod tests {
     }
 
     #[test]
-    fn oov_cache_returns_cached_result_on_repeat() {
-        // A model must be loaded (even one that always errors) for
-        // try_oov_model_into to consult the cache at all — see
-        // `oov_model_skipped_when_no_model_loaded`.
+    fn multiple_oov_words_all_fall_back_to_hand_rules_when_model_fails() {
         let engine = EnglishG2p::new(
             "hello\thəlˈoʊ\nworld\twˈɜɹld\n",
             Some(failing_oov_model()),
+            false,
+        )
+        .unwrap();
+        // Both "xyzzy" and "wibbly" miss the lexicon, so both are batched
+        // into a single OOV inference call; that call errors on the empty
+        // graph, and both words must still fall back to hand rules rather
+        // than one word's failure aborting the whole `text_to_ipa` call.
+        let expected =
+            format!("{} {}", hand_oov_rules_ipa("xyzzy"), hand_oov_rules_ipa("wibbly"));
+        assert_eq!(engine.text_to_ipa("xyzzy wibbly").unwrap(), expected);
+    }
+
+    #[test]
+    fn oov_cache_returns_cached_result_on_repeat() {
+        // A model must be loaded (even one that always errors) for
+        // text_to_ipa's classification pass to consult the cache at all —
+        // see `oov_model_skipped_when_word_exceeds_max_seq_len`.
+        let engine = EnglishG2p::new(
+            "hello\thəlˈoʊ\nworld\twˈɜɹld\n",
+            Some(failing_oov_model()),
+            false,
         )
         .unwrap();
         // Seed the cache directly with an IPA that differs from what hand
@@ -264,7 +415,7 @@ mod tests {
     #[test]
     fn oov_cache_not_populated_on_model_miss() {
         let engine =
-            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model())).unwrap();
+            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model()), false).unwrap();
         // "xyzzy" misses the lexicon and the failing OOV model errors, so
         // hand rules produce the result — but a failed inference must not
         // pollute the cache.
@@ -274,7 +425,7 @@ mod tests {
     #[test]
     fn oov_model_skipped_when_word_exceeds_max_seq_len() {
         let engine =
-            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model())).unwrap();
+            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model()), false).unwrap();
         // failing_oov_model's max_seq_len is 64.
         let long_word = "x".repeat(100);
         // Seed the cache as if a prior call had succeeded, proving the
@@ -284,9 +435,10 @@ mod tests {
             .lock()
             .unwrap()
             .put(long_word.clone(), "shouldnotappear".to_string());
-        let mut out = String::new();
-        assert!(!engine.try_oov_model_into(&long_word, &mut out));
-        assert!(out.is_empty());
+        assert_eq!(
+            engine.text_to_ipa(&long_word).unwrap(),
+            hand_oov_rules_ipa(&long_word)
+        );
     }
 
     // CER benchmark: measures the OOV tier's contribution against the
@@ -342,7 +494,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let engine = EnglishG2p::new(&held_out_dict, oov_model).expect("build EnglishG2p");
+        let engine = EnglishG2p::new(&held_out_dict, oov_model, false).expect("build EnglishG2p");
 
         let predictions: Vec<(String, String)> = test_pairs
             .iter()
@@ -395,7 +547,7 @@ mod tests {
     fn oov_cache_hit_avoids_rerunning_inference() {
         let oov_model = oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model");
         // Lexicon without "zoinks" so it's forced through the OOV tier.
-        let engine = EnglishG2p::new("hello\thəlˈoʊ\n", Some(oov_model)).unwrap();
+        let engine = EnglishG2p::new("hello\thəlˈoʊ\n", Some(oov_model), false).unwrap();
 
         let first = engine.text_to_ipa("zoinks").expect("text_to_ipa");
         assert_eq!(engine.oov_cache.lock().unwrap().len(), 1);
@@ -403,5 +555,42 @@ mod tests {
         let second = engine.text_to_ipa("zoinks").expect("text_to_ipa");
         assert_eq!(first, second);
         assert_eq!(engine.oov_cache.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[ignore = "needs a local G2P model directory (CRANE_G2P_EN_US_DIR)"]
+    fn multiple_oov_words_batch_matches_per_word_inference() {
+        // Two engines sharing no state, each with their own freshly loaded
+        // OOV model: one resolves "zoinks" and "archaeopteryx" together in
+        // a single `text_to_ipa` call (batched), the other resolves them
+        // one at a time in separate calls (each its own unbatched decode).
+        // Both must produce identical IPA per word, proving batching
+        // multiple OOV words into one call doesn't change the result.
+        let lexicon = "hello\thəlˈoʊ\n";
+        let batched_engine = EnglishG2p::new(
+            lexicon,
+            Some(oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model")),
+            false,
+        )
+        .unwrap();
+        let sequential_engine = EnglishG2p::new(
+            lexicon,
+            Some(oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model")),
+            false,
+        )
+        .unwrap();
+
+        let batched = batched_engine
+            .text_to_ipa("zoinks archaeopteryx")
+            .expect("text_to_ipa");
+        let sequential = format!(
+            "{} {}",
+            sequential_engine.text_to_ipa("zoinks").expect("text_to_ipa"),
+            sequential_engine
+                .text_to_ipa("archaeopteryx")
+                .expect("text_to_ipa")
+        );
+
+        assert_eq!(batched, sequential);
     }
 }
