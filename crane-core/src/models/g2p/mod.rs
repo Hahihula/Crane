@@ -12,6 +12,7 @@ use languages::{LanguageG2p, SUPPORTED_LANGUAGES};
 pub mod benchmark;
 pub mod languages;
 pub mod lexicon;
+pub mod oov_onnx;
 pub mod text_normalize;
 
 /// Converts text to phoneme representation for TTS models.
