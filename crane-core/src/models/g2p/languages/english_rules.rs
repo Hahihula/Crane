@@ -296,7 +296,9 @@ fn push_single_consonant(out: &mut String, w: &[u8], i: usize) {
 fn th_voiced_word(w: &str) -> bool {
     matches!(
         w,
-        "the" | "this" | "that" | "they" | "then" | "than" | "there" | "these" | "those"
+        "the" | "this" | "that" | "they" | "them" | "then" | "than" | "there" | "these"
+            | "those" | "though" | "thus" | "thence" | "thy" | "thee" | "thou" | "thine"
+            | "with" | "within" | "without"
     )
 }
 
@@ -459,6 +461,19 @@ mod tests {
         assert!(hand_oov_rules_ipa("the").contains('ð'));
         assert!(hand_oov_rules_ipa("think").contains('θ'));
         assert!(!hand_oov_rules_ipa("think").contains('ð'));
+    }
+
+    #[test]
+    fn th_voiced_in_expanded_word_list() {
+        for word in [
+            "them", "though", "thus", "thence", "thy", "thee", "thou", "thine", "with",
+            "within", "without",
+        ] {
+            assert!(
+                hand_oov_rules_ipa(word).contains('ð'),
+                "{word} should have voiced th"
+            );
+        }
     }
 
     #[test]
