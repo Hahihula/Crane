@@ -194,7 +194,7 @@ mod tests {
     //   models::g2p::languages::english::tests::cer_benchmark --ignored --nocapture
     // ```
 
-    use crate::models::g2p::benchmark::{REFERENCE_CER_EN_US, benchmark_g2p};
+    use crate::models::g2p::benchmark::{G2pBenchmarkResult, REFERENCE_CER_EN_US, benchmark_g2p};
 
     fn model_dir() -> std::path::PathBuf {
         std::env::var("CRANE_G2P_EN_US_DIR")
@@ -210,14 +210,16 @@ mod tests {
     }
 
     /// Builds an `EnglishG2p` from the on-disk lexicon with the held-out
-    /// test words removed, runs it over the test set, and asserts the
-    /// resulting CER is at or below `REFERENCE_CER_EN_US`.
+    /// test words removed and runs it over the test set, reporting the
+    /// resulting CER. Does not assert against `REFERENCE_CER_EN_US` itself
+    /// — callers decide whether that's meaningful for their configuration
+    /// (see `cer_benchmark_with_oov` vs `cer_benchmark_without_oov`).
     ///
     /// Test words are excluded from the lexicon before construction so the
     /// benchmark measures the OOV/rules tiers rather than trivial lexicon
     /// hits — a lexicon hit on a held-out word would trivially match and
     /// mask any regression in the fallback tiers.
-    fn run_cer_benchmark(oov_model: Option<oov_onnx::Model>, label: &str) {
+    fn run_cer_benchmark(oov_model: Option<oov_onnx::Model>, label: &str) -> G2pBenchmarkResult {
         let test_pairs =
             parse_word_ipa_tsv(include_str!("../../../../tests/data/g2p/en_us_test.tsv"));
         let test_words: std::collections::HashSet<&str> =
@@ -255,11 +257,7 @@ mod tests {
             "[{label}] en_us CER: {:.4} ({} errors / {} words)",
             result.cer, result.total_errors, result.total_words
         );
-        assert!(
-            result.cer <= REFERENCE_CER_EN_US,
-            "[{label}] CER {:.4} exceeds reference {REFERENCE_CER_EN_US:.4}",
-            result.cer
-        );
+        result
     }
 
     #[test]
@@ -267,12 +265,23 @@ mod tests {
     fn cer_benchmark_with_oov() {
         let oov_model =
             oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model");
-        run_cer_benchmark(Some(oov_model), "with-oov");
+        let result = run_cer_benchmark(Some(oov_model), "with-oov");
+        assert!(
+            result.cer <= REFERENCE_CER_EN_US,
+            "CER {:.4} exceeds reference {REFERENCE_CER_EN_US:.4}",
+            result.cer
+        );
     }
 
     #[test]
     #[ignore = "needs a local G2P model directory (CRANE_G2P_EN_US_DIR)"]
     fn cer_benchmark_without_oov() {
+        // Informational only: REFERENCE_CER_EN_US reflects the full
+        // lexicon+OOV+rules pipeline. With no OOV model, held-out words
+        // fall straight to hand rules, which is expected to score well
+        // above that reference -- this variant exists to show the OOV
+        // tier's contribution by comparison, not to pass a regression gate
+        // on its own.
         run_cer_benchmark(None, "without-oov");
     }
 }
