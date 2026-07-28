@@ -3,7 +3,7 @@
 // the onnx we only using decoder at the moment
 // mainly for driven Orpheus model
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use candle_core::{Device, Tensor};
 
 #[derive(Debug)]
@@ -15,7 +15,7 @@ impl SNAC24DecoderONNX {
     const SNAC_24_DECODER_ONNX_MODEL_PATH: &str = "checkpoints/snac_24khz_sim.onnx";
 
     pub fn new(model_path: Option<&str>, device: Option<&Device>) -> Result<Self> {
-        let target_device = device.unwrap_or(&Device::Cpu);
+        let _target_device = device.unwrap_or(&Device::Cpu);
         let model_path = model_path.unwrap_or(Self::SNAC_24_DECODER_ONNX_MODEL_PATH);
         if !std::path::Path::new(model_path).exists() {
             return Err(anyhow::anyhow!(
