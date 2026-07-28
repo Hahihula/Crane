@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn add_language_enables_text_to_ipa() {
         let mut phonemizer = MoonshineG2p::new();
-        let english = languages::english::EnglishG2p::new("hello\thəlˈoʊ\n").unwrap();
+        let english = languages::english::EnglishG2p::new("hello\thəlˈoʊ\n", None).unwrap();
         phonemizer.add_language(LanguageG2p::English(english));
 
         assert_eq!(phonemizer.text_to_ipa("hello", "en_us").unwrap(), "həlˈoʊ");

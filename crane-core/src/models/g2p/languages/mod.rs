@@ -65,7 +65,7 @@ mod tests {
     }
 
     fn test_language() -> LanguageG2p {
-        LanguageG2p::English(EnglishG2p::new("hello\thəlˈoʊ\n").unwrap())
+        LanguageG2p::English(EnglishG2p::new("hello\thəlˈoʊ\n", None).unwrap())
     }
 
     #[test]
