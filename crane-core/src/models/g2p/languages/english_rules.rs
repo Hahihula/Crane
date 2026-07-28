@@ -48,7 +48,9 @@ const FUNCTION_WORDS: &[(&str, &str)] = &[
 /// Multi-letter grapheme -> IPA rules, longest patterns checked first within
 /// each length cluster. `"gh"` and `"th"` are matched here but resolved by
 /// dedicated context-sensitive logic in [`oov_grapheme_to_ipa`] rather than
-/// this table's placeholder IPA.
+/// this table's placeholder IPA. `"ough"` is deliberately absent — its IPA
+/// depends on what follows, so it's handled inline in
+/// [`oov_grapheme_to_ipa`] before this table is scanned.
 const LITERALS: &[(&str, &str)] = &[
     ("tch", "tʃ"),
     ("dge", "dʒ"),
@@ -56,7 +58,6 @@ const LITERALS: &[(&str, &str)] = &[
     ("sion", "ʒən"),
     ("sure", "ʒɚ"),
     ("ture", "tʃɚ"),
-    ("ough", "oʊ"),
     ("augh", "ɔː"),
     ("eigh", "eɪ"),
     ("igh", "aɪ"),
@@ -501,6 +502,36 @@ fn oov_grapheme_to_ipa(word: &str) -> String {
             continue;
         }
 
+        // Context-sensitive "ough": followed by "t" gives /ɔːt/ ("thought",
+        // "bought"), except "drought" (and "droughts"), which is /aʊt/ despite
+        // matching the same letter pattern — checked via the two bytes
+        // immediately before "ough" rather than a whole-word match so
+        // inflected forms are covered too. Everywhere else (word end or
+        // before a vowel) keeps the existing default /oʊ/ ("though",
+        // "dough"). Checked ahead of the LITERALS scan since "ough" isn't a
+        // table entry (see [`LITERALS`]).
+        //
+        // Known limitation: "ough" is one of English's most irregular
+        // spellings and these two branches don't cover every case — "rough"/
+        // "tough"/"enough" (/ʌf/), "through" (/uː/), "cough"/"trough" (/ɒf/),
+        // and "bough"/"plough" (/aʊ/, word-final without a following "t")
+        // all still fall through to the /oʊ/ default and come out wrong. See
+        // `ough_variants_are_a_known_limitation` below.
+        if i + 4 <= n && &w[i..i + 4] == b"ough" {
+            if i + 4 < n && w[i + 4] == b't' {
+                if i >= 2 && &w[i - 2..i] == b"dr" {
+                    out.push_str("aʊt");
+                } else {
+                    out.push_str("ɔːt");
+                }
+                i += 5;
+            } else {
+                out.push_str("oʊ");
+                i += 4;
+            }
+            continue;
+        }
+
         let mut matched = false;
         for &(grapheme, ipa) in LITERALS {
             let len = grapheme.len();
@@ -798,6 +829,46 @@ mod tests {
     #[test]
     fn gh_is_hard_at_word_start() {
         assert!(hand_oov_rules_ipa("ghost").contains('ɡ'));
+    }
+
+    #[test]
+    fn ough_before_t_gives_aw_t() {
+        // "thought" -> "ough" + "t" should give /ɔːt/, not the old /oʊt/.
+        let ipa = hand_oov_rules_ipa("thought");
+        assert!(ipa.contains("ɔːt"), "expected /ɔːt/: {ipa}");
+        assert!(!ipa.contains("oʊt"), "should not contain old /oʊt/: {ipa}");
+    }
+
+    #[test]
+    fn ough_at_word_end_gives_long_o() {
+        // "though" -> "ough" at word end should give /oʊ/, not /ɔːt/.
+        let ipa = hand_oov_rules_ipa("though");
+        assert!(ipa.contains("oʊ"), "expected /oʊ/: {ipa}");
+        assert!(!ipa.contains("ɔːt"), "should not contain /ɔːt/: {ipa}");
+    }
+
+    #[test]
+    fn drought_ough_t_is_an_exception_to_the_ought_rule() {
+        // "drought" matches the same ough+t pattern as "thought" but is
+        // /aʊt/, not /ɔːt/.
+        let ipa = hand_oov_rules_ipa("drought");
+        assert!(ipa.contains("aʊt"), "expected /aʊt/: {ipa}");
+        assert!(!ipa.contains("ɔːt"), "should not contain /ɔːt/: {ipa}");
+    }
+
+    #[test]
+    fn ough_variants_are_a_known_limitation() {
+        // "ough" is one of English's most irregular spellings — the same
+        // four letters map to 6+ distinct phonemes depending on the word.
+        // The hand rules only special-case "ought" -> /ɔːt/ and "drought" ->
+        // /aʊt/, defaulting to /oʊ/ elsewhere. These pin the current
+        // (known-imperfect) behavior for words the rules get wrong.
+        let rough = hand_oov_rules_ipa("rough"); // correct: /ɹʌf/
+        assert!(rough.contains("oʊ"), "rough: {rough}");
+        let through = hand_oov_rules_ipa("through"); // correct: /θɹuː/
+        assert!(through.contains("oʊ"), "through: {through}");
+        let cough = hand_oov_rules_ipa("cough"); // correct: /kɒf/
+        assert!(cough.contains("oʊ"), "cough: {cough}");
     }
 
     #[test]
