@@ -240,6 +240,24 @@ fn oov_vowel(w: &[u8], i: usize) -> (&'static str, usize) {
     }
 }
 
+/// True when the `b` in a "-mb" cluster starting at `i` is silent: the
+/// cluster is word-final, or followed only by a safe inflectional suffix
+/// (`-s`, `-ed`, `-ing`, `-ness`) that never turns "mb" into a different
+/// cluster. Deliberately excludes `-er`/`-ers`/`-le`/`-ly`, which would
+/// misfire on "timber", "amber", "humble", "nimbly" (all sound both
+/// consonants). Mid-word "mb" otherwise (e.g. "combat") sounds both.
+///
+/// Note: silencing the `b` does not correct vowel quality — "climb" still
+/// resolves through the closed-syllable heuristic to a short vowel instead
+/// of the correct /aɪ/, since the magic-e check no longer sees a trailing
+/// `e`. This is a pre-existing heuristic limitation, not fixed here.
+fn is_silent_final_mb(w: &[u8], i: usize) -> bool {
+    if i + 1 >= w.len() || w[i] != b'm' || w[i + 1] != b'b' {
+        return false;
+    }
+    matches!(&w[i + 2..], b"" | b"s" | b"ed" | b"ing" | b"ness")
+}
+
 /// Resolves a single consonant letter at `i`, pushing its IPA (or, for `c`
 /// and `g`, a context-dependent soft/hard variant) directly onto `out`.
 fn push_single_consonant(out: &mut String, w: &[u8], i: usize) {
@@ -308,6 +326,28 @@ fn oov_grapheme_to_ipa(word: &str) -> String {
     let mut i = 0usize;
 
     while i < n {
+        // Silent initial consonant clusters: the first letter of "kn-",
+        // "wr-", "gn-", "ps-" is silent only at word start (e.g. "know",
+        // "write", "gnat", "psalm") — mid-word occurrences like "unknot" or
+        // "handwritten" sound both consonants.
+        if i == 0
+            && n >= 2
+            && matches!(
+                (w[0], w[1]),
+                (b'k' | b'g', b'n') | (b'w', b'r') | (b'p', b's')
+            )
+        {
+            i += 1;
+            continue;
+        }
+        // Silent final "b" in "-mb" (e.g. "lamb", "climb", "climbing"); see
+        // is_silent_final_mb for the excluded mid-word/suffix cases.
+        if is_silent_final_mb(w, i) {
+            out.push('m');
+            i += 2;
+            continue;
+        }
+
         // Silent final "e" (e.g. the trailing 'e' in "make"), but only once
         // a vowel sound has already been emitted — otherwise this `e` is
         // the word's only vowel (e.g. "he", "be", "she") and must not be
@@ -432,6 +472,82 @@ mod tests {
     #[test]
     fn gh_is_hard_at_word_start() {
         assert!(hand_oov_rules_ipa("ghost").contains('ɡ'));
+    }
+
+    #[test]
+    fn silent_k_in_initial_kn() {
+        // "knife" has no other 'k'/'ck' spelling, unlike e.g. "knack".
+        let ipa = hand_oov_rules_ipa("knife");
+        assert!(!ipa.contains('k'), "kn- should silence the k: {ipa}");
+        assert!(ipa.contains('n'));
+    }
+
+    #[test]
+    fn silent_w_in_initial_wr() {
+        let ipa = hand_oov_rules_ipa("wring");
+        assert!(!ipa.contains('w'), "wr- should silence the w: {ipa}");
+        assert!(ipa.contains('ɹ'));
+    }
+
+    #[test]
+    fn silent_g_in_initial_gn() {
+        let ipa = hand_oov_rules_ipa("gnat");
+        assert!(!ipa.contains('ɡ'), "gn- should silence the g: {ipa}");
+        assert!(ipa.contains('n'));
+    }
+
+    #[test]
+    fn silent_p_in_initial_ps() {
+        let ipa = hand_oov_rules_ipa("psalm");
+        assert!(!ipa.contains('p'), "ps- should silence the p: {ipa}");
+        assert!(ipa.contains('s'));
+    }
+
+    #[test]
+    fn silent_b_in_final_mb() {
+        // Pinned to the exact output (not just substring presence) so a
+        // future change to vowel resolution around the silenced "b" is
+        // caught, not just the consonant-presence check.
+        assert_eq!(hand_oov_rules_ipa("lamb"), "lˈæm");
+    }
+
+    #[test]
+    fn silent_b_in_final_mb_before_inflectional_suffix() {
+        // "-mb" followed by a safe inflectional suffix should still
+        // silence the b: the suffix doesn't turn "mb" into a different
+        // cluster the way "-er"/"-le"/"-ly" do (see plumber test below).
+        for word in ["climbing", "numbness", "combed", "lambs"] {
+            let ipa = hand_oov_rules_ipa(word);
+            assert!(!ipa.contains('b'), "{word} should silence the b: {ipa}");
+            assert!(ipa.contains('m'), "{word} should keep the m: {ipa}");
+        }
+    }
+
+    #[test]
+    fn mb_before_er_suffix_preserves_both() {
+        // "-mber" is excluded from the silent-mb suffix set: "timber",
+        // "amber", "chamber" all sound both consonants, so a generic
+        // "-mb + suffix" rule can't include "-er" without false positives.
+        for word in ["plumber", "timber", "chamber"] {
+            let ipa = hand_oov_rules_ipa(word);
+            assert!(ipa.contains('b'), "{word} should sound the b: {ipa}");
+        }
+    }
+
+    #[test]
+    fn mb_mid_word_preserves_both() {
+        // "combat" has "mb" mid-word; both consonants should sound.
+        let ipa = hand_oov_rules_ipa("combat");
+        assert!(ipa.contains('m'));
+        assert!(ipa.contains('b'));
+    }
+
+    #[test]
+    fn kn_mid_word_preserves_both() {
+        // "unknown" has "kn" mid-word (not at position 0); both should sound.
+        let ipa = hand_oov_rules_ipa("unknown");
+        assert!(ipa.contains('k'));
+        assert!(ipa.contains('n'));
     }
 
     #[test]
