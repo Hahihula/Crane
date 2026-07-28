@@ -34,6 +34,7 @@ fancy-regex = "0.18"
 tekken-rs = "0.1.1"
 zip = "8"
 fst = { workspace = true }
+lru = { version = "0.12", optional = true }
 
 
 intel-mkl-src = { version = "0.8.1", optional = true }
@@ -80,7 +81,7 @@ accelerate = [
     "candle-nn/accelerate",
     "candle-transformers/accelerate",
 ]
-onnx = ["dep:prost", "dep:prost-build"]
+onnx = ["dep:prost", "dep:prost-build", "dep:lru"]
 [dev-dependencies]
 tempfile = "3"
 

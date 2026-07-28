@@ -6,7 +6,11 @@
 //! is loaded and produces non-empty output), then hand-written
 //! letter-to-sound rules as the final fallback.
 
+use std::num::NonZeroUsize;
+use std::sync::{Mutex, PoisonError};
+
 use anyhow::Result;
+use lru::LruCache;
 
 use crate::models::g2p::lexicon::Lexicon;
 use crate::models::g2p::oov_onnx;
@@ -14,15 +18,40 @@ use crate::models::g2p::text_normalize::normalize_word_for_lookup;
 
 use super::english_rules::hand_oov_rules_ipa;
 
+/// Default capacity of the per-engine OOV result cache — see
+/// [`EnglishG2p::oov_cache`].
+const DEFAULT_OOV_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(10_000).unwrap();
+
 /// English grapheme-to-phoneme engine: lexicon lookup, then OOV model
 /// fallback, then hand-written rule fallback.
-#[derive(Debug)]
 pub struct EnglishG2p {
     /// Word-to-IPA lexicon, built from a `word\tIPA` TSV at construction.
     lexicon: Lexicon,
     /// OOV ONNX fallback model, tried between the lexicon and hand rules.
     /// `None` when no OOV model is available for this deployment.
     oov_model: Option<oov_onnx::Model>,
+    /// Cache of resolved OOV words, so repeated words (proper nouns, brand
+    /// names, domain terms) don't re-run ONNX inference. `Mutex`-guarded for
+    /// interior mutability since `text_to_ipa` takes `&self`. This relies on
+    /// callers driving `text_to_ipa` from a single thread at a time — see
+    /// the note on [`LanguageG2p`](super::LanguageG2p) — since TTS runs on a
+    /// single dedicated thread per the existing Crane TTS serving pattern.
+    /// Only successful, non-empty OOV results are cached — see
+    /// [`Self::try_oov_model_into`].
+    oov_cache: Mutex<LruCache<String, String>>,
+}
+
+impl std::fmt::Debug for EnglishG2p {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnglishG2p")
+            .field("lexicon", &self.lexicon)
+            .field("oov_model", &self.oov_model)
+            .field(
+                "oov_cache_len",
+                &self.oov_cache.lock().map(|c| c.len()).unwrap_or_default(),
+            )
+            .finish()
+    }
 }
 
 impl EnglishG2p {
@@ -37,6 +66,7 @@ impl EnglishG2p {
         Ok(Self {
             lexicon: Lexicon::from_tsv(lexicon_tsv)?,
             oov_model,
+            oov_cache: Mutex::new(LruCache::new(DEFAULT_OOV_CACHE_CAPACITY)),
         })
     }
 
@@ -65,34 +95,58 @@ impl EnglishG2p {
             }
             if let Some(word_ipa) = self.lexicon.get(&word) {
                 ipa.push_str(word_ipa);
-            } else if let Some(oov_ipa) = self.try_oov_model(&word) {
-                ipa.push_str(&oov_ipa);
-            } else {
+            } else if !self.try_oov_model_into(&word, &mut ipa) {
                 ipa.push_str(&hand_oov_rules_ipa(&word));
             }
         }
         Ok(ipa)
     }
 
-    /// Attempts OOV model inference for `word`.
+    /// Attempts OOV model inference for `word`, checking the OOV result
+    /// cache first, and appends the resolved IPA to `out` on success.
     ///
-    /// Returns `None` if no OOV model is loaded, if inference fails, or if
-    /// the model produces an empty result — all three fall through to hand
-    /// rules. A single word's OOV failure must never abort phonemization of
-    /// the rest of the sentence, so inference errors are swallowed here
-    /// rather than propagated. In practice this currently means every OOV
-    /// call falls through: the shipped Moonshine-TTS English model always
-    /// errors on `candle-onnx`'s missing `LayerNormalization` support (see
-    /// the module doc on [`oov_onnx`](crate::models::g2p::oov_onnx)), so
-    /// this tier is a documented no-op against real assets until that's
-    /// fixed, not a silently-broken one.
-    fn try_oov_model(&self, word: &str) -> Option<String> {
-        let model = self.oov_model.as_ref()?;
-        let ipa = model.predict_phonemes(word).ok()?;
-        if ipa.is_empty() {
-            return None;
+    /// Returns `false` if no OOV model is loaded, if `word` is longer than
+    /// the model's `max_seq_len` (its input would be truncated, producing a
+    /// meaningless result), if inference fails, or if the model produces an
+    /// empty result — all four fall through to hand rules. A single word's
+    /// OOV failure must never abort phonemization of the rest of the
+    /// sentence, so inference errors are swallowed here rather than
+    /// propagated. Only successful, non-empty results within the model's
+    /// length limit are cached — a transient inference failure isn't worth
+    /// remembering, and an overlong word would otherwise let unbounded
+    /// cache keys in.
+    fn try_oov_model_into(&self, word: &str, out: &mut String) -> bool {
+        let Some(model) = self.oov_model.as_ref() else {
+            return false;
+        };
+        if word.chars().count() > model.config.max_seq_len {
+            return false;
         }
-        Some(ipa)
+
+        {
+            let mut cache = self
+                .oov_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(cached) = cache.get(word) {
+                out.push_str(cached);
+                return true;
+            }
+        }
+
+        let Ok(ipa) = model.predict_phonemes(word) else {
+            return false;
+        };
+        if ipa.is_empty() {
+            return false;
+        }
+
+        out.push_str(&ipa);
+        self.oov_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .put(word.to_owned(), ipa);
+        true
     }
 }
 
@@ -149,7 +203,9 @@ mod tests {
     #[test]
     fn try_oov_model_returns_none_when_no_model_loaded() {
         let engine = test_engine();
-        assert!(engine.try_oov_model("xyzzy").is_none());
+        let mut out = String::new();
+        assert!(!engine.try_oov_model_into("xyzzy", &mut out));
+        assert!(out.is_empty());
     }
 
     /// An OOV model wrapping an empty ONNX graph, so `predict_phonemes`
@@ -182,6 +238,55 @@ mod tests {
         // graph, so this must still succeed via hand rules, not propagate
         // the ONNX error out of text_to_ipa.
         assert_eq!(engine.text_to_ipa("xyzzy").unwrap(), "ksɪzˈaɪ");
+    }
+
+    #[test]
+    fn oov_cache_returns_cached_result_on_repeat() {
+        // A model must be loaded (even one that always errors) for
+        // try_oov_model_into to consult the cache at all — see
+        // `oov_model_skipped_when_no_model_loaded`.
+        let engine = EnglishG2p::new(
+            "hello\thəlˈoʊ\nworld\twˈɜɹld\n",
+            Some(failing_oov_model()),
+        )
+        .unwrap();
+        // Seed the cache directly with an IPA that differs from what hand
+        // rules would produce for "xyzzy" ("ksɪzˈaɪ"), so a cache hit is
+        // distinguishable from falling through to hand rules.
+        engine
+            .oov_cache
+            .lock()
+            .unwrap()
+            .put("xyzzy".to_string(), "kˈæʃd".to_string());
+        assert_eq!(engine.text_to_ipa("xyzzy").unwrap(), "kˈæʃd");
+    }
+
+    #[test]
+    fn oov_cache_not_populated_on_model_miss() {
+        let engine =
+            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model())).unwrap();
+        // "xyzzy" misses the lexicon and the failing OOV model errors, so
+        // hand rules produce the result — but a failed inference must not
+        // pollute the cache.
+        assert_eq!(engine.text_to_ipa("xyzzy").unwrap(), "ksɪzˈaɪ");
+    }
+
+    #[test]
+    fn oov_model_skipped_when_word_exceeds_max_seq_len() {
+        let engine =
+            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model())).unwrap();
+        // failing_oov_model's max_seq_len is 64.
+        let long_word = "x".repeat(100);
+        // Seed the cache as if a prior call had succeeded, proving the
+        // length guard short-circuits before the cache is even consulted.
+        engine
+            .oov_cache
+            .lock()
+            .unwrap()
+            .put(long_word.clone(), "shouldnotappear".to_string());
+        let mut out = String::new();
+        assert!(!engine.try_oov_model_into(&long_word, &mut out));
+        assert!(out.is_empty());
     }
 
     // CER benchmark: measures the OOV tier's contribution against the
@@ -283,5 +388,20 @@ mod tests {
         // tier's contribution by comparison, not to pass a regression gate
         // on its own.
         run_cer_benchmark(None, "without-oov");
+    }
+
+    #[test]
+    #[ignore = "needs a local G2P model directory (CRANE_G2P_EN_US_DIR)"]
+    fn oov_cache_hit_avoids_rerunning_inference() {
+        let oov_model = oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model");
+        // Lexicon without "zoinks" so it's forced through the OOV tier.
+        let engine = EnglishG2p::new("hello\thəlˈoʊ\n", Some(oov_model)).unwrap();
+
+        let first = engine.text_to_ipa("zoinks").expect("text_to_ipa");
+        assert_eq!(engine.oov_cache.lock().unwrap().len(), 1);
+
+        let second = engine.text_to_ipa("zoinks").expect("text_to_ipa");
+        assert_eq!(first, second);
+        assert_eq!(engine.oov_cache.lock().unwrap().len(), 1);
     }
 }

@@ -25,6 +25,14 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &["en_us"];
 /// Each variant wraps a per-language engine (lexicon lookup, rules, and
 /// optionally an OOV fallback model). Variants are added incrementally as
 /// each language is implemented.
+///
+/// `text_to_ipa` takes `&self`, but engines with an interior-mutable cache
+/// (e.g. [`EnglishG2p`]'s OOV result cache) assume calls are driven from a
+/// single thread at a time, matching Crane's existing single-thread-per-model
+/// TTS serving pattern. `LanguageG2p` is `Send + Sync`, so it is safe to
+/// share across threads, but callers wrapping it in `Arc` for concurrent
+/// calls should expect lock contention on that cache rather than free
+/// parallelism.
 #[derive(Debug)]
 pub enum LanguageG2p {
     /// English (`en_us`) engine.
