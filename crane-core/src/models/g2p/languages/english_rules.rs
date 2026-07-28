@@ -135,8 +135,39 @@ const SUFFIXES: &[(&str, &str)] = &[
     ("ly", "li"),
 ];
 
-/// Minimum stem length left after stripping a suffix — prevents
-/// over-stripping short words like "able", "only", "fly".
+/// Known English prefixes and their fixed IPA. Matched against the whole
+/// word before the main grapheme scan runs, so the stem can be phonemized
+/// independently of the prefix. See [`strip_prefix`] for the extra
+/// consonant-after-prefix guard that keeps this from misfiring on
+/// non-derived words like "ready" or "unit".
+///
+/// `"re"`, `"mis"`, and `"pre"` are deliberately absent: each was measured
+/// individually on the held-out CER benchmark (same methodology as the
+/// combined-set measurement below) and found CER-net-negative.
+///
+/// - `"re"`: most "re"-initial OOV words in practice aren't the
+///   "again"/"back" prefix at all (e.g. "rectangle", "recipe", "regular",
+///   "relics" — etymologically unrelated to "re-"), and the many genuine
+///   derivations (e.g. "rebuild", "recall") don't recoup the losses from
+///   those false positives.
+/// - `"mis"`: consonant-initial non-prefix matches (e.g. "mississippi",
+///   "missouri", "mists") outweigh genuine derivations on this corpus.
+/// - `"pre"`: the worst of the three measured — consonant-initial Latin
+///   roots ("preceded", "preliminary", "present", "prepare") vastly
+///   outnumber genuine prefix derivations, and even genuine "pre-" words
+///   are usually unstressed (/pɹɪ-/ or /pɹə-/), not the fully-stressed
+///   long /iː/ this table would have used.
+///
+/// `"un"` and `"dis"` are each individually CER-positive, and their
+/// combination is CER-positive by more than either alone (measured on the
+/// same held-out benchmark): 18,976 baseline errors -> 18,961 with both.
+const PREFIXES: &[(&str, &str)] = &[
+    ("un", "ʌn"),
+    ("dis", "dɪs"),
+];
+
+/// Minimum stem length left after stripping a prefix or suffix — prevents
+/// over-stripping short words like "able", "only", "fly", "unit".
 const MIN_STEM_LEN: usize = 3;
 
 /// Priority order for locating the syllable that gets the primary stress
@@ -351,10 +382,31 @@ fn strip_suffix(letters: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// Tries to strip a known prefix (see [`PREFIXES`]) from `letters`. Returns
+/// `Some((prefix_ipa, stem))` when a prefix matches, the remaining stem is
+/// at least [`MIN_STEM_LEN`] characters, and the stem starts with a
+/// consonant. The consonant guard rules out words where the "prefix" is
+/// just a coincidental spelling overlap followed by a vowel digraph — e.g.
+/// "ready"/"real"/"reason" (not "re-" + vowel-initial stem) and
+/// "unit"/"union"/"unique" (not "un-" + vowel-initial stem) — while true
+/// prefix derivations before a vowel-initial stem ("react", "redo") are
+/// rare enough among OOV words to accept missing.
+fn strip_prefix(letters: &str) -> Option<(&str, &str)> {
+    for &(prefix, ipa) in PREFIXES {
+        if letters.len() >= prefix.len() + MIN_STEM_LEN && letters.starts_with(prefix) {
+            let stem = &letters[prefix.len()..];
+            if stem.as_bytes().first().is_some_and(|&c| is_consonant(c)) {
+                return Some((ipa, stem));
+            }
+        }
+    }
+    None
+}
+
 /// Greedily converts an already-normalized word into IPA: function-word
-/// overrides first, then known-suffix decomposition, then a left-to-right
-/// scan matching multi-letter graphemes, then single vowel/consonant rules
-/// for anything left over.
+/// overrides first, then known-suffix decomposition, then known-prefix
+/// decomposition, then a left-to-right scan matching multi-letter
+/// graphemes, then single vowel/consonant rules for anything left over.
 ///
 /// Expects `word` to already be normalized via `normalize_word_for_lookup`
 /// (the sole caller, [`hand_oov_rules_ipa`], is only ever invoked with
@@ -387,6 +439,28 @@ fn oov_grapheme_to_ipa(word: &str) -> String {
         let mut stem_ipa = add_primary_stress_if_missing(oov_grapheme_to_ipa(stem));
         stem_ipa.push_str(suffix_ipa);
         return stem_ipa;
+    }
+
+    // Prefix decomposition: strip a known prefix, phonemize the remainder
+    // recursively, then prepend the prefix's fixed IPA. Same stress-first
+    // rationale as suffix decomposition above: the stem earns its own
+    // stress before the prefix is prepended, so the top-level stress pass
+    // in `hand_oov_rules_ipa` (which sees a stress mark already present)
+    // doesn't get a chance to instead land it inside the prefix.
+    //
+    // Tried after suffix decomposition, not before or in parallel: this is
+    // safe because `strip_prefix`'s consonant-after-prefix guard already
+    // rejects the case that would make ordering matter (e.g.
+    // `strip_prefix("disable")` fails since "able" starts with a vowel, so
+    // "disable" only ever matches the suffix path). Multi-affix words shed
+    // one affix per recursion level regardless of which tier catches which
+    // affix first — e.g. "unreadable" strips suffix "-able" here, then the
+    // recursive call strips prefix "un-" from "read".
+    if let Some((prefix_ipa, stem)) = strip_prefix(&letters) {
+        let mut result = String::with_capacity(prefix_ipa.len() + stem.len() * 2);
+        result.push_str(prefix_ipa);
+        result.push_str(&add_primary_stress_if_missing(oov_grapheme_to_ipa(stem)));
+        return result;
     }
 
     let voiced_th = th_voiced_word(&letters);
@@ -662,6 +736,58 @@ mod tests {
     }
 
     #[test]
+    fn prefix_un_is_stripped_and_prepended() {
+        let ipa = hand_oov_rules_ipa("undo");
+        assert!(ipa.starts_with("ʌn"), "expected un- IPA /ʌn/: {ipa}");
+    }
+
+    #[test]
+    fn prefix_dis_is_stripped_and_prepended() {
+        let ipa = hand_oov_rules_ipa("disband");
+        assert!(ipa.starts_with("dɪs"), "expected dis- IPA /dɪs/: {ipa}");
+    }
+
+    #[test]
+    fn prefix_un_not_stripped_before_vowel_stem() {
+        // "union"/"unit" are not "un-" + a vowel-initial stem. Tested
+        // directly against `strip_prefix` rather than through
+        // `hand_oov_rules_ipa`, since "u" naturally maps to /ʌ/ in a closed
+        // syllable regardless of prefix stripping — the surface IPA would
+        // coincidentally start with "ʌn" either way, masking whether the
+        // guard actually fired.
+        assert!(strip_prefix("union").is_none());
+        assert!(strip_prefix("unit").is_none());
+    }
+
+    #[test]
+    fn double_prefix_is_stripped_recursively() {
+        // "undiscover" -> strip "un-" -> "discover" -> strip "dis-" ->
+        // "cover", mirroring double_suffix_is_stripped_recursively above.
+        let ipa = hand_oov_rules_ipa("undiscover");
+        assert!(ipa.starts_with("ʌndɪs"), "expected un-dis- IPA: {ipa}");
+    }
+
+    #[test]
+    fn prefix_un_enables_silent_kn_in_unknown() {
+        // "unknown" -> strip "un-" -> "known", where the initial "kn-" is
+        // now at position 0 of the recursive call and correctly silences
+        // the k (see kn_mid_word_preserves_both, which uses "acknowledge"
+        // instead of "unknown" for this reason).
+        let ipa = hand_oov_rules_ipa("unknown");
+        assert!(ipa.starts_with("ʌn"), "expected un- prefix: {ipa}");
+        assert!(!ipa.contains('k'), "kn- in 'known' should silence the k: {ipa}");
+    }
+
+    #[test]
+    fn prefix_and_suffix_both_strip() {
+        // "unreadable" -> strip suffix "-able" first -> "unread" -> strip
+        // prefix "un-" on the recursive call -> "read".
+        let ipa = hand_oov_rules_ipa("unreadable");
+        assert!(ipa.starts_with("ʌn"), "expected un- prefix: {ipa}");
+        assert!(ipa.ends_with("əbəl"), "expected -able suffix: {ipa}");
+    }
+
+    #[test]
     fn gh_is_silent_after_a_vowel() {
         // "night" -> /n/ + "igh" (-> aɪ) + "t"; the "gh" digraph should not
         // separately emit a hard /ɡ/.
@@ -744,8 +870,10 @@ mod tests {
 
     #[test]
     fn kn_mid_word_preserves_both() {
-        // "unknown" has "kn" mid-word (not at position 0); both should sound.
-        let ipa = hand_oov_rules_ipa("unknown");
+        // "acknowledge" has "kn" mid-word (not at position 0, and "ac-" is
+        // not a recognized prefix so this isn't reached via prefix
+        // stripping either); both consonants should sound.
+        let ipa = hand_oov_rules_ipa("acknowledge");
         assert!(ipa.contains('k'));
         assert!(ipa.contains('n'));
     }
