@@ -255,6 +255,47 @@ Supported endpoints:
 
 ✨ **Text-to-Speech (Qwen3-TTS)**: For TTS models, the server adds a `/v1/audio/speech` endpoint (OpenAI-compatible). Both **CustomVoice** (predefined speakers) and **Base** (voice cloning via reference audio) models are supported. `response_format` currently supports `wav` and `pcm` (other formats return `400`). See [crane-serve/README.md](crane-serve/README.md) for full TTS API documentation.
 
+## Using with opencode
+
+[opencode](https://opencode.ai/) can talk to crane-serve as a custom
+OpenAI-compatible provider. crane-serve has no auth layer and ignores the
+`model` field in requests (it always serves whatever was loaded via
+`--model-path`/`--model-name` at startup), so any placeholder API key and
+model ID work.
+
+Start crane-serve:
+
+```bash
+cargo run -p crane-serve --release --features cuda -- \
+  --model-path /path/to/your/model \
+  --model-name my-crane-model \
+  --port 8080
+```
+
+Add a custom provider in `opencode.json` (project root) or
+`~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "crane": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Crane",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "my-crane-model": { "name": "My Crane Model" }
+      }
+    }
+  }
+}
+```
+
+Restart opencode and select the `Crane` provider via `/models`.
+
 ### TTS Examples
 
 ```bash
