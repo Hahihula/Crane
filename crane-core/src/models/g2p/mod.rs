@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 use languages::{LanguageG2p, SUPPORTED_LANGUAGES};
 
 pub mod benchmark;
+pub mod ipa_postprocess;
 pub mod languages;
 pub mod lexicon;
 pub mod oov_onnx;
