@@ -286,7 +286,12 @@ mod tests {
             audio_token_id: TEST_AUDIO_TOKEN_ID,
             timestamp_token_id: 21,
             pad_token_id: 0,
-            eos_token_id: vec![1, 2],
+            // Left unreachable: `generation_loop_runs` samples from randomly
+            // initialized weights (unseeded on the CPU backend), so a
+            // reachable id here would make the loop's early-exit
+            // non-deterministic and occasionally sample it on the very
+            // first token, leaving `generated` empty.
+            eos_token_id: vec![],
             tie_word_embeddings: true,
         }
     }
