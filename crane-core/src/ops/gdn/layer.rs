@@ -7,7 +7,7 @@ use candle_nn::VarBuilder;
 
 use super::backend::{apply_recurrence, causal_conv1d, compute_beta_g, l2_norm};
 use super::cache::GdnLayerCache;
-use super::config::{GdnConfig, GdnDims};
+use super::config::{GdnConfig, GdnDims, VHeadOrder};
 use super::norm::RmsNormGated;
 use super::projection::{GdnInputProjection, GdnInputProjectionKind};
 use crate::ops::linear::{linear_layer, LinearLayer};
@@ -159,20 +159,95 @@ fn split_qkv(
 /// repeating each key head `v_per_group` times (GQA-style expansion for
 /// linear attention).
 ///
-/// When `num_k_heads == num_v_heads` (`v_per_group == 1`) this is a no-op.
+/// The expansion must place each key head's replicas at the same indices the
+/// checkpoint's value heads occupy, so it follows `dims.v_head_order`:
+/// `Interleaved` (HF) repeats along a trailing axis, putting a key head's
+/// replicas next to each other; `Chunked` (llama.cpp GGUF) repeats along a
+/// leading axis, laying out one full pass of key heads per replica. Both
+/// produce the same multiset of rows — only the pairing differs.
+///
+/// When `num_k_heads == num_v_heads` (`v_per_group == 1`) this is a no-op and
+/// the two orders coincide.
 fn repeat_kv_heads(q: &Tensor, k: &Tensor, dims: &GdnDims) -> Result<(Tensor, Tensor)> {
     if dims.v_per_group == 1 {
         return Ok((q.clone(), k.clone()));
     }
-    let q = q
-        .unsqueeze(3)?
-        .repeat((1, 1, 1, dims.v_per_group, 1))?
-        .contiguous()?
-        .reshape((q.dim(0)?, q.dim(1)?, dims.num_v_heads, dims.head_k_dim))?;
-    let k = k
-        .unsqueeze(3)?
-        .repeat((1, 1, 1, dims.v_per_group, 1))?
-        .contiguous()?
-        .reshape((k.dim(0)?, k.dim(1)?, dims.num_v_heads, dims.head_k_dim))?;
-    Ok((q, k))
+    let expand = |t: &Tensor| -> Result<Tensor> {
+        let (b, s) = (t.dim(0)?, t.dim(1)?);
+        let repeated = match dims.v_head_order {
+            VHeadOrder::Interleaved => t.unsqueeze(3)?.repeat((1, 1, 1, dims.v_per_group, 1))?,
+            VHeadOrder::Chunked => t.unsqueeze(2)?.repeat((1, 1, dims.v_per_group, 1, 1))?,
+        };
+        repeated
+            .contiguous()?
+            .reshape((b, s, dims.num_v_heads, dims.head_k_dim))
+    };
+    Ok((expand(q)?, expand(k)?))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Tests
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    /// `num_k_heads=2, v_per_group=2` -> 4 value heads. Each key head must end
+    /// up at exactly the indices its value heads occupy, which differs per
+    /// order. Tagging each key head with a distinct value makes the resulting
+    /// pairing directly readable.
+    fn dims_2x2(order: VHeadOrder) -> GdnDims {
+        GdnDims {
+            hidden_size: 8,
+            num_k_heads: 2,
+            num_v_heads: 4,
+            head_k_dim: 1,
+            head_v_dim: 1,
+            conv_kernel_size: 4,
+            key_dim: 2,
+            value_dim: 4,
+            conv_dim: 8,
+            v_per_group: 2,
+            v_head_order: order,
+        }
+    }
+
+    fn expanded(order: VHeadOrder) -> Vec<f32> {
+        // [B=1, S=1, num_k_heads=2, head_k_dim=1]: key head 0 -> 10, head 1 -> 20
+        let t = Tensor::new(&[[[[10.0f32], [20.0f32]]]], &Device::Cpu).unwrap();
+        let dims = dims_2x2(order);
+        let (q, k) = repeat_kv_heads(&t, &t, &dims).unwrap();
+        assert_eq!(q.dims(), &[1, 1, 4, 1]);
+        assert_eq!(k.dims(), &[1, 1, 4, 1]);
+        q.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// HF: a key head's replicas are adjacent.
+    #[test]
+    fn repeat_kv_heads_interleaved_groups_replicas_together() {
+        assert_eq!(expanded(VHeadOrder::Interleaved), vec![10.0, 10.0, 20.0, 20.0]);
+    }
+
+    /// llama.cpp GGUF: one full pass over key heads per replica. Mixing this
+    /// up with the interleaved order is the Qwen3.5-GGUF value-head bug.
+    #[test]
+    fn repeat_kv_heads_chunked_repeats_whole_key_head_pass() {
+        assert_eq!(expanded(VHeadOrder::Chunked), vec![10.0, 20.0, 10.0, 20.0]);
+    }
+
+    /// With `v_per_group == 1` the two orders coincide and expansion is a no-op.
+    #[test]
+    fn repeat_kv_heads_is_noop_without_grouping() {
+        let t = Tensor::new(&[[[[10.0f32], [20.0f32]]]], &Device::Cpu).unwrap();
+        for order in [VHeadOrder::Interleaved, VHeadOrder::Chunked] {
+            let mut dims = dims_2x2(order);
+            dims.num_v_heads = 2;
+            dims.value_dim = 2;
+            dims.v_per_group = 1;
+            let (q, _) = repeat_kv_heads(&t, &t, &dims).unwrap();
+            assert_eq!(q.flatten_all().unwrap().to_vec1::<f32>().unwrap(), vec![10.0, 20.0]);
+        }
+    }
 }

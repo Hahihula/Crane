@@ -78,7 +78,7 @@ use super::config::{LayerType, TextConfig};
 use super::kv_cache::KvCache;
 use crate::ops::gdn::{
     GatedDeltaNet, GdnDims, GdnInputProjection, GdnInputProjectionKind, GdnLayerCache,
-    RmsNormGated,
+    RmsNormGated, VHeadOrder,
 };
 
 // ── MRoPE rotary embedding ─────────────────────────────────────────────
@@ -490,6 +490,12 @@ impl DecoderLayer {
     /// 2-D `[conv_dim, kernel]`, `ssm_a` is `A_log`, and `ssm_dt.bias` is
     /// `dt_bias`. Block norms (`attn_norm`, `post_attention_norm`) carry the
     /// folded `+1` offset; the gated `ssm_norm` is a plain weight as in HF.
+    ///
+    /// The converter also orders the linear-attention value-head axis
+    /// differently from HF ([`VHeadOrder::Chunked`] vs `Interleaved`); rather
+    /// than permuting the affected weights — which would mean dequantizing and
+    /// re-quantizing them, and Q6_K's quantizer is not idempotent — the GDN
+    /// dims record the order and the Q/K expansion adapts to it.
     pub fn from_gguf<R: Read + Seek>(
         cfg: &TextConfig,
         layer_type: LayerType,
@@ -513,7 +519,7 @@ impl DecoderLayer {
                 None,
             ),
             LayerType::LinearAttention => {
-                let dims = GdnDims::new(cfg);
+                let dims = GdnDims::new(cfg).with_v_head_order(VHeadOrder::Chunked);
                 let input_proj = GdnInputProjection::Split {
                     in_proj_qkv: gg.linear(&format!("{prefix}.attn_qkv.weight"))?,
                     in_proj_z: gg.linear(&format!("{prefix}.attn_gate.weight"))?,
