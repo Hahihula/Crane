@@ -1,0 +1,231 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["huggingface_hub"]
+# ///
+"""Download crane TTS, ASR, VAD, and LLM models from Hugging Face.
+
+Examples:
+    ./crane-model-download --list
+    ./crane-model-download --model voxtral --path /srv/models
+    ./crane-model-download --model qwen3-tts-customvoice-1.7b --path ~/models --token hf_...
+    ./crane-model-download --model qwen3-asr-0.6b --path ~/models
+    ./crane-model-download --model silero-vad --path ~/models
+    ./crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0
+
+Run directly (uv picks up the inline metadata above and manages the
+`huggingface_hub` dependency in an ephemeral venv, no setup needed):
+
+    uv run tools/crane-model-download --list
+
+Without `uv`, install the dependency yourself and run with plain python3:
+
+    pip install huggingface_hub
+    python3 tools/crane-model-download --list
+
+huggingface_hub >= 0.32.0 bundles the `hf-xet` accelerator by default,
+which speeds up downloads automatically.
+"""
+
+import argparse
+import os
+import shutil
+import sys
+
+MODELS = {
+    "qwen3-tts-base": {
+        "repo_id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "dirname": "Qwen3-TTS-12Hz-0.6B-Base",
+        "kind": "tts",
+        "description": "Qwen3-TTS 0.6B, voice cloning via reference audio (Apache-2.0)",
+    },
+    "qwen3-tts-customvoice-0.6b": {
+        "repo_id": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "dirname": "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "kind": "tts",
+        "description": "Qwen3-TTS 0.6B, predefined speakers (Apache-2.0)",
+    },
+    "qwen3-tts-customvoice-1.7b": {
+        "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "dirname": "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "kind": "tts",
+        "description": "Qwen3-TTS 1.7B, predefined speakers (Apache-2.0)",
+    },
+    "voxtral": {
+        "repo_id": "mistralai/Voxtral-4B-TTS-2603",
+        "dirname": "Voxtral-4B-TTS-2603",
+        "kind": "tts",
+        "description": "Voxtral 4B, 10 languages / 20 voices (CC-BY-NC-4.0)",
+    },
+    "qwen3-asr-0.6b": {
+        "repo_id": "Qwen/Qwen3-ASR-0.6B-hf",
+        "dirname": "Qwen3-ASR-0.6B-hf",
+        "kind": "asr",
+        "description": "Qwen3-ASR 0.6B, speech-to-text (Apache-2.0)",
+    },
+    "qwen3-asr-1.7b": {
+        "repo_id": "Qwen/Qwen3-ASR-1.7B-hf",
+        "dirname": "Qwen3-ASR-1.7B-hf",
+        "kind": "asr",
+        "description": "Qwen3-ASR 1.7B, speech-to-text (Apache-2.0)",
+    },
+    "silero-vad": {
+        "repo_id": "onnx-community/silero-vad",
+        "dirname": "silero-vad",
+        "kind": "vad",
+        "files": {"onnx/model.onnx": "model.onnx"},
+        "description": "Silero VAD, voice activity detection (MIT)",
+    },
+    "qwen3.5-0.8b-gguf": {
+        "repo_id": "unsloth/Qwen3.5-0.8B-GGUF",
+        "dirname": "Qwen3.5-0.8B-GGUF",
+        "kind": "llm",
+        "quant_template": "Qwen3.5-0.8B-{quant}.gguf",
+        "description": "Qwen 3.5 0.8B, hybrid GDN + attention, GGUF quant (Apache-2.0)",
+    },
+    "qwen3.5-9b-gguf": {
+        "repo_id": "unsloth/Qwen3.5-9B-GGUF",
+        "dirname": "Qwen3.5-9B-GGUF",
+        "kind": "llm",
+        "quant_template": "Qwen3.5-9B-{quant}.gguf",
+        "description": "Qwen 3.5 9B, hybrid GDN + attention, GGUF quant (Apache-2.0)",
+    },
+}
+
+_VALID_KINDS = ("tts", "asr", "vad", "llm")
+_REQUIRED_KEYS = ("repo_id", "dirname", "kind", "description")
+for _key, _info in MODELS.items():
+    _missing = [k for k in _REQUIRED_KEYS if k not in _info]
+    if _missing:
+        raise ValueError(f"MODELS[{_key!r}] is missing required key(s): {_missing}")
+    if _info["kind"] not in _VALID_KINDS:
+        raise ValueError(
+            f"MODELS[{_key!r}] has invalid kind {_info['kind']!r}; "
+            f"expected one of {_VALID_KINDS}"
+        )
+
+
+def list_models():
+    print("Available models:\n")
+    width = max(len(key) for key in MODELS)
+    for key, info in MODELS.items():
+        kind = info["kind"].upper()
+        print(f"  {key:<{width}}  [{kind}]  {info['description']}")
+
+
+def download_model(model_key, path, token, quant):
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+        from huggingface_hub.utils import HfHubHTTPError
+    except ImportError:
+        print(
+            "error: huggingface_hub is not installed. Install it with:\n\n"
+            "    pip install huggingface_hub\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    info = MODELS[model_key]
+    local_dir = os.path.join(os.path.expanduser(path), info["kind"], info["dirname"])
+    quant_template = info.get("quant_template")
+
+    if quant_template:
+        filename = quant_template.format(quant=quant)
+        target = os.path.join(local_dir, filename)
+        print(f"Downloading {info['repo_id']}:{filename} to {target} ...")
+    else:
+        target = local_dir
+        print(f"Downloading {info['repo_id']} to {local_dir} ...")
+
+    try:
+        if quant_template:
+            os.makedirs(local_dir, exist_ok=True)
+            cached = hf_hub_download(
+                repo_id=info["repo_id"], filename=filename, token=token
+            )
+            shutil.copy2(cached, target)
+        else:
+            files = info.get("files")
+            if files:
+                os.makedirs(local_dir, exist_ok=True)
+                for repo_path, local_name in files.items():
+                    cached = hf_hub_download(
+                        repo_id=info["repo_id"], filename=repo_path, token=token
+                    )
+                    shutil.copy2(cached, os.path.join(local_dir, local_name))
+            else:
+                snapshot_download(
+                    repo_id=info["repo_id"], local_dir=local_dir, token=token
+                )
+    except HfHubHTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        print(f"error: download failed: {e}", file=sys.stderr)
+        if status in (401, 403):
+            print(
+                "\nThis model may be gated. Make sure you've accepted its "
+                "license on the Hugging Face model page, then pass a valid "
+                "--token (or set HF_TOKEN).",
+                file=sys.stderr,
+            )
+        elif status == 404 and quant_template:
+            print(
+                f"\nNo file named {filename!r} in {info['repo_id']}. Check "
+                "the repo's file list on Hugging Face for valid --quant "
+                "suffixes (e.g. Q4_K_M, Q5_K_M, Q8_0, UD-Q4_K_XL).",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    print(f"\nDone. Use with: crane-serve --model-path {target}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download TTS, ASR, and VAD models for crane-serve from Hugging Face.",
+        epilog="examples:\n"
+        "  crane-model-download --list\n"
+        "  crane-model-download --model voxtral --path /srv/models\n"
+        "  crane-model-download --model qwen3-tts-customvoice-1.7b --path ~/models --token hf_...\n"
+        "  crane-model-download --model qwen3-asr-0.6b --path ~/models\n"
+        "  crane-model-download --model silero-vad --path ~/models\n"
+        "  crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--list", action="store_true", help="List available models and exit"
+    )
+    group.add_argument(
+        "--model", choices=list(MODELS.keys()), help="Model to download"
+    )
+    parser.add_argument(
+        "--path", help="Parent directory to download the model into"
+    )
+    parser.add_argument(
+        "--token",
+        help="Hugging Face auth token (prefer the HF_TOKEN env var instead, "
+        "to avoid leaking it via shell history or `ps`)",
+    )
+    parser.add_argument(
+        "--quant",
+        default="Q4_K_M",
+        help="Quantization suffix to download, for GGUF models only "
+        "(e.g. Q4_K_M, Q5_K_M, Q8_0, UD-Q4_K_XL). Default: Q4_K_M",
+    )
+    args = parser.parse_args()
+
+    if args.list:
+        list_models()
+        return
+
+    if not args.path:
+        parser.error("--path is required when using --model")
+
+    download_model(args.model, args.path, args.token, args.quant)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
