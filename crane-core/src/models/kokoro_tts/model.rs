@@ -49,6 +49,32 @@ const EXPECTED_MODEL_TYPE: &str = "style_text_to_speech_2";
 /// present.
 const DEFAULT_VOICE: &str = "af_heart";
 
+/// Language substituted for the `"auto"` sentinel (or an empty string) in
+/// [`Model::generate_speech`], since Kokoro's phonemizer has no
+/// language-detection of its own — unlike Qwen3-TTS, whose codec can infer
+/// language from the text itself when `"auto"` is requested. Currently the
+/// only language [`MoonshineG2p`](crate::models::g2p::MoonshineG2p) loads is
+/// `en_us`, so this is also the only sensible default.
+const DEFAULT_LANGUAGE: &str = "en_us";
+
+/// Maps an ISO 639-1 language code — the format the `Tts` trait boundary
+/// standardizes on (see `crane::audio::tts_qwen3`'s `language_code_to_name`
+/// for the Qwen3 equivalent) — to the language identifier
+/// [`MoonshineG2p`](crate::models::g2p::MoonshineG2p) actually loads (e.g.
+/// `"en_us"`).
+///
+/// Codes not in the mapping — including already-resolved identifiers like
+/// `"en_us"` — pass through unchanged, so both formats work. Only `"en"` is
+/// mapped today because `en_us` is the only language
+/// [`SUPPORTED_LANGUAGES`](crate::models::g2p::languages::SUPPORTED_LANGUAGES)
+/// lists; extend this as more languages are added.
+fn iso_code_to_language(code: &str) -> &str {
+    match code {
+        "en" => DEFAULT_LANGUAGE,
+        other => other,
+    }
+}
+
 /// Minimal `config.json` shape: only `model_type` is present in real exports.
 #[derive(Debug, Deserialize)]
 struct ConfigJson {
@@ -179,6 +205,19 @@ fn load_voice_bin(path: &Path, style_dim: usize) -> Result<Tensor> {
 
     Tensor::from_vec(data, (rows, style_dim), &Device::Cpu)
         .with_context(|| format!("building tensor from voice file {}", path.display()))
+}
+
+/// Resolves the `language` parameter passed to [`Model::generate_speech`]:
+/// `"auto"` (case-insensitive) or an empty string become [`DEFAULT_LANGUAGE`],
+/// since Kokoro's phonemizer has no language-detection of its own; otherwise
+/// the value is passed through [`iso_code_to_language`] so ISO 639-1 codes
+/// (e.g. `"en"`) resolve to the identifier the phonemizer actually loaded.
+fn resolve_language(language: &str) -> &str {
+    if language.is_empty() || language.eq_ignore_ascii_case("auto") {
+        DEFAULT_LANGUAGE
+    } else {
+        iso_code_to_language(language)
+    }
 }
 
 /// Splits a normalized phoneme string into chunks of at most `max_cp`
@@ -472,6 +511,13 @@ impl Model {
     /// count, clamped to the voice matrix's row count, matching Moonshine's
     /// `KokoroTtsEngine::synthesize`.
     ///
+    /// `language` of `"auto"` (case-insensitive) or `""` is substituted with
+    /// [`DEFAULT_LANGUAGE`] before being passed to `phonemizer` — Kokoro has
+    /// no language-detection of its own, unlike Qwen3-TTS's codec. Any other
+    /// value is resolved through [`iso_code_to_language`] first, so ISO
+    /// 639-1 codes (e.g. `"en"`) work alongside `phonemizer`'s own
+    /// identifiers (e.g. `"en_us"`).
+    ///
     /// `opts` is accepted for API compatibility with the other TTS models'
     /// `generate_speech` signature but unused: Kokoro is a feed-forward
     /// model, so `max_new_tokens`, `temperature`, `top_p`, and
@@ -500,6 +546,7 @@ impl Model {
         let voice_tensor = self.voice(voice_name)?;
         let voice_rows = voice_tensor.dim(0)?;
 
+        let language = resolve_language(language);
         let ipa = phonemizer.text_to_ipa(text, language)?;
         let normalizer = self.normalizer_for(language)?;
         let phonemes = normalizer.normalize(&ipa);
@@ -884,6 +931,35 @@ mod tests {
     }
 
     #[test]
+    fn resolve_language_auto_and_empty_default_to_en_us() {
+        assert_eq!(resolve_language("auto"), "en_us");
+        assert_eq!(resolve_language("AUTO"), "en_us");
+        assert_eq!(resolve_language("Auto"), "en_us");
+        assert_eq!(resolve_language(""), "en_us");
+    }
+
+    #[test]
+    fn resolve_language_passes_through_explicit_language() {
+        assert_eq!(resolve_language("en_us"), "en_us");
+        assert_eq!(resolve_language("de"), "de");
+    }
+
+    #[test]
+    fn resolve_language_maps_iso_code_to_language_identifier() {
+        assert_eq!(resolve_language("en"), "en_us");
+    }
+
+    #[test]
+    fn iso_code_to_language_known_and_passthrough() {
+        assert_eq!(iso_code_to_language("en"), "en_us");
+        // Unmapped codes (not yet supported languages) pass through
+        // unchanged.
+        assert_eq!(iso_code_to_language("de"), "de");
+        // Already-resolved identifiers pass through unchanged too.
+        assert_eq!(iso_code_to_language("en_us"), "en_us");
+    }
+
+    #[test]
     fn normalizer_for_builds_and_caches() {
         // Neither 'a' nor 'b' appears in any Kokoro replacement pattern, and
         // a non-`en`-prefixed language skips the rhotic-vowel pairs, so
@@ -942,6 +1018,50 @@ mod tests {
             "unexpected sample count: {}",
             samples.len()
         );
+        // `s != 0.0` alone would also be true for NaN (NaN compares unequal
+        // to everything, including itself), so a fully-NaN waveform would
+        // slip past that check alone -- require finite, non-zero samples.
+        assert!(samples.iter().all(|s| s.is_finite()), "waveform contains NaN or infinite samples");
+        assert!(samples.iter().any(|&s| s != 0.0), "waveform is all zeros");
+    }
+
+    /// Longer, punctuated multi-word input than [`generate_speech_real_model`]
+    /// — regression test for a phase-computation NaN that only manifested on
+    /// inputs producing enough STFT frames to hit an exact zero-magnitude
+    /// bin (`0.0/0.0` feeding `Atan`). See `native_ops::AtanOp`'s doc
+    /// comment for the full story.
+    #[test]
+    #[ignore = "needs CRANE_KOKORO_DIR and CRANE_G2P_EN_US_DIR"]
+    fn generate_speech_real_model_longer_sentence_is_not_nan() {
+        use crate::models::g2p::MoonshineG2p;
+        use crate::models::g2p::languages::LanguageG2p;
+        use crate::models::g2p::languages::english::EnglishG2p;
+
+        let kokoro_dir = std::env::var("CRANE_KOKORO_DIR")
+            .expect("set CRANE_KOKORO_DIR to a real Kokoro model directory");
+        let g2p_dir = std::env::var("CRANE_G2P_EN_US_DIR")
+            .expect("set CRANE_G2P_EN_US_DIR to an en_us G2P model directory");
+
+        let dict_path = std::path::Path::new(&g2p_dir).join("dict_filtered_heteronyms.tsv");
+        let dict_tsv = std::fs::read_to_string(&dict_path).unwrap();
+        let english = EnglishG2p::new(&dict_tsv, None, false).unwrap();
+        let mut phonemizer = MoonshineG2p::new();
+        phonemizer.add_language(LanguageG2p::English(english));
+
+        let mut model = Model::new(&kokoro_dir, &Device::Cpu, &DType::F32).unwrap();
+        let (waveform, sample_rate) = model
+            .generate_speech(
+                "Hello world, how are you?",
+                "en_us",
+                Some("af_heart"),
+                &phonemizer,
+                &SpeechOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(sample_rate, 24_000);
+        let samples = waveform.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!(samples.iter().all(|s| s.is_finite()), "waveform contains NaN or infinite samples");
         assert!(samples.iter().any(|&s| s != 0.0), "waveform is all zeros");
     }
 }
