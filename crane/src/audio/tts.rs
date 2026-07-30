@@ -20,8 +20,8 @@ pub struct VoiceInfo {
     pub name: String,
     /// Language identifiers this voice supports (e.g. `["en", "zh"]`).
     ///
-    /// Values are typically BCP-47 codes for Wyoming service discovery but
-    /// may be any string the model recognizes. Empty means the voice works
+    /// Values are ISO 639-1 codes, matching the `language` parameter
+    /// accepted by [`Tts::generate_speech`]. Empty means the voice works
     /// with any language the model supports.
     pub languages: Vec<String>,
 }
@@ -101,7 +101,7 @@ pub trait Tts {
     /// # Parameters
     ///
     /// * `text` — The text to synthesize.
-    /// * `language` — Target language (e.g. "english", "auto").
+    /// * `language` — Target language as an ISO 639-1 code (e.g. "en", "de") or "auto".
     /// * `voice` — Voice name from [`voices`](Tts::voices), or `None` for the model default.
     /// * `opts` — Generation parameters (temperature, max tokens, etc.).
     ///
@@ -121,7 +121,7 @@ pub trait Tts {
     /// # Parameters
     ///
     /// * `text` — The text to synthesize.
-    /// * `language` — Target language.
+    /// * `language` — Target language as an ISO 639-1 code (e.g. "en", "de") or "auto".
     /// * `ref_audio` — Path to a reference WAV file of the target speaker.
     /// * `ref_text` — Transcript of the reference audio (required by some models).
     /// * `opts` — Generation parameters.
