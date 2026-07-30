@@ -17,9 +17,9 @@ use crate::models::g2p::ipa_postprocess::IpaNormalizer;
 /// Affricate ligatures (with and without the IPA tie bar `U+0361`, since a
 /// G2P engine may emit either form) and diphthong-to-letter aliases. Does
 /// not include the two rhotic vowel expansions in
-/// [`EN_KOKORO_REPLACEMENTS`] — non-English G2P engines don't produce those
-/// codepoints.
-pub const BASE_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
+/// [`EN_EXTRA_KOKORO_REPLACEMENTS`] — non-English G2P engines don't produce
+/// those codepoints.
+pub const SHARED_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
     ("t\u{0361}ʃ", "ʧ"), // t + tie bar + ʃ  → U+02A7
     ("d\u{0361}ʒ", "ʤ"), // d + tie bar + ʒ  → U+02A4
     ("tʃ", "ʧ"),         // affricate without tie bar
@@ -32,35 +32,28 @@ pub const BASE_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
     ("ɔɪ", "Y"),         // CHOICE diphthong
 ];
 
-/// IPA replacement pairs for English (US/GB) Kokoro normalization.
+/// Extra IPA replacement pairs for English Kokoro normalization.
 ///
-/// [`BASE_KOKORO_REPLACEMENTS`] plus two English-specific rhotic vowel
-/// expansions: `ɝ` (stressed) → `ɜɹ` and `ɚ` (unstressed) → `əɹ`.
+/// Appended to [`SHARED_KOKORO_REPLACEMENTS`] for any language tag starting
+/// with `en`: the two rhotic vowel expansions `ɝ` (stressed) → `ɜɹ` and `ɚ`
+/// (unstressed) → `əɹ`.
 ///
 /// All entries are NFC-normalized (verified by the debug assertion in
 /// [`IpaNormalizer::new`]).
-pub const EN_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
-    ("t\u{0361}ʃ", "ʧ"),
-    ("d\u{0361}ʒ", "ʤ"),
-    ("tʃ", "ʧ"),
-    ("dʒ", "ʤ"),
-    ("eɪ", "A"),
-    ("aɪ", "I"),
-    ("aʊ", "W"),
-    ("oʊ", "O"),
-    ("əʊ", "Q"),
-    ("ɔɪ", "Y"),
+pub const EN_EXTRA_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
     ("ɝ", "ɜɹ"), // rhotic stressed vowel (English only)
     ("ɚ", "əɹ"), // rhotic unstressed vowel (English only)
 ];
 
 /// Builds an [`IpaNormalizer`] for the Kokoro vocoder in the given language.
 ///
-/// `"en_us"` uses [`EN_KOKORO_REPLACEMENTS`] (includes the rhotic vowel
-/// expansions); every other language uses [`BASE_KOKORO_REPLACEMENTS`].
-/// `vocab` is Kokoro's phoneme vocabulary (from `tokenizer.json`) — its keys
-/// become the accepted codepoint set, and any codepoint outside it is
-/// dropped rather than coerced (Kokoro uses an empty coercion pool).
+/// Any language tag starting with `en` (`en_us`, `en_gb`, ...) additionally
+/// gets [`EN_EXTRA_KOKORO_REPLACEMENTS`]'s rhotic vowel expansions on top of
+/// [`SHARED_KOKORO_REPLACEMENTS`]; every other language uses
+/// [`SHARED_KOKORO_REPLACEMENTS`] alone. `vocab` is Kokoro's phoneme
+/// vocabulary (from `tokenizer.json`) — its keys become the accepted
+/// codepoint set, and any codepoint outside it is dropped rather than
+/// coerced (Kokoro uses an empty coercion pool).
 ///
 /// # Errors
 ///
@@ -71,12 +64,12 @@ pub fn build_kokoro_normalizer(
     language: &str,
     vocab: &HashMap<char, i64>,
 ) -> Result<IpaNormalizer> {
-    let replacements: &[(&str, &str)] = match language {
-        "en_us" => EN_KOKORO_REPLACEMENTS,
-        _ => BASE_KOKORO_REPLACEMENTS,
-    };
+    let mut replacements = SHARED_KOKORO_REPLACEMENTS.to_vec();
+    if language.starts_with("en") {
+        replacements.extend_from_slice(EN_EXTRA_KOKORO_REPLACEMENTS);
+    }
     let vocab_chars: Vec<char> = vocab.keys().copied().collect();
-    IpaNormalizer::new(replacements, vocab_chars, Vec::new())
+    IpaNormalizer::new(&replacements, vocab_chars, Vec::new())
 }
 
 #[cfg(test)]
@@ -88,8 +81,8 @@ mod tests {
     use super::*;
 
     /// Representative subset of Kokoro's 115-entry `tokenizer.json` vocab,
-    /// sufficient to exercise `EN_KOKORO_REPLACEMENTS`. `g` (U+0067) is
-    /// deliberately absent — Kokoro uses `ɡ` (U+0261) instead.
+    /// sufficient to exercise `EN_EXTRA_KOKORO_REPLACEMENTS`. `g` (U+0067)
+    /// is deliberately absent — Kokoro uses `ɡ` (U+0261) instead.
     fn en_test_vocab() -> HashMap<char, i64> {
         [
             ('$', 0),
@@ -155,27 +148,19 @@ mod tests {
     }
 
     #[test]
-    fn en_kokoro_replacements_are_nfc() {
-        for (from, to) in EN_KOKORO_REPLACEMENTS {
+    fn kokoro_replacements_are_nfc() {
+        for (from, to) in SHARED_KOKORO_REPLACEMENTS.iter().chain(EN_EXTRA_KOKORO_REPLACEMENTS) {
             assert!(is_nfc(from), "from pattern {from:?} is not NFC");
             assert!(is_nfc(to), "replacement {to:?} is not NFC");
         }
     }
 
     #[test]
-    fn en_kokoro_replacements_no_duplicates() {
+    fn kokoro_replacements_no_duplicates() {
         let mut seen = HashSet::new();
-        for (from, _) in EN_KOKORO_REPLACEMENTS {
+        for (from, _) in SHARED_KOKORO_REPLACEMENTS.iter().chain(EN_EXTRA_KOKORO_REPLACEMENTS) {
             assert!(seen.insert(*from), "duplicate from pattern: {from:?}");
         }
-    }
-
-    #[test]
-    fn base_kokoro_is_prefix_of_en_kokoro() {
-        assert_eq!(
-            BASE_KOKORO_REPLACEMENTS,
-            &EN_KOKORO_REPLACEMENTS[..BASE_KOKORO_REPLACEMENTS.len()]
-        );
     }
 
     #[test]
@@ -239,5 +224,73 @@ mod tests {
         let norm = build_kokoro_normalizer("en_us", &vocab).unwrap();
         // "teacher": tˈiːtʃɚ -> tˈiːʧəɹ after affricate + rhotic replacement.
         assert_eq!(norm.normalize("tˈiːtʃɚ"), "tˈiːʧəɹ");
+    }
+
+    /// Maps each character of normalized IPA to its Kokoro phoneme ID,
+    /// mirroring Moonshine's `phoneme_str_to_input_ids()`: a `0` (pad/BOS)
+    /// is prepended and appended, and characters missing from `vocab` are
+    /// skipped rather than erroring (unreachable in practice here, since
+    /// `normalize()` already dropped anything outside `vocab`).
+    fn phoneme_str_to_input_ids(phonemes: &str, vocab: &HashMap<char, i64>) -> Vec<i64> {
+        let mut ids = vec![0i64];
+        ids.extend(phonemes.chars().filter_map(|c| vocab.get(&c).copied()));
+        ids.push(0);
+        ids
+    }
+
+    /// Full real Kokoro vocabulary (114 entries) copied from Moonshine's
+    /// `kokoro/config.json`, used only by the reference-corpus test below —
+    /// distinct from [`en_test_vocab`]'s 55-entry representative subset used
+    /// by the targeted pattern tests above.
+    fn full_en_kokoro_vocab() -> HashMap<char, i64> {
+        let json = include_str!("../../../tests/data/g2p/kokoro_vocab.json");
+        let raw: HashMap<String, i64> = serde_json::from_str(json).unwrap();
+        raw.into_iter()
+            .map(|(k, v)| {
+                let mut chars = k.chars();
+                let c = chars.next().expect("vocab key must not be empty");
+                assert!(chars.next().is_none(), "vocab key {k:?} is not a single codepoint");
+                (c, v)
+            })
+            .collect()
+    }
+
+    /// Correctness benchmark: the (`en_us`, Kokoro) [`IpaNormalizer`] must
+    /// reproduce Moonshine's `normalize_ipa_to_kokoro()` +
+    /// `phoneme_str_to_input_ids()` output exactly, on a fixed corpus of
+    /// realistic G2P output plus hand-crafted edge cases. See
+    /// `crane-core/tests/data/g2p/README.md` for the corpus's provenance —
+    /// expected output was generated by an independent Python
+    /// reimplementation of the C++ pipeline, not by running the C++ itself.
+    #[test]
+    fn en_kokoro_normalizer_matches_reference_corpus() {
+        let vocab = full_en_kokoro_vocab();
+        let norm = build_kokoro_normalizer("en_us", &vocab).unwrap();
+
+        let tsv = include_str!("../../../tests/data/g2p/en_us_kokoro_normalizer_ref.tsv");
+        let mut checked = 0;
+        for line in tsv.lines() {
+            let mut fields = line.splitn(3, '\t');
+            let raw_ipa = fields.next().expect("missing raw_ipa field");
+            let expected_normalized = fields.next().expect("missing expected_normalized field");
+            let expected_ids_field = fields.next().expect("missing expected_ids field");
+            let expected_ids: Vec<i64> = expected_ids_field
+                .split(',')
+                .map(|s| s.parse().expect("phoneme id must be a valid i64"))
+                .collect();
+
+            let normalized = norm.normalize(raw_ipa);
+            assert_eq!(
+                normalized, expected_normalized,
+                "normalize() mismatch for raw IPA {raw_ipa:?}"
+            );
+
+            let ids = phoneme_str_to_input_ids(&normalized, &vocab);
+            assert_eq!(ids, expected_ids, "phoneme ID mismatch for raw IPA {raw_ipa:?}");
+
+            checked += 1;
+        }
+
+        assert_eq!(checked, 71, "expected exactly 71 corpus entries, found {checked}");
     }
 }
