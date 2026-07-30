@@ -146,6 +146,20 @@ fn bench_text_to_ipa_full_lexicon(c: &mut Criterion) {
         });
     });
 
+    // Cache-hit variant: the counterpart to `single_unknown_word` above.
+    // `EnglishG2p` keeps a per-language OOV LRU cache, so repeating a word
+    // pays the ONNX cost once and then hits cache on every subsequent call
+    // -- that's the steady-state cost for real workloads (which repeat
+    // proper nouns, brand names, and domain terms), not
+    // `single_unknown_word`'s forced-miss cost. Priming happens once,
+    // outside the timed harness (including outside criterion's own
+    // warm-up iterations), so every timed call -- warm-up and measured
+    // alike -- is a cache hit.
+    engine.text_to_ipa("zoinks").unwrap();
+    group.bench_function("single_unknown_word_cached", |b| {
+        b.iter(|| engine.text_to_ipa(black_box("zoinks")).unwrap());
+    });
+
     group.finish();
 
     let mut corpus_group = c.benchmark_group("text_to_ipa_full_lexicon_corpus");
