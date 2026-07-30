@@ -332,7 +332,7 @@ pub struct SpeechRequest {
     /// Voice name (speaker ID or preset for CustomVoice models).
     #[serde(default)]
     pub voice: Option<String>,
-    /// Language hint (e.g. "chinese", "english", "japanese", "auto").
+    /// Language hint as an ISO 639-1 code (e.g. "zh", "en", "ja") or "auto".
     #[serde(default)]
     pub language: Option<String>,
     /// Optional system-level instructions.
