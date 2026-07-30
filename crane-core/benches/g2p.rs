@@ -160,6 +160,43 @@ fn bench_text_to_ipa_full_lexicon(c: &mut Criterion) {
     corpus_group.finish();
 }
 
+/// Isolates decode-strategy cost from ONNX runtime cost: both benchmarks
+/// call the same `oov_onnx::Model` directly (bypassing `EnglishG2p` and its
+/// OOV cache entirely, so no cache-hit contamination is possible here) on
+/// the same unknown word, one via [`oov_onnx::Model::predict_phonemes`]
+/// (greedy, the pre-beam-search sequential oracle) and one via
+/// [`oov_onnx::Model::predict_phonemes_batch`] (beam search width 3, the
+/// production path). The ratio
+/// between them is the beam-search multiplier alone; whatever's left of the
+/// gap to Moonshine's C++ baseline (measured with greedy decoding) is
+/// attributable to `candle_onnx::simple_eval()`'s lack of ONNX Runtime's
+/// kernel fusion and multi-threading, not to the beam width choice made in
+/// this codebase. Skipped when `CRANE_G2P_EN_US_DIR` isn't set.
+fn bench_oov_decode_strategy(c: &mut Criterion) {
+    let Some(model_dir) = g2p_model_dir() else {
+        eprintln!(
+            "skipping oov_decode_strategy: set CRANE_G2P_EN_US_DIR to an en_us G2P model \
+             directory to run it"
+        );
+        return;
+    };
+
+    let model = oov_onnx::Model::load(&model_dir.join("oov")).expect("load OOV model");
+
+    let mut group = c.benchmark_group("oov_decode_strategy");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("greedy_single_word", |b| {
+        b.iter(|| model.predict_phonemes(black_box("zoinks")).unwrap());
+    });
+
+    group.bench_function("beam_search_single_word", |b| {
+        b.iter(|| model.predict_phonemes_batch(black_box(&["zoinks"])));
+    });
+
+    group.finish();
+}
+
 fn bench_ipa_normalize(c: &mut Criterion) {
     let vocab = kokoro_vocab();
     let normalizer = build_kokoro_normalizer("en_us", &vocab).unwrap();
@@ -200,6 +237,7 @@ criterion_group!(
     benches,
     bench_text_to_ipa,
     bench_text_to_ipa_full_lexicon,
+    bench_oov_decode_strategy,
     bench_ipa_normalize,
     bench_text_normalize
 );
