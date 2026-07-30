@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 
-//! Kokoro TTS `Model`: config/vocab parsing, voice loading, and the model
-//! skeleton.
+//! Kokoro TTS `Model`: config/vocab parsing, voice loading, and the ONNX
+//! forward pass.
 //!
-//! The ONNX forward pass itself is wired up in a later step; this step
-//! loads the ONNX graph, the phoneme vocabulary, discovers available voice
-//! names, and lazily loads/caches per-voice style embeddings from their
-//! `.bin` files.
+//! [`Model::new`] loads the ONNX graph, the phoneme vocabulary, discovers
+//! available voice names, and lazily loads/caches per-voice style embeddings
+//! from their `.bin` files. [`Model::generate_speech`] phonemizes text with a
+//! caller-supplied [`Phonemizer`], normalizes the result to Kokoro's phoneme
+//! inventory, and runs the ONNX forward pass to produce PCM audio.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,13 +17,28 @@ use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use serde::Deserialize;
 
+use crate::generation::SpeechOptions;
+use crate::models::g2p::Phonemizer;
+use crate::models::g2p::ipa_postprocess::IpaNormalizer;
+
+use super::ipa::build_kokoro_normalizer;
+use super::native_ops;
+
 /// Kokoro always outputs mono PCM at 24 kHz.
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
 
 /// Style embedding dimension. Not present in any shipped config file —
-/// inferred from voice tensor shape (1020 × 128 float32 per `.bin` file)
-/// and hardcoded here.
-const KOKORO_STYLE_DIM: usize = 128;
+/// inferred from the ONNX graph's `style` input shape (`[1, 256]`) and from
+/// voice tensor byte sizes (510 × 256 float32 for `af_heart.bin`) and
+/// hardcoded here.
+const KOKORO_STYLE_DIM: usize = 256;
+
+/// Maximum number of phoneme codepoints per Kokoro ONNX call. Voice style
+/// matrices have on the order of ~510 rows (one style vector per possible
+/// phoneme-count index) and the model rejects longer token sequences, so
+/// longer input is split into chunks of at most this many phoneme
+/// codepoints each — matching Moonshine's `chunk_phonemes()` default.
+const MAX_PHONEME_CODEPOINTS: usize = 510;
 
 /// The `model_type` value every known Kokoro ONNX export's `config.json`
 /// carries. `config.json` otherwise has no other keys to validate against.
@@ -165,6 +181,56 @@ fn load_voice_bin(path: &Path, style_dim: usize) -> Result<Tensor> {
         .with_context(|| format!("building tensor from voice file {}", path.display()))
 }
 
+/// Splits a normalized phoneme string into chunks of at most `max_cp`
+/// codepoints each, preferring to cut at a space within the current window
+/// so words stay whole where possible. Empty pieces (leading/trailing
+/// whitespace collapse) are dropped. Ported from Moonshine's
+/// `chunk_phonemes()`.
+fn chunk_phonemes(phonemes: &str, max_cp: usize) -> Vec<String> {
+    debug_assert!(max_cp > 0, "max_cp must be > 0 to avoid an infinite loop");
+    let chars: Vec<char> = phonemes.chars().collect();
+    if chars.len() <= max_cp {
+        let piece = phonemes.trim();
+        return if piece.is_empty() { Vec::new() } else { vec![piece.to_string()] };
+    }
+
+    let mut chunks = Vec::new();
+    let mut rest: &[char] = &chars;
+    while !rest.is_empty() {
+        if rest.len() <= max_cp {
+            let piece: String = rest.iter().collect::<String>();
+            push_trimmed(&mut chunks, &piece);
+            break;
+        }
+
+        let window_len = (max_cp + 1).min(rest.len());
+        let window = &rest[..window_len];
+        let cut = window
+            .iter()
+            .rposition(|&c| c == ' ')
+            .filter(|&pos| pos > 0)
+            .unwrap_or(max_cp);
+
+        let piece: String = rest[..cut].iter().collect::<String>();
+        push_trimmed(&mut chunks, &piece);
+
+        let mut next_start = cut;
+        while next_start < rest.len() && rest[next_start] == ' ' {
+            next_start += 1;
+        }
+        rest = &rest[next_start..];
+    }
+    chunks
+}
+
+/// Pushes `piece` onto `chunks` after trimming, unless it's empty.
+fn push_trimmed(chunks: &mut Vec<String>, piece: &str) {
+    let trimmed = piece.trim();
+    if !trimmed.is_empty() {
+        chunks.push(trimmed.to_string());
+    }
+}
+
 /// Kokoro-82M ONNX text-to-speech model.
 ///
 /// Loaded once via [`Model::new`] and reused across `generate_speech()`
@@ -172,11 +238,29 @@ fn load_voice_bin(path: &Path, style_dim: usize) -> Result<Tensor> {
 /// after construction. Voice style embeddings are loaded lazily on first use
 /// via [`Model::voice`] and cached for the lifetime of the model.
 pub struct Model {
-    /// Loaded ONNX model graph, run via `crate::onnx::simple_eval()`.
-    ///
-    /// Not yet read: the forward pass is wired up in a later step.
-    #[allow(dead_code)]
+    /// Loaded ONNX model graph. Run segment-by-segment via
+    /// `crate::onnx::simple_eval()` rather than in one call — see
+    /// [`Self::segments`].
     onnx_graph: crate::onnx::proto::ModelProto,
+    /// `onnx_graph.graph.node`, split into segments at each
+    /// `ConvTranspose`/`STFT` node (computed natively instead — see
+    /// [`Self::special_nodes`]), so `Model::run_onnx_segments` can run
+    /// each segment through `simple_eval()` independently. Has one more
+    /// entry than `special_nodes`. Computed once in [`Model::new`] by
+    /// [`native_ops::extract_segments`].
+    segments: Vec<Vec<crate::onnx::proto::NodeProto>>,
+    /// The `ConvTranspose`/`STFT` node originally between `segments[i]`
+    /// and `segments[i + 1]`, with its parameters and weights pre-decoded
+    /// at load time. See the `native_ops` module doc for why these two op
+    /// types can't run through `crate::onnx::simple_eval()` at all.
+    special_nodes: Vec<native_ops::SpecialNode>,
+    /// ONNX graph initializers (model weights) pre-decoded from their
+    /// protobuf `TensorProto` representation into candle `Tensor`s once
+    /// in [`Model::new`], so [`Self::run_onnx_segments`] can seed each
+    /// segment's input map without `simple_eval()` re-decoding them on
+    /// every call. The raw initializers in `onnx_graph.graph.initializer`
+    /// are cleared after decoding.
+    decoded_initializers: HashMap<String, Tensor>,
     /// Phoneme character to token ID, from `tokenizer.json`'s `model.vocab`.
     vocab: HashMap<char, i64>,
     /// Lazily loaded voice style embeddings, keyed by voice name (e.g.
@@ -191,16 +275,14 @@ pub struct Model {
     /// Style embedding dimension. See [`KOKORO_STYLE_DIM`].
     style_dim: usize,
     /// Maximum phoneme sequence length, from `tokenizer_config.json`.
-    ///
-    /// Not yet read: used to bound the phoneme ID buffer in a later step.
-    #[allow(dead_code)]
     max_seq_len: usize,
     /// Token ID for the pad/BOS/EOS token `$`, read from `vocab`.
-    ///
-    /// Not yet read: used when building phoneme ID sequences in a later
-    /// step.
-    #[allow(dead_code)]
     pad_token_id: i64,
+    /// Lazily built per-language IPA normalizers (see
+    /// [`build_kokoro_normalizer`]), keyed by language identifier (e.g.
+    /// `"en_us"`). Each is built once from [`Self::vocab`] on first
+    /// [`Model::generate_speech`] call for that language and reused after.
+    normalizers: HashMap<String, IpaNormalizer>,
 }
 
 impl Model {
@@ -214,8 +296,10 @@ impl Model {
     ///
     /// # Errors
     ///
-    /// Returns an error if any required file is missing or malformed, or if
-    /// `config.json`'s `model_type` doesn't match the expected Kokoro value.
+    /// Returns an error if any required file is missing or malformed, if
+    /// `config.json`'s `model_type` doesn't match the expected Kokoro value,
+    /// or if a `ConvTranspose`/`STFT` node's parameters can't be extracted
+    /// (see [`native_ops::extract_segments`]).
     ///
     /// # Panics
     ///
@@ -237,8 +321,31 @@ impl Model {
         let available_voices = discover_voices(&voice_dir)?;
 
         let onnx_path = root.join("onnx").join("model.onnx");
-        let onnx_graph = crate::onnx::read_file(&onnx_path)
+        let mut onnx_graph = crate::onnx::read_file(&onnx_path)
             .with_context(|| format!("loading Kokoro ONNX model from {}", onnx_path.display()))?;
+        let graph = onnx_graph.graph.as_mut().context("Kokoro ONNX model has no graph")?;
+        // Fuse decomposed atan2(imag, real) patterns (Div → Atan →
+        // quadrant-correction Where) into single Atan2 nodes before
+        // segment extraction, so the evaluator computes them directly
+        // via f32::atan2 instead of through the numerically fragile
+        // decomposition.
+        crate::onnx::fuse_atan2_decomposition(graph);
+        // `ConvTranspose` and `STFT` can't be fixed by rewriting the graph
+        // into other ops `crate::onnx::simple_eval()` supports — see the
+        // `native_ops` module doc. Splitting the node list into segments
+        // here means `generate_speech()` can run each through
+        // `simple_eval()` independently, computing these two op types
+        // natively in between.
+        let (segments, special_nodes) =
+            native_ops::extract_segments(graph).context("splitting Kokoro ONNX graph around ConvTranspose/STFT")?;
+
+        let mut decoded_initializers = HashMap::with_capacity(graph.initializer.len());
+        for t in &graph.initializer {
+            let tensor = crate::onnx::eval::get_tensor(t, t.name.as_str())
+                .with_context(|| format!("decoding ONNX initializer {:?}", t.name))?;
+            decoded_initializers.insert(t.name.clone(), tensor);
+        }
+        graph.initializer.clear();
 
         // Fail fast on a broken model directory by loading one voice now,
         // rather than deferring every voice load to first request.
@@ -264,6 +371,9 @@ impl Model {
 
         Ok(Self {
             onnx_graph,
+            segments,
+            special_nodes,
+            decoded_initializers,
             vocab,
             voices,
             voice_dir,
@@ -271,6 +381,7 @@ impl Model {
             style_dim: KOKORO_STYLE_DIM,
             max_seq_len,
             pad_token_id,
+            normalizers: HashMap::new(),
         })
     }
 
@@ -317,6 +428,195 @@ impl Model {
         // `get_or_init` guarantees only one tensor is ever cached.
         let tensor = load_voice_bin(&self.voice_dir.join(format!("{name}.bin")), self.style_dim)?;
         Ok(cell.get_or_init(|| tensor).clone())
+    }
+
+    /// Returns the [`IpaNormalizer`] for `language`, building and caching it
+    /// on first request. Building only needs [`Self::vocab`] (already
+    /// loaded at construction), so this never touches disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the normalizer's replacement table fails to
+    /// compile — see [`build_kokoro_normalizer`].
+    fn normalizer_for(&mut self, language: &str) -> Result<&IpaNormalizer> {
+        use std::collections::hash_map::Entry;
+        match self.normalizers.entry(language.to_string()) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(e) => {
+                let normalizer = build_kokoro_normalizer(language, &self.vocab)?;
+                Ok(e.insert(normalizer))
+            }
+        }
+    }
+
+    /// Converts a normalized phoneme string into Kokoro token IDs, mirroring
+    /// Moonshine's `phoneme_str_to_input_ids()`: the pad/BOS/EOS token is
+    /// prepended and appended, and codepoints missing from [`Self::vocab`]
+    /// are skipped (unreachable in practice, since `IpaNormalizer::normalize`
+    /// already drops anything outside the vocab it was built from).
+    fn phonemes_to_ids(&self, phonemes: &str) -> Vec<i64> {
+        let mut ids = vec![self.pad_token_id];
+        ids.extend(phonemes.chars().filter_map(|c| self.vocab.get(&c).copied()));
+        ids.push(self.pad_token_id);
+        ids
+    }
+
+    /// Generates speech from `text`: phonemizes it with `phonemizer`,
+    /// normalizes the IPA to Kokoro's phoneme inventory, and runs the ONNX
+    /// forward pass once per chunk (see [`MAX_PHONEME_CODEPOINTS`]),
+    /// concatenating the resulting waveform chunks.
+    ///
+    /// `voice` selects the style embedding by name (see
+    /// [`Model::available_voices`]); `None` uses [`DEFAULT_VOICE`]. Per
+    /// chunk, the style row is selected by the chunk's phoneme codepoint
+    /// count, clamped to the voice matrix's row count, matching Moonshine's
+    /// `KokoroTtsEngine::synthesize`.
+    ///
+    /// `opts` is accepted for API compatibility with the other TTS models'
+    /// `generate_speech` signature but unused: Kokoro is a feed-forward
+    /// model, so `max_new_tokens`, `temperature`, `top_p`, and
+    /// `repetition_penalty` don't apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if phonemization fails, if `voice` isn't among
+    /// [`Model::available_voices`], if a chunk's token sequence exceeds
+    /// [`Self::max_seq_len`], or if ONNX inference fails.
+    ///
+    /// # Panics
+    ///
+    /// Never panics: the `expect()` on the single-chunk fast path is only
+    /// reached when `waveform_chunks.len() == 1`, which the surrounding
+    /// `if` already guarantees is non-empty.
+    pub fn generate_speech(
+        &mut self,
+        text: &str,
+        language: &str,
+        voice: Option<&str>,
+        phonemizer: &dyn Phonemizer,
+        _opts: &SpeechOptions,
+    ) -> Result<(Tensor, u32)> {
+        let voice_name = voice.unwrap_or(DEFAULT_VOICE);
+        let voice_tensor = self.voice(voice_name)?;
+        let voice_rows = voice_tensor.dim(0)?;
+
+        let ipa = phonemizer.text_to_ipa(text, language)?;
+        let normalizer = self.normalizer_for(language)?;
+        let phonemes = normalizer.normalize(&ipa);
+
+        let chunks = chunk_phonemes(&phonemes, MAX_PHONEME_CODEPOINTS);
+        if chunks.is_empty() {
+            bail!("no phonemes produced for input text {text:?}");
+        }
+
+        let mut waveform_chunks = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let ids = self.phonemes_to_ids(chunk);
+            if ids.len() > self.max_seq_len {
+                bail!(
+                    "phoneme chunk has {} tokens, exceeding Kokoro's max sequence length of {}",
+                    ids.len(),
+                    self.max_seq_len
+                );
+            }
+            let ntok = ids.len();
+            let input_ids = Tensor::from_vec(ids, (1, ntok), &Device::Cpu)?;
+
+            let codepoint_count = chunk.chars().count().max(1);
+            let row_idx = codepoint_count.min(voice_rows) - 1;
+            let style = voice_tensor.narrow(0, row_idx, 1)?;
+
+            let speed = Tensor::from_vec(vec![1f32], (1,), &Device::Cpu)?;
+
+            let mut inputs = HashMap::new();
+            inputs.insert("input_ids".to_string(), input_ids);
+            inputs.insert("style".to_string(), style);
+            inputs.insert("speed".to_string(), speed);
+
+            let mut values = self.run_onnx_segments(inputs)?;
+            let waveform =
+                values.remove("waveform").context("Kokoro ONNX output is missing 'waveform'")?;
+            waveform_chunks.push(waveform);
+        }
+
+        let waveform = if waveform_chunks.len() == 1 {
+            waveform_chunks.into_iter().next().expect("checked len == 1")
+        } else {
+            Tensor::cat(&waveform_chunks, 1)?
+        };
+
+        Ok((waveform, KOKORO_SAMPLE_RATE))
+    }
+
+    /// Runs the ONNX graph via [`Self::segments`]/[`Self::special_nodes`],
+    /// computing each special node natively in between segments (see the
+    /// `native_ops` module doc) instead of running the whole graph through
+    /// one `crate::onnx::simple_eval()` call.
+    ///
+    /// `inputs` seeds the accumulated value map (`input_ids`/`style`/
+    /// `speed`); every segment's outputs and every special node's result
+    /// are merged into it as execution proceeds, so later segments can
+    /// reference anything computed earlier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any segment's `simple_eval()` call fails, or if
+    /// a special node's native computation fails.
+    fn run_onnx_segments(&mut self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+        let mut values = inputs;
+        values.extend(self.decoded_initializers.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for i in 0..self.segments.len() {
+            // `simple_eval` consumes its input map by value, so the clone
+            // is required. Tensor clones are cheap Arc bumps; the String
+            // keys are the only real allocation.
+            let outputs = self.run_segment(i, values.clone())?;
+            values.extend(outputs);
+            if let Some(special) = self.special_nodes.get(i) {
+                let result = special.compute(&values)?;
+                values.insert(special.output().to_string(), result);
+            }
+        }
+        Ok(values)
+    }
+
+    /// Runs `self.segments[index]` through `crate::onnx::simple_eval()`,
+    /// requesting every node output in that segment.
+    ///
+    /// The model's weights (ONNX initializers) are pre-decoded once in
+    /// [`Model::new`] and passed in via `inputs`; `graph.initializer` is
+    /// empty, so `simple_eval()` doesn't re-decode anything. The graph's
+    /// `node`/`output` fields are temporarily swapped to this segment's
+    /// nodes/outputs via [`std::mem::replace`] and restored before
+    /// returning — even on error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph is missing, or if `simple_eval()`
+    /// fails for this segment.
+    fn run_segment(&mut self, index: usize, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+        let segment_nodes = std::mem::take(&mut self.segments[index]);
+        let output_names: Vec<crate::onnx::proto::ValueInfoProto> = segment_nodes
+            .iter()
+            .flat_map(|n| n.output.iter())
+            .filter(|o| !o.is_empty())
+            .map(|o| crate::onnx::proto::ValueInfoProto { name: o.clone(), ..Default::default() })
+            .collect();
+
+        let graph = self.onnx_graph.graph.as_mut().context("Kokoro ONNX model has no graph")?;
+        let saved_nodes = std::mem::replace(&mut graph.node, segment_nodes);
+        let saved_output = std::mem::replace(&mut graph.output, output_names);
+
+        let result = crate::onnx::simple_eval(&self.onnx_graph, inputs);
+
+        // Restore both the graph's original node/output lists and this
+        // segment's node list, regardless of whether `simple_eval` above
+        // succeeded.
+        let graph = self.onnx_graph.graph.as_mut().expect("checked above");
+        let segment_nodes = std::mem::replace(&mut graph.node, saved_nodes);
+        graph.output = saved_output;
+        self.segments[index] = segment_nodes;
+
+        Ok(result?)
     }
 }
 
@@ -423,6 +723,9 @@ mod tests {
             .collect();
         Model {
             onnx_graph: crate::onnx::proto::ModelProto::default(),
+            segments: Vec::new(),
+            special_nodes: Vec::new(),
+            decoded_initializers: HashMap::new(),
             vocab: HashMap::new(),
             voices,
             voice_dir: voice_dir.to_path_buf(),
@@ -430,7 +733,22 @@ mod tests {
             style_dim: 2,
             max_seq_len: 0,
             pad_token_id: 0,
+            normalizers: HashMap::new(),
         }
+    }
+
+    /// A small hand-picked vocab covering the phonemes used by the
+    /// `phonemes_to_ids`/`chunk_phonemes` tests below: `$` (pad/BOS/EOS),
+    /// `a`, `b`, and a space.
+    fn small_vocab() -> HashMap<char, i64> {
+        [('$', 0), ('a', 1), ('b', 2), (' ', 3)].into_iter().collect()
+    }
+
+    fn test_model_with_vocab(vocab: HashMap<char, i64>) -> Model {
+        let mut model = test_model(Path::new("/nonexistent"), Vec::new());
+        model.pad_token_id = *vocab.get(&'$').unwrap_or(&0);
+        model.vocab = vocab;
+        model
     }
 
     #[test]
@@ -510,6 +828,120 @@ mod tests {
         assert_eq!(model.pad_token_id, 0);
 
         let voice = model.voice("af_heart").unwrap();
-        assert_eq!(voice.dims(), &[1020, 128]);
+        assert_eq!(voice.dims(), &[510, 256]);
+    }
+
+    #[test]
+    fn phonemes_to_ids_basic() {
+        let model = test_model_with_vocab(small_vocab());
+        assert_eq!(model.phonemes_to_ids("ab"), vec![0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn phonemes_to_ids_skips_unknown_codepoints() {
+        let model = test_model_with_vocab(small_vocab());
+        // 'z' is not in the vocab, so it's dropped rather than erroring.
+        assert_eq!(model.phonemes_to_ids("azb"), vec![0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn phonemes_to_ids_empty_input() {
+        let model = test_model_with_vocab(small_vocab());
+        assert_eq!(model.phonemes_to_ids(""), vec![0, 0]);
+    }
+
+    #[test]
+    fn chunk_phonemes_short_input_is_one_chunk() {
+        assert_eq!(chunk_phonemes("hello world", 510), vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn chunk_phonemes_trims_and_drops_empty() {
+        assert_eq!(chunk_phonemes("  hello  ", 510), vec!["hello".to_string()]);
+        assert!(chunk_phonemes("", 510).is_empty());
+        assert!(chunk_phonemes("   ", 510).is_empty());
+    }
+
+    #[test]
+    fn chunk_phonemes_splits_long_input_at_space_boundary() {
+        // 6 codepoints per word, 5 words = 30 codepoints, split into
+        // chunks of at most 10 codepoints (a word plus a space is exactly
+        // 7 codepoints, so each chunk should hold exactly one word).
+        let words: Vec<&str> = std::iter::repeat_n("abcdef", 5).collect();
+        let phonemes = words.join(" ");
+        let chunks = chunk_phonemes(&phonemes, 10);
+        assert_eq!(chunks, vec!["abcdef".to_string(); 5]);
+    }
+
+    #[test]
+    fn chunk_phonemes_never_exceeds_max_cp() {
+        let phonemes = "a".repeat(25);
+        let chunks = chunk_phonemes(&phonemes, 10);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 10, "chunk {chunk:?} exceeds max_cp");
+        }
+        assert_eq!(chunks.concat().len(), 25);
+    }
+
+    #[test]
+    fn normalizer_for_builds_and_caches() {
+        // Neither 'a' nor 'b' appears in any Kokoro replacement pattern, and
+        // a non-`en`-prefixed language skips the rhotic-vowel pairs, so
+        // "ab" should normalize to itself unchanged.
+        let mut model = test_model_with_vocab(small_vocab());
+
+        assert!(model.normalizers.is_empty());
+        let normalized = model.normalizer_for("de_test").unwrap().normalize("ab");
+        assert_eq!(normalized, "ab");
+        assert_eq!(model.normalizers.len(), 1);
+
+        // Second call for the same language reuses the cached normalizer.
+        model.normalizer_for("de_test").unwrap();
+        assert_eq!(model.normalizers.len(), 1);
+    }
+
+    /// Requires real Kokoro model assets (`CRANE_KOKORO_DIR`) and a real
+    /// English G2P lexicon (`CRANE_G2P_EN_US_DIR`, no OOV model needed since
+    /// "hello" and "world" are common lexicon entries).
+    #[test]
+    #[ignore = "needs CRANE_KOKORO_DIR and CRANE_G2P_EN_US_DIR"]
+    fn generate_speech_real_model() {
+        use crate::models::g2p::MoonshineG2p;
+        use crate::models::g2p::languages::LanguageG2p;
+        use crate::models::g2p::languages::english::EnglishG2p;
+
+        let kokoro_dir = std::env::var("CRANE_KOKORO_DIR")
+            .expect("set CRANE_KOKORO_DIR to a real Kokoro model directory");
+        let g2p_dir = std::env::var("CRANE_G2P_EN_US_DIR")
+            .expect("set CRANE_G2P_EN_US_DIR to an en_us G2P model directory");
+
+        let dict_path = std::path::Path::new(&g2p_dir).join("dict_filtered_heteronyms.tsv");
+        let dict_tsv = std::fs::read_to_string(&dict_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", dict_path.display()));
+        let english = EnglishG2p::new(&dict_tsv, None, false).expect("build EnglishG2p");
+        let mut phonemizer = MoonshineG2p::new();
+        phonemizer.add_language(LanguageG2p::English(english));
+
+        let mut model = Model::new(&kokoro_dir, &Device::Cpu, &DType::F32).unwrap();
+        let (waveform, sample_rate) = model
+            .generate_speech(
+                "Hello world",
+                "en_us",
+                Some("af_heart"),
+                &phonemizer,
+                &SpeechOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(sample_rate, 24_000);
+        let samples = waveform.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        // "Hello world" should produce somewhere between 0.3s and 5s of
+        // audio at 24 kHz -- a loose sanity bound, not an exact figure.
+        assert!(
+            samples.len() > 7_000 && samples.len() < 120_000,
+            "unexpected sample count: {}",
+            samples.len()
+        );
+        assert!(samples.iter().any(|&s| s != 0.0), "waveform is all zeros");
     }
 }
