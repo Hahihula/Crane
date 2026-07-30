@@ -168,12 +168,18 @@ impl LlmClient {
             pad_token_id: config.pad_token_id,
             eos_token_id: config.eos_token_id,
             report_speed: config.report_speed,
+            enable_thinking: config.enable_thinking,
         };
 
         match &mut self.model {
             LoadedModel::Qwen25 { model, tokenizer } => {
                 let prompt = tokenizer
-                    .apply_chat_template(messages, true)
+                    .apply_chat_template_with_options(
+                        messages,
+                        Option::<&serde_json::Value>::None,
+                        true,
+                        config.enable_thinking,
+                    )
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 let input_ids = model
                     .prepare_inputs(&prompt)
@@ -191,7 +197,12 @@ impl LlmClient {
             }
             LoadedModel::Qwen3 { model, tokenizer } => {
                 let prompt = tokenizer
-                    .apply_chat_template(messages, true)
+                    .apply_chat_template_with_options(
+                        messages,
+                        Option::<&serde_json::Value>::None,
+                        true,
+                        config.enable_thinking,
+                    )
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 let input_ids = model
                     .prepare_inputs(&prompt)
@@ -209,7 +220,12 @@ impl LlmClient {
             }
             LoadedModel::Qwen35 { model, tokenizer } => {
                 let prompt = tokenizer
-                    .apply_chat_template(messages, true)
+                    .apply_chat_template_with_options(
+                        messages,
+                        Option::<&serde_json::Value>::None,
+                        true,
+                        config.enable_thinking,
+                    )
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 let input_ids = model
                     .prepare_inputs(&prompt)
@@ -272,12 +288,18 @@ impl LlmClient {
             pad_token_id: config.pad_token_id,
             eos_token_id: config.eos_token_id,
             report_speed: config.report_speed,
+            enable_thinking: config.enable_thinking,
         };
 
         let (input_ids, tokenizer_for_stream) = match &self.model {
             LoadedModel::Qwen25 { tokenizer, model } => {
                 let prompt = tokenizer
-                    .apply_chat_template(messages, true)
+                    .apply_chat_template_with_options(
+                        messages,
+                        Option::<&serde_json::Value>::None,
+                        true,
+                        config.enable_thinking,
+                    )
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 let input_ids = model
                     .prepare_inputs(&prompt)
@@ -286,7 +308,12 @@ impl LlmClient {
             }
             LoadedModel::Qwen3 { tokenizer, model } => {
                 let prompt = tokenizer
-                    .apply_chat_template(messages, true)
+                    .apply_chat_template_with_options(
+                        messages,
+                        Option::<&serde_json::Value>::None,
+                        true,
+                        config.enable_thinking,
+                    )
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 let input_ids = model
                     .prepare_inputs(&prompt)
@@ -295,7 +322,12 @@ impl LlmClient {
             }
             LoadedModel::Qwen35 { tokenizer, model } => {
                 let prompt = tokenizer
-                    .apply_chat_template(messages, true)
+                    .apply_chat_template_with_options(
+                        messages,
+                        Option::<&serde_json::Value>::None,
+                        true,
+                        config.enable_thinking,
+                    )
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 let input_ids = model
                     .prepare_inputs(&prompt)

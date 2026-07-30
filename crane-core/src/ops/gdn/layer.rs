@@ -237,6 +237,36 @@ mod tests {
         assert_eq!(expanded(VHeadOrder::Chunked), vec![10.0, 20.0, 10.0, 20.0]);
     }
 
+    /// Ratios other than 2 must follow the same rule. Qwen3.5-27B is
+    /// `16 key / 48 value` heads (v_per_group == 3) and the 122B/397B are
+    /// `16 / 64` (== 4), so the formulas must not assume 2 or a power of two.
+    /// Modelled here at `2 key / 6 value` heads.
+    #[test]
+    fn repeat_kv_heads_generalizes_beyond_v_per_group_2() {
+        let t = Tensor::new(&[[[[10.0f32], [20.0f32]]]], &Device::Cpu).unwrap();
+        let base = GdnDims {
+            num_v_heads: 6,
+            value_dim: 6,
+            v_per_group: 3,
+            ..dims_2x2(VHeadOrder::Interleaved)
+        };
+
+        // key_head * v_per_group + replica
+        let (q, _) = repeat_kv_heads(&t, &t, &base).unwrap();
+        assert_eq!(
+            q.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![10.0, 10.0, 10.0, 20.0, 20.0, 20.0]
+        );
+
+        // replica * num_k_heads + key_head
+        let chunked = GdnDims { v_head_order: VHeadOrder::Chunked, ..base };
+        let (q, _) = repeat_kv_heads(&t, &t, &chunked).unwrap();
+        assert_eq!(
+            q.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![10.0, 20.0, 10.0, 20.0, 10.0, 20.0]
+        );
+    }
+
     /// With `v_per_group == 1` the two orders coincide and expansion is a no-op.
     #[test]
     fn repeat_kv_heads_is_noop_without_grouping() {

@@ -5,10 +5,21 @@
 //! resolve their inputs from env vars:
 //!
 //! ```bash
-//! CRANE_QWEN35_DIR=/path/to/Qwen3.5-0.8B \
-//! CRANE_QWEN35_GGUF=/path/to/Qwen3.5-0.8B-Q4_0.gguf \
-//!   cargo test -p crane-core --release --test qwen3_5_quant -- --ignored --nocapture
+//! CRANE_QWEN35_DIR=/path/to/Qwen3.5-4B \
+//! CRANE_QWEN35_GGUF=/path/to/Qwen3.5-4B-Q6_K.gguf \
+//!   cargo test -p crane-core --release --test qwen3_5_quant -- \
+//!     --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! `--test-threads=1` is required on GPU: each test loads its own copy of the
+//! model, and several 4B copies at once will exhaust a 24 GB card. The failure
+//! surfaces as `CUDA_ERROR_OUT_OF_MEMORY` in whichever test loses the race, so
+//! it looks like a flaky/unrelated regression.
+//!
+//! Point `CRANE_QWEN35_*` at the **4B**, not the 0.8B. The 0.8B (and 2B) have
+//! `linear_num_key_heads == linear_num_value_heads` → `v_per_group == 1`, which
+//! makes the GDN key→value head expansion a no-op and hides any head-pairing
+//! bug; the 4B is 16/32 (`v_per_group == 2`) and does exercise it.
 //!
 //! Greedy decoding (temperature = None) makes runs on the same machine
 //! byte-comparable, which is how the LinearLayer refactor and the quantized
