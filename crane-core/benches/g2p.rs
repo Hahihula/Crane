@@ -6,16 +6,22 @@
 //! (`split_text_to_words`, `normalize_word_for_lookup`) both of those call
 //! into. All run once per TTS request and gate time-to-first-audio.
 //!
-//! This sets up the `criterion` harness only -- no baseline numbers are
-//! recorded here. A later step runs Moonshine's C++ G2P CLI on the same
-//! inputs and records its latency/throughput as the regression baseline.
+//! `text_to_ipa` uses a small inline lexicon and no OOV model, so it
+//! measures dispatch overhead in isolation. `text_to_ipa_full_lexicon`
+//! loads a real `en_us` lexicon and OOV ONNX model directory from
+//! `CRANE_G2P_EN_US_DIR` for a production-representative comparison
+//! point; it silently skips (no benchmark registered, non-error exit) when
+//! that variable isn't set, so it's opt-in and doesn't affect the default
+//! `cargo bench` run.
 
 use std::collections::HashMap;
 use std::hint::black_box;
+use std::path::PathBuf;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use crane_core::models::g2p::languages::english::EnglishG2p;
+use crane_core::models::g2p::oov_onnx;
 use crane_core::models::g2p::text_normalize::{normalize_word_for_lookup, split_text_to_words};
 use crane_core::models::kokoro_tts::build_kokoro_normalizer;
 
@@ -75,6 +81,85 @@ fn bench_text_to_ipa(c: &mut Criterion) {
     group.finish();
 }
 
+/// Directory of a real `en_us` G2P model (lexicon + OOV ONNX model), or
+/// `None` if `CRANE_G2P_EN_US_DIR` isn't set. This benchmark group depends
+/// on external model assets not checked into the repo, so it's opt-in.
+fn g2p_model_dir() -> Option<PathBuf> {
+    std::env::var("CRANE_G2P_EN_US_DIR").ok().map(PathBuf::from)
+}
+
+/// Full-lexicon variant of [`bench_text_to_ipa`], loading the real
+/// ~133K-entry English lexicon and OOV ONNX model instead of the 9-word
+/// inline lexicon, so these numbers are directly comparable to Moonshine's
+/// C++ G2P baseline (recorded against the same real assets). Skipped when
+/// `CRANE_G2P_EN_US_DIR` isn't set.
+fn bench_text_to_ipa_full_lexicon(c: &mut Criterion) {
+    let Some(model_dir) = g2p_model_dir() else {
+        eprintln!(
+            "skipping text_to_ipa_full_lexicon: set CRANE_G2P_EN_US_DIR to an en_us G2P model \
+             directory to run it"
+        );
+        return;
+    };
+
+    let dict_path = model_dir.join("dict_filtered_heteronyms.tsv");
+    let dict_tsv = std::fs::read_to_string(&dict_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", dict_path.display()));
+    let oov_model =
+        oov_onnx::Model::load(&model_dir.join("oov")).expect("load OOV model");
+    let engine = EnglishG2p::new(&dict_tsv, Some(oov_model), false).expect("build EnglishG2p");
+
+    let corpus: Vec<&str> = include_str!("../tests/data/g2p/en_us_test.tsv")
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(word, _)| word)
+        .collect();
+
+    let mut group = c.benchmark_group("text_to_ipa_full_lexicon");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("single_known_word", |b| {
+        b.iter(|| engine.text_to_ipa(black_box("hello")).unwrap());
+    });
+
+    group.bench_function("known_sentence", |b| {
+        b.iter(|| {
+            engine
+                .text_to_ipa(black_box("the quick brown fox jumps over the lazy dog"))
+                .unwrap()
+        });
+    });
+
+    // Unlike `bench_text_to_ipa`'s `single_unknown_word` (no OOV model, so
+    // every call takes the same hand-rules path), this engine has a real OOV
+    // model and therefore a live OOV LRU cache: reusing the same word across
+    // iterations would hit the cache after the first call and measure
+    // cache-hit latency instead of ONNX inference. A fresh nonsense word per
+    // iteration guarantees a lexicon miss and a cache miss every time.
+    let unknown_word_counter = std::cell::Cell::new(0u64);
+    group.bench_function("single_unknown_word", |b| {
+        b.iter(|| {
+            let n = unknown_word_counter.get();
+            unknown_word_counter.set(n + 1);
+            let word = format!("zqxoovbench{n}");
+            engine.text_to_ipa(black_box(word.as_str())).unwrap()
+        });
+    });
+
+    group.finish();
+
+    let mut corpus_group = c.benchmark_group("text_to_ipa_full_lexicon_corpus");
+    corpus_group.throughput(Throughput::Elements(corpus.len() as u64));
+    corpus_group.bench_function("corpus_5000_words", |b| {
+        b.iter(|| {
+            for word in &corpus {
+                engine.text_to_ipa(black_box(word)).unwrap();
+            }
+        });
+    });
+    corpus_group.finish();
+}
+
 fn bench_ipa_normalize(c: &mut Criterion) {
     let vocab = kokoro_vocab();
     let normalizer = build_kokoro_normalizer("en_us", &vocab).unwrap();
@@ -111,5 +196,11 @@ fn bench_text_normalize(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_text_to_ipa, bench_ipa_normalize, bench_text_normalize);
+criterion_group!(
+    benches,
+    bench_text_to_ipa,
+    bench_text_to_ipa_full_lexicon,
+    bench_ipa_normalize,
+    bench_text_normalize
+);
 criterion_main!(benches);
