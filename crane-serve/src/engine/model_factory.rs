@@ -3,6 +3,8 @@
 //! Supports auto-detection from `config.json`'s `model_type` / `architectures`
 //! fields, or explicit model type specification via CLI.
 
+#[cfg(feature = "onnx")]
+use anyhow::Context;
 use anyhow::Result;
 use candle_core::{DType, Device};
 use serde::Deserialize;
@@ -30,6 +32,7 @@ pub enum ModelType {
     Qwen3_5VL,
     Qwen3TTS,
     VoxtralTTS,
+    Kokoro,
     PaddleOcrVl,
     Qwen3ASR,
 }
@@ -52,6 +55,7 @@ impl ModelType {
             }
             "qwen3_tts" | "qwen3tts" | "qwen3-tts" | "tts" => Self::Qwen3TTS,
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
+            "kokoro" | "kokoro_tts" | "kokoro-tts" | "kokoro-82m" => Self::Kokoro,
             "paddleocr_vl" | "paddleocrv" | "paddleocr" | "paddle_ocr_vl" | "paddleocrvl" => Self::PaddleOcrVl,
             "qwen3_asr" | "qwen3asr" | "qwen3-asr" | "asr" => Self::Qwen3ASR,
             _ => Self::Auto,
@@ -71,6 +75,7 @@ impl ModelType {
             Self::Qwen3_5VL => "qwen3_5_vl",
             Self::Qwen3TTS => "qwen3_tts",
             Self::VoxtralTTS => "voxtral_tts",
+            Self::Kokoro => "kokoro_tts",
             Self::PaddleOcrVl => "paddleocr_vl",
             Self::Qwen3ASR => "qwen3_asr",
         }
@@ -85,7 +90,7 @@ impl ModelType {
     /// Whether this model type is a TTS model.
     #[must_use]
     pub fn is_tts(&self) -> bool {
-        matches!(self, Self::Qwen3TTS | Self::VoxtralTTS)
+        matches!(self, Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro)
     }
 
     /// Whether this model type is an ASR model.
@@ -171,6 +176,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
                 "qwen3_asr" | "qwen3asr" => return ModelType::Qwen3ASR,
+                "style_text_to_speech_2" => return ModelType::Kokoro,
                 m if m.contains("hunyuan") => return ModelType::HunyuanDense,
                 m if m.contains("paddleocr") => return ModelType::PaddleOcrVl,
                 _ => {}
@@ -239,6 +245,8 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
     let path_lower = model_path.to_lowercase();
     if path_lower.contains("voxtral") {
         ModelType::VoxtralTTS
+    } else if path_lower.contains("kokoro") {
+        ModelType::Kokoro
     } else if path_lower.contains("paddleocr") {
         ModelType::PaddleOcrVl
     } else if path_lower.contains("gemma4") || path_lower.contains("gemma-4") {
@@ -377,6 +385,9 @@ pub fn create_backend(
         ModelType::VoxtralTTS => {
             anyhow::bail!("Voxtral-TTS is a TTS model — use create_tts() instead of create_backend()")
         }
+        ModelType::Kokoro => {
+            anyhow::bail!("Kokoro is a TTS model — use create_tts() instead of create_backend()")
+        }
         ModelType::Qwen3ASR => {
             anyhow::bail!("Qwen3-ASR is an ASR model — use create_asr() instead of create_backend()")
         }
@@ -470,8 +481,44 @@ pub fn create_tts(
             let model = crane_core::models::voxtral_tts::Model::new(model_path, device, dtype)?;
             Ok(Box::new(model))
         }
+        #[cfg(feature = "onnx")]
+        ModelType::Kokoro => create_kokoro_tts(model_path, device, dtype),
+        #[cfg(not(feature = "onnx"))]
+        ModelType::Kokoro => anyhow::bail!("Kokoro TTS requires the 'onnx' feature"),
         other => anyhow::bail!("{other:?} is not a TTS model type"),
     }
+}
+
+/// Builds a [`crane::audio::KokoroTts`] from `model_path`.
+///
+/// `--model-path` points at the Kokoro model directory itself (`config.json`,
+/// `tokenizer.json`, `onnx/`, `voices/`); G2P assets are located at
+/// `{model_path}/g2p/`, following Moonshine's per-language directory layout
+/// (see [`crane_core::models::g2p::MoonshineG2p::from_g2p_dir`]). A real
+/// deployment symlinks or copies its G2P data there, e.g.:
+///
+/// ```text
+/// ln -s /path/to/moonshine-g2p <model_path>/g2p
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if the Kokoro model fails to load, or if
+/// `{model_path}/g2p/en_us/dict_filtered_heteronyms.tsv` is missing or
+/// malformed.
+#[cfg(feature = "onnx")]
+fn create_kokoro_tts(
+    model_path: &str,
+    device: &Device,
+    dtype: &DType,
+) -> Result<Box<dyn crane::audio::Tts + Send>> {
+    let model = crane_core::models::kokoro_tts::Model::new(model_path, device, dtype)?;
+
+    let g2p_dir = Path::new(model_path).join("g2p");
+    let phonemizer = crane_core::models::g2p::MoonshineG2p::from_g2p_dir(&g2p_dir)
+        .with_context(|| format!("loading Kokoro G2P assets from {}", g2p_dir.display()))?;
+
+    Ok(Box::new(crane::audio::KokoroTts::new(model, Box::new(phonemizer))))
 }
 
 /// Create an ASR model as a trait object.
@@ -533,6 +580,15 @@ mod tests {
     }
 
     #[test]
+    fn model_type_from_str_kokoro_variants() {
+        assert_eq!(ModelType::from_str("kokoro"), ModelType::Kokoro);
+        assert_eq!(ModelType::from_str("kokoro_tts"), ModelType::Kokoro);
+        assert_eq!(ModelType::from_str("kokoro-tts"), ModelType::Kokoro);
+        assert_eq!(ModelType::from_str("kokoro-82m"), ModelType::Kokoro);
+        assert_eq!(ModelType::from_str("KOKORO"), ModelType::Kokoro);
+    }
+
+    #[test]
     fn model_type_from_str_auto_fallback() {
         assert_eq!(ModelType::from_str("auto"), ModelType::Auto);
         assert_eq!(ModelType::from_str("unknown"), ModelType::Auto);
@@ -543,6 +599,7 @@ mod tests {
     fn model_type_is_tts() {
         assert!(ModelType::Qwen3TTS.is_tts());
         assert!(ModelType::VoxtralTTS.is_tts());
+        assert!(ModelType::Kokoro.is_tts());
         assert!(!ModelType::Qwen3.is_tts());
     }
 
@@ -700,6 +757,23 @@ mod tests {
     fn detect_path_heuristic_voxtral() {
         let result = detect_model_type("/models/Voxtral-4B-TTS-2603");
         assert_eq!(result, ModelType::VoxtralTTS);
+    }
+
+    #[test]
+    fn detect_from_config_json_model_type_kokoro() {
+        // Real onnx-community Kokoro exports carry only this one key — see
+        // the "Local asset locations" note in the G2P design doc.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "style_text_to_speech_2"}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Kokoro);
+    }
+
+    #[test]
+    fn detect_path_heuristic_kokoro() {
+        let result = detect_model_type("/models/Kokoro-82M-v1.0-ONNX");
+        assert_eq!(result, ModelType::Kokoro);
     }
 
     #[test]
