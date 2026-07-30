@@ -997,7 +997,7 @@ mod tests {
             logits[idx(row, 2, 3)] = 1.0; // word "ab": step 2 -> <eos>
         }
 
-        let mut graph = GraphProto {
+        let graph = GraphProto {
             node: vec![float_const_node(
                 "logits",
                 vec![eff_batch as i64, PHONEME_LEN as i64, VOCAB as i64],
