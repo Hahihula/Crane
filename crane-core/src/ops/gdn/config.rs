@@ -2,6 +2,25 @@
 
 use serde::Deserialize;
 
+/// How a checkpoint orders the `num_v_heads` value-head axis relative to the
+/// `num_k_heads` key-head axis it is grouped over.
+///
+/// Both orders hold the same weights — they differ only in which value head
+/// sits at which index, and therefore which key head each value head is
+/// paired with by [`crate::ops::gdn::GatedDeltaNet`]'s Q/K expansion. Getting
+/// it wrong silently mispairs every GDN head: the model still runs and emits
+/// fluent-looking text, but the text is wrong and degenerates quickly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VHeadOrder {
+    /// HF layout: each key head's `v_per_group` value heads are consecutive
+    /// (`index = key_head * v_per_group + replica`).
+    #[default]
+    Interleaved,
+    /// llama.cpp GGUF layout: all key heads at replica 0, then all at replica
+    /// 1, … (`index = replica * num_k_heads + key_head`).
+    Chunked,
+}
+
 /// Per-head dimensions derived from a GDN config.
 ///
 /// `key_dim = num_k_heads * head_k_dim`, `value_dim = num_v_heads * head_v_dim`,
@@ -19,6 +38,10 @@ pub struct GdnDims {
     pub conv_dim: usize,
     /// Number of value heads per key head (GQA ratio).
     pub v_per_group: usize,
+    /// Value-head ordering of the loaded weights. Defaults to
+    /// [`VHeadOrder::Interleaved`] (HF); the GGUF loader overrides it rather
+    /// than permuting weights, which would force a lossy re-quantization.
+    pub v_head_order: VHeadOrder,
 }
 
 impl GdnDims {
@@ -45,7 +68,14 @@ impl GdnDims {
             value_dim,
             conv_dim,
             v_per_group,
+            v_head_order: VHeadOrder::default(),
         }
+    }
+
+    /// Same dims, but reading weights stored in `order`'s value-head layout.
+    pub fn with_v_head_order(mut self, order: VHeadOrder) -> Self {
+        self.v_head_order = order;
+        self
     }
 
     /// Output dimension of the QKV/Z fused projection (Q + K + V + Z concatenated).

@@ -359,6 +359,25 @@ impl AutoTokenizer {
         tools: Option<T>,
         add_generation_prompt: bool,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.apply_chat_template_with_options(ctx, tools, add_generation_prompt, None)
+    }
+
+    /// Like [`Self::apply_chat_template_with_tools`], but also controls the
+    /// reasoning-mode switch that Qwen-family templates read.
+    ///
+    /// `enable_thinking: None` leaves the variable **undefined**, so the
+    /// template's own default applies — and note that the default is not
+    /// universal: the official Qwen 3.5 `chat_template.jinja` opens `<think>`
+    /// (reasoning ON) when the flag is undefined, whereas the template unsloth
+    /// embeds in its GGUFs emits a pre-closed `<think></think>` (reasoning
+    /// OFF). Pass `Some(bool)` to pin the behaviour instead of inheriting it.
+    pub fn apply_chat_template_with_options<S: serde::Serialize, T: serde::Serialize>(
+        &self,
+        ctx: S,
+        tools: Option<T>,
+        add_generation_prompt: bool,
+        enable_thinking: Option<bool>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let template_str = self.config.chat_template.as_deref().ok_or_else(|| {
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -478,6 +497,14 @@ impl AutoTokenizer {
             &String::new()
         };
 
+        // `None` must render as *undefined*, not as `none`: templates gate on
+        // `enable_thinking is defined`, and Jinja considers an explicit `none`
+        // to BE defined. `Value::UNDEFINED` reproduces "never passed".
+        let enable_thinking = match enable_thinking {
+            Some(v) => minijinja::Value::from(v),
+            None => minijinja::Value::UNDEFINED,
+        };
+
         match tmpl.render(context! {
             messages=> ctx,
             tools=> tools,
@@ -485,7 +512,8 @@ impl AutoTokenizer {
             pad_token=> *pad,
             bos_token=> *bos,
             eos_token=> *eos,
-            add_generation_prompt=> add_generation_prompt
+            add_generation_prompt=> add_generation_prompt,
+            enable_thinking=> enable_thinking
         }) {
             Ok(result) => Ok(result),
             Err(e) => Err(Box::new(std::io::Error::new(
@@ -499,6 +527,60 @@ impl AutoTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── enable_thinking ──────────────────────────────────────────────────
+
+    /// The two `enable_thinking` polarities seen in the wild for the SAME
+    /// model. Official Qwen 3.5 (`chat_template.jinja`) reasons unless told
+    /// not to; the template unsloth embeds in its GGUFs does the opposite.
+    const OFFICIAL_TAIL: &str = "{%- if enable_thinking is defined and enable_thinking is false %}{{- 'OFF' }}{%- else %}{{- 'ON' }}{%- endif %}";
+    const UNSLOTH_TAIL: &str = "{%- if enable_thinking is defined and enable_thinking is true %}{{- 'ON' }}{%- else %}{{- 'OFF' }}{%- endif %}";
+
+    fn render_with(template: &str, enable_thinking: Option<bool>) -> String {
+        let config = AutoTokenizerConfig {
+            add_bos_token: None,
+            add_eos_token: None,
+            clean_up_tokenization_spaces: false,
+            legacy: None,
+            tokenizer_class: "test".to_string(),
+            model_max_length: 32,
+            bos_token: None,
+            eos_token: None,
+            pad_token: None,
+            unk_token: None,
+            chat_template: Some(template.to_string()),
+        };
+        let tok = AutoTokenizer {
+            config,
+            tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
+        };
+        tok.apply_chat_template_with_options(
+            Vec::<serde_json::Value>::new(),
+            Option::<&serde_json::Value>::None,
+            true,
+            enable_thinking,
+        )
+        .expect("render")
+    }
+
+    /// `None` must leave the variable UNDEFINED, not set it to `none` — Jinja
+    /// treats an explicit `none` as *defined*, which would silently flip both
+    /// templates onto their non-default branch.
+    #[test]
+    fn enable_thinking_none_leaves_template_default() {
+        assert_eq!(render_with(OFFICIAL_TAIL, None), "ON");
+        assert_eq!(render_with(UNSLOTH_TAIL, None), "OFF");
+    }
+
+    /// An explicit value must win over either template's default, so the same
+    /// request behaves identically on safetensors and GGUF.
+    #[test]
+    fn enable_thinking_explicit_overrides_both_polarities() {
+        assert_eq!(render_with(OFFICIAL_TAIL, Some(true)), "ON");
+        assert_eq!(render_with(UNSLOTH_TAIL, Some(true)), "ON");
+        assert_eq!(render_with(OFFICIAL_TAIL, Some(false)), "OFF");
+        assert_eq!(render_with(UNSLOTH_TAIL, Some(false)), "OFF");
+    }
 
     // ── rewrite_split_index ──────────────────────────────────────────────
 

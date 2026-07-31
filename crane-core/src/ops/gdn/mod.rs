@@ -53,7 +53,7 @@ pub use backend::{
 #[cfg(feature = "cuda")]
 pub use cuda_backend::gdn_recurrence_cuda;
 pub use cache::GdnLayerCache;
-pub use config::{defaults, GdnConfig, GdnDims};
+pub use config::{defaults, GdnConfig, GdnDims, VHeadOrder};
 pub use layer::GatedDeltaNet;
 pub use norm::RmsNormGated;
 pub use projection::{GdnInputProjection, GdnInputProjectionKind, GdnProjection};

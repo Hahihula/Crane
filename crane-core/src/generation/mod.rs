@@ -72,6 +72,13 @@ pub struct GenerationConfig {
     pub pad_token_id: Option<u32>,
     pub eos_token_id: Option<u32>,
     pub report_speed: bool,
+    /// Reasoning-mode switch handed to the chat template as `enable_thinking`.
+    ///
+    /// `None` leaves it undefined so the template's own default wins — which
+    /// differs between checkpoints of the same model (official Qwen 3.5
+    /// safetensors default to reasoning ON, unsloth's GGUF template to OFF).
+    /// Set it explicitly to get the same behaviour from both.
+    pub enable_thinking: Option<bool>,
 }
 
 impl Default for GenerationConfig {
@@ -86,6 +93,7 @@ impl Default for GenerationConfig {
             pad_token_id: None,
             eos_token_id: None,
             report_speed: false,
+            enable_thinking: None,
         }
     }
 }

@@ -193,6 +193,22 @@ fn is_gguf_added_token(token_type: i32) -> bool {
     matches!(token_type, 3 | 4)
 }
 
+/// Whether a GGUF token type means "special" in the `tokenizers` sense, i.e.
+/// dropped by `decode(skip_special_tokens = true)`.
+///
+/// Only CONTROL (3) is. USER_DEFINED (4) tokens must be *added* (so they
+/// tokenize as one unit) but NOT special, so they survive decoding — this
+/// mirrors HF's `tokenizer.json`, where Qwen 3.5 declares `<|im_start|>` /
+/// `<|im_end|>` with `"special": true` but `<think>` / `</think>` /
+/// `<tool_call>` with `"special": false`.
+///
+/// Marking type 4 special makes the GGUF path silently swallow reasoning and
+/// tool-call markers that the safetensors path emits, so the two disagree on
+/// the same model and downstream `</think>` / `<tool_call>` parsing breaks.
+fn is_gguf_special_token(token_type: i32) -> bool {
+    token_type == 3
+}
+
 /// Build a HF-compatible `tokenizers::Tokenizer` directly from the BPE
 /// vocab, merges, and added/special token metadata embedded in a GGUF file.
 ///
@@ -273,7 +289,8 @@ pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
     //
     // We derive the list from `tokenizer.ggml.token_type`: tokens whose type
     // is 3 (CONTROL, e.g. `<|im_start|>`, `<|im_end|>`) or 4 (USER_DEFINED,
-    // e.g. `<tool_call>`, `<think>`) are registered as special. Type 5
+    // e.g. `<tool_call>`, `<think>`) are registered as added tokens; only
+    // CONTROL is marked *special* (see [`is_gguf_special_token`]). Type 5
     // (`[PADxxx]` padding placeholders added by llama.cpp to align vocab
     // sizes) and type 6 (byte fallbacks) are skipped.
     let mut added: Vec<AddedToken> = Vec::new();
@@ -284,7 +301,7 @@ pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
                 if is_gguf_added_token(n)
                     && let Some(tok) = tokens.get(i)
                 {
-                    let mut at = AddedToken::from(tok.clone(), true);
+                    let mut at = AddedToken::from(tok.clone(), is_gguf_special_token(n));
                     at.normalized = true;
                     if !added.iter().any(|a| a.content == tok.as_str()) {
                         added.push(at);
@@ -319,4 +336,36 @@ pub fn build_tokenizer_from_gguf_path<P: AsRef<Path>>(path: P) -> Result<Option<
         return Ok(None);
     }
     Ok(Some(build_tokenizer_from_gguf(&ct)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Qwen 3.5's GGUF marks `<|im_start|>`/`<|im_end|>` as CONTROL (3) and
+    /// `<think>`/`</think>`/`<tool_call>` as USER_DEFINED (4). Both must be
+    /// *added* tokens so they tokenize atomically, but only CONTROL may be
+    /// *special* — otherwise `decode(skip_special_tokens = true)` swallows the
+    /// reasoning and tool-call markers, and the GGUF path stops matching the
+    /// safetensors path on the very same model.
+    #[test]
+    fn gguf_control_is_special_but_user_defined_is_not() {
+        // CONTROL: added and special.
+        assert!(is_gguf_added_token(3));
+        assert!(is_gguf_special_token(3));
+
+        // USER_DEFINED: added but NOT special.
+        assert!(is_gguf_added_token(4));
+        assert!(!is_gguf_special_token(4));
+    }
+
+    /// Plain vocab, padding placeholders and byte fallbacks are not added
+    /// tokens at all (and so never special).
+    #[test]
+    fn gguf_normal_and_unused_types_are_not_added() {
+        for t in [0, 1, 2, 5, 6] {
+            assert!(!is_gguf_added_token(t), "type {t} should not be an added token");
+            assert!(!is_gguf_special_token(t), "type {t} should not be special");
+        }
+    }
 }

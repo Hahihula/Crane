@@ -50,6 +50,25 @@ fn max_new_tokens() -> usize {
         .unwrap_or(4096)
 }
 
+/// `--think` / `--no-think` (or `ENABLE_THINKING=1|0`) pin the chat template's
+/// reasoning mode. Unset leaves it to the template, whose default differs by
+/// checkpoint: official Qwen 3.5 safetensors reason by default, the template in
+/// unsloth's GGUFs does not.
+fn enable_thinking() -> Option<bool> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--no-think") {
+        return Some(false);
+    }
+    if args.iter().any(|a| a == "--think") {
+        return Some(true);
+    }
+    match std::env::var("ENABLE_THINKING").ok()?.trim() {
+        "0" | "false" | "no" => Some(false),
+        "1" | "true" | "yes" => Some(true),
+        _ => None,
+    }
+}
+
 fn pick_device_dtype() -> (DeviceConfig, DataType) {
     #[cfg(feature = "cuda")]
     {
@@ -121,6 +140,7 @@ fn main() -> Result<()> {
             max_new_tokens: max_new_tokens(),
             temperature: Some(0.7),
             report_speed: false,
+            enable_thinking: enable_thinking(),
             ..Default::default()
         },
         max_history_turns: 12,
