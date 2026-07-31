@@ -17,7 +17,7 @@ pub mod prelude {
     pub use crate::audio::TtsClient;
     pub use crate::chat::{ChatClient, ChatConfig, ChatMessage, ChatRole};
     pub use crate::common::{CraneError, CraneResult};
-    pub use crate::vision::{OcrClient, VisionClient};
+    pub use crate::vision::{OcrClient, OcrDocument, OcrRegion, VisionClient};
 
     #[cfg(feature = "onnx")]
     pub use crate::audio::AsrClient;

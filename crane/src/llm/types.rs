@@ -56,6 +56,7 @@ pub enum LlmModelType {
     DeepSeek,
     HunyuanDense,
     PaddleOcrVl,
+    PaddleOcrV6,
     MoonshineAsr,
     Qwen3Asr,
     Vision,
