@@ -1,6 +1,6 @@
+use crate::onnx;
 use anyhow::{Ok, Result};
 use candle_core::{Device, IndexOp, Tensor};
-use candle_onnx as onnx;
 use std::collections::HashMap;
 
 pub struct MoonshineASR {
@@ -52,7 +52,7 @@ impl MoonshineASR {
         })
     }
 
-    fn load_onnx_model(&self, path: &str) -> Result<onnx::onnx::ModelProto> {
+    fn load_onnx_model(&self, path: &str) -> Result<onnx::proto::ModelProto> {
         let model = onnx::read_file(path)?;
         Ok(model)
     }

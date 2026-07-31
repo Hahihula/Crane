@@ -29,6 +29,10 @@ pub mod generation;
 pub mod models;
 pub mod utils;
 
+#[cfg(feature = "onnx")]
+#[path = "onnx.rs"]
+pub mod onnx;
+
 pub mod autotokenizer;
 pub mod bins;
 pub mod chat;
