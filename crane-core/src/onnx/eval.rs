@@ -418,6 +418,13 @@ fn simple_eval_(
                 let output = input0.broadcast_div(input1)?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260731: implementation lives in ops/modulo.rs.
+            "Mod" => {
+                let input0 = get(&node.input[0])?;
+                let input1 = get(&node.input[1])?;
+                let output = ops::modulo::modulo(node, input0, input1)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Pow" => {
                 let input0 = get(&node.input[0])?;
                 let input1 = get(&node.input[1])?;
