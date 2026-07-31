@@ -300,6 +300,7 @@ const CANDLE_SIMPLE_EVAL_OPS: &[&str] = &[
     "Min",
     "Mul",
     "Neg",
+    "NonZero",
     "Not",
     "OneHot",
     "Or",

@@ -454,6 +454,12 @@ fn simple_eval_(
                 let xs = xs.eq(&xs.zeros_like()?)?;
                 values.insert(node.output[0].clone(), xs);
             },
+            // Crane Added 20260731: implementation lives in ops/nonzero.rs.
+            "NonZero" => {
+                let input = get(&node.input[0])?;
+                let output = ops::nonzero::nonzero(node, input)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "MatMul" => {
                 let input0 = get(&node.input[0])?;
                 let input1 = get(&node.input[1])?;
