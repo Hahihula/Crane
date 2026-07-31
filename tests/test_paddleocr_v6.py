@@ -345,6 +345,7 @@ if __name__ == "__main__":
         rec_model_path=os.path.join(ckpt_p, "pp-ocrv6_small_rec.onnx"),
         dict_path=os.path.join(ckpt_p, "ppocrv6_dict.txt"),
         use_gpu=False,
+        # use_gpu=True,
         save_dir="output",
     )
 

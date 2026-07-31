@@ -24,12 +24,16 @@ pub mod eval;
 #[path = "onnx/session.rs"]
 mod session;
 
+#[path = "onnx/optimizer/mod.rs"]
+mod optimizer;
+
 /// Crane-specific ONNX operators. Keep evaluator dispatch in `eval.rs` so
 /// upstream evaluator updates remain straightforward to merge.
 #[path = "onnx/ops/mod.rs"]
 pub(crate) mod ops;
 
 pub use eval::{dtype, simple_eval};
+pub use optimizer::{OptimizationReport, SessionOptions};
 pub use session::Session;
 
 /// Decodes an ONNX protobuf model from disk.
