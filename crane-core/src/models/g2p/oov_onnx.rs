@@ -323,15 +323,17 @@ struct Beam {
     finished: bool,
 }
 
-/// Loaded OOV encoder-decoder model: parsed config plus the ONNX graph.
+/// Loaded OOV encoder-decoder model: parsed config plus the ONNX session.
 ///
 /// Autoregressive decoding is not implemented here — this type only covers
 /// loading the config and the ONNX model file.
 pub struct Model {
     /// Parsed and validated `onnx-config.json`.
     pub config: Config,
-    /// Loaded ONNX graph for the encoder-decoder model.
-    pub model: crate::onnx::proto::ModelProto,
+    /// ONNX session for the encoder-decoder model, with initializer tensors
+    /// decoded once at load time rather than on every decode-step
+    /// `simple_eval()` call — see [`crate::onnx::Session`].
+    pub session: crate::onnx::Session,
 }
 
 impl std::fmt::Debug for Model {
@@ -361,8 +363,10 @@ impl Model {
         let onnx_path = model_dir.join("model.onnx");
         let model = crate::onnx::read_file(&onnx_path)
             .with_context(|| format!("failed to read {}", onnx_path.display()))?;
+        let session = crate::onnx::Session::new(model)
+            .with_context(|| format!("building ONNX session from {}", onnx_path.display()))?;
 
-        Ok(Self { config, model })
+        Ok(Self { config, session })
     }
 
     /// Runs autoregressive greedy decoding for a single word, returning the
@@ -443,7 +447,7 @@ impl Model {
                 ("decoder_attention_mask".to_string(), dec_mask_tensor),
             ]);
 
-            let outputs = crate::onnx::simple_eval(&self.model, inputs)?;
+            let outputs = self.session.run(inputs)?;
             let logits = outputs
                 .get("logits")
                 .ok_or_else(|| anyhow::anyhow!("OOV model returned no logits output"))?;
@@ -603,7 +607,7 @@ impl Model {
                 ("decoder_attention_mask".to_string(), dec_mask_tensor),
             ]);
 
-            let outputs = crate::onnx::simple_eval(&self.model, inputs)?;
+            let outputs = self.session.run(inputs)?;
             let logits = outputs
                 .get("logits")
                 .ok_or_else(|| anyhow::anyhow!("OOV model returned no logits output"))?;
@@ -899,9 +903,13 @@ mod tests {
     /// Used to verify batch-wide failures degrade to `None` per word
     /// instead of panicking or propagating.
     fn model_with_empty_graph() -> Model {
+        let model = crate::onnx::proto::ModelProto {
+            graph: Some(GraphProto::default()),
+            ..Default::default()
+        };
         Model {
             config: Config::from_json(&valid_config_json()).unwrap(),
-            model: crate::onnx::proto::ModelProto::default(),
+            session: crate::onnx::Session::new(model).unwrap(),
         }
     }
 
@@ -1015,7 +1023,7 @@ mod tests {
         };
         Model {
             config: Config::from_json(&small_phoneme_len_config_json()).unwrap(),
-            model,
+            session: crate::onnx::Session::new(model).unwrap(),
         }
     }
 
@@ -1140,7 +1148,7 @@ mod tests {
         };
         Model {
             config: Config::from_json(&small_phoneme_len_config_json()).unwrap(),
-            model,
+            session: crate::onnx::Session::new(model).unwrap(),
         }
     }
 
@@ -1189,7 +1197,7 @@ mod tests {
         };
         Model {
             config: Config::from_json(&small_phoneme_len_config_json()).unwrap(),
-            model,
+            session: crate::onnx::Session::new(model).unwrap(),
         }
     }
 
@@ -1287,7 +1295,7 @@ mod tests {
         };
         Model {
             config: Config::from_json(&two_phoneme_config_json()).unwrap(),
-            model,
+            session: crate::onnx::Session::new(model).unwrap(),
         }
     }
 

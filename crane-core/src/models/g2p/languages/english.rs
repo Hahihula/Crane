@@ -353,9 +353,13 @@ mod tests {
             "train_config": {"max_seq_len": 64},
             "oov_index": {"max_phoneme_len": 64}
         }"#;
+        let model = crate::onnx::proto::ModelProto {
+            graph: Some(crate::onnx::proto::GraphProto::default()),
+            ..Default::default()
+        };
         oov_onnx::Model {
             config: oov_onnx::Config::from_json(config_json).unwrap(),
-            model: crate::onnx::proto::ModelProto::default(),
+            session: crate::onnx::Session::new(model).unwrap(),
         }
     }
 
