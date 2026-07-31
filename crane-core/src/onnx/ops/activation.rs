@@ -15,7 +15,11 @@ pub(crate) fn hard_sigmoid(node: &NodeProto, input: &Tensor) -> Result<Tensor> {
 }
 
 fn float_attribute(node: &NodeProto, name: &str, default: f64) -> Result<f64> {
-    let Some(attribute) = node.attribute.iter().find(|attribute| attribute.name == name) else {
+    let Some(attribute) = node
+        .attribute
+        .iter()
+        .find(|attribute| attribute.name == name)
+    else {
         return Ok(default);
     };
     if attribute.r#type() != proto::attribute_proto::AttributeType::Float {

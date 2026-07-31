@@ -6,6 +6,7 @@
 use anyhow::{Result, anyhow};
 use candle_core::{Device, Tensor};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::{DEFAULT_CHECKPOINT_DIR, DICTIONARY_FILE, PaddleOcrV6};
 
@@ -51,15 +52,22 @@ impl PaddleOcrV6Pipeline {
     }
 
     pub fn recognize(&self, path: impl AsRef<Path>) -> Result<OcrDocument> {
+        let started = Instant::now();
         let image = image::open(path.as_ref())
             .map_err(|e| anyhow!("cannot read OCR image {}: {e}", path.as_ref().display()))?
             .to_rgb8();
+        let loaded = Instant::now();
         let boxes = self.detect_regions(&image)?;
-        let mut regions = Vec::with_capacity(boxes.len());
-        for candidate in boxes {
-            if let Some(region) = self.recognize_region(&image, candidate)? {
-                regions.push(region);
-            }
+        let detected = Instant::now();
+        let mut regions = self.recognize_regions(&image, boxes)?;
+        let recognized = Instant::now();
+        if std::env::var_os("CRANE_PADDLEOCR_PROFILE").is_some() {
+            eprintln!(
+                "PaddleOCR v6 timing: load={:.3}s detect={:.3}s recognize={:.3}s",
+                (loaded - started).as_secs_f64(),
+                (detected - loaded).as_secs_f64(),
+                (recognized - detected).as_secs_f64()
+            );
         }
         sort_reading_order(&mut regions);
         let text = regions
@@ -119,37 +127,76 @@ impl PaddleOcrV6Pipeline {
         Ok(db_regions(&map, width, height, source_width, source_height))
     }
 
-    fn recognize_region(
+    fn recognize_regions(
         &self,
         image: &image::RgbImage,
-        candidate: Candidate,
-    ) -> Result<Option<OcrRegion>> {
-        let crop = image::imageops::crop_imm(
-            image,
-            candidate.left,
-            candidate.top,
-            candidate.right - candidate.left,
-            candidate.bottom - candidate.top,
-        )
-        .to_image();
-        if crop.width() == 0 || crop.height() == 0 {
-            return Ok(None);
+        candidates: Vec<Candidate>,
+    ) -> Result<Vec<OcrRegion>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
         }
-        let width = ((crop.width() as f32 / crop.height() as f32) * 48.0)
-            .ceil()
-            .max(1.0) as u32;
-        let resized =
-            image::imageops::resize(&crop, width, 48, image::imageops::FilterType::Triangle);
-        let mut values = Vec::with_capacity((3 * 48 * width) as usize);
-        // Python reference receives BGR crops from cv2.imread.
-        for channel in 0..3 {
-            for y in 0..48 {
-                for x in 0..width {
-                    values.push((resized.get_pixel(x, y)[2 - channel] as f32 / 255.0 - 0.5) / 0.5);
+
+        let mut crops = candidates
+            .into_iter()
+            .map(|candidate| {
+                let crop = image::imageops::crop_imm(
+                    image,
+                    candidate.left,
+                    candidate.top,
+                    candidate.right - candidate.left,
+                    candidate.bottom - candidate.top,
+                )
+                .to_image();
+                let width = (((crop.width() as f32 / crop.height() as f32) * 48.0) as usize).max(1);
+                PreparedCrop {
+                    candidate,
+                    crop,
+                    width,
+                }
+            })
+            .collect::<Vec<_>>();
+        crops.sort_by_key(|crop| crop.width);
+        let batch_size = std::env::var("CRANE_PADDLEOCR_REC_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(crops.len());
+
+        // Crane Added 20260731: recognize all crops in one call by default.
+        // Memory-constrained callers can request smaller aspect-ratio-sorted
+        // batches without changing the model or evaluator.
+        let mut regions = Vec::with_capacity(crops.len());
+        for batch in crops.chunks(batch_size) {
+            self.recognize_batch(batch, &mut regions)?;
+        }
+        Ok(regions)
+    }
+
+    fn recognize_batch(&self, batch: &[PreparedCrop], regions: &mut Vec<OcrRegion>) -> Result<()> {
+        let max_width = batch.iter().map(|crop| crop.width).max().unwrap_or(1);
+        let mut values = vec![-1.0f32; batch.len() * 3 * 48 * max_width];
+        for (batch_index, prepared) in batch.iter().enumerate() {
+            let resized = image::imageops::resize(
+                &prepared.crop,
+                prepared.width as u32,
+                48,
+                image::imageops::FilterType::Triangle,
+            );
+            // Python reference receives BGR crops from cv2.imread.
+            for channel in 0..3 {
+                for y in 0..48 {
+                    for x in 0..prepared.width {
+                        let index = (((batch_index * 3 + channel) * 48 + y) * max_width) + x;
+                        values[index] = (resized.get_pixel(x as u32, y as u32)[2 - channel] as f32
+                            / 255.0
+                            - 0.5)
+                            / 0.5;
+                    }
                 }
             }
         }
-        let input = Tensor::from_vec(values, (1, 3, 48usize, width as usize), &Device::Cpu)
+
+        let input = Tensor::from_vec(values, (batch.len(), 3, 48usize, max_width), &Device::Cpu)
             .map_err(model_error)?;
         let logits = self
             .model
@@ -157,19 +204,34 @@ impl PaddleOcrV6Pipeline {
             .map_err(model_error)?
             .to_vec3::<f32>()
             .map_err(model_error)?;
-        let (text, recognition_score) = ctc_decode(&logits[0], &self.dictionary);
-        if text.trim().is_empty() {
-            return Ok(None);
+        if logits.len() != batch.len() {
+            return Err(anyhow!(
+                "PaddleOCR recognizer returned batch {}, expected {}",
+                logits.len(),
+                batch.len()
+            ));
         }
-        Ok(Some(OcrRegion {
-            left: candidate.left,
-            top: candidate.top,
-            right: candidate.right,
-            bottom: candidate.bottom,
-            text,
-            confidence: recognition_score.min(candidate.score),
-        }))
+
+        regions.extend(batch.iter().zip(logits).filter_map(|(prepared, logits)| {
+            let candidate = prepared.candidate;
+            let (text, recognition_score) = ctc_decode(&logits, &self.dictionary);
+            (!text.trim().is_empty()).then_some(OcrRegion {
+                left: candidate.left,
+                top: candidate.top,
+                right: candidate.right,
+                bottom: candidate.bottom,
+                text,
+                confidence: recognition_score.min(candidate.score),
+            })
+        }));
+        Ok(())
     }
+}
+
+struct PreparedCrop {
+    candidate: Candidate,
+    crop: image::RgbImage,
+    width: usize,
 }
 
 #[derive(Clone, Copy)]

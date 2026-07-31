@@ -10,7 +10,7 @@ use std::{
     path::Path,
 };
 
-use crate::onnx::{self, proto::ModelProto};
+use crate::onnx::{self, Session, proto::ModelProto};
 
 pub const DEFAULT_CHECKPOINT_DIR: &str = "checkpoints/PaddleOCRv6";
 pub const DETECTOR_FILE: &str = "pp-ocrv6_small_det.onnx";
@@ -19,8 +19,8 @@ pub const DICTIONARY_FILE: &str = "ppocrv6_dict.txt";
 
 /// Small PaddleOCR v6 detector/recognizer pair backed by Crane ONNX.
 pub struct PaddleOcrV6 {
-    detector: ModelProto,
-    recognizer: ModelProto,
+    detector: Session,
+    recognizer: Session,
     detector_input: String,
     recognizer_input: String,
     detector_output: String,
@@ -55,6 +55,10 @@ impl PaddleOcrV6 {
         })?;
         let (detector_input, detector_output) = io_names(&detector)?;
         let (recognizer_input, recognizer_output) = io_names(&recognizer)?;
+        let detector = Session::new(detector)
+            .context("failed to prepare PaddleOCR v6 detector initializers")?;
+        let recognizer = Session::new(recognizer)
+            .context("failed to prepare PaddleOCR v6 recognizer initializers")?;
         Ok(Self {
             detector,
             recognizer,
@@ -111,15 +115,12 @@ fn io_names(model: &ModelProto) -> Result<(String, String)> {
 }
 
 fn forward(
-    model: &ModelProto,
+    session: &Session,
     input_name: &str,
     output_name: &str,
     input: &Tensor,
 ) -> Result<Tensor> {
-    let values = onnx::simple_eval(
-        model,
-        HashMap::from([(input_name.to_owned(), input.clone())]),
-    )?;
+    let values = session.run(HashMap::from([(input_name.to_owned(), input.clone())]))?;
     values
         .get(output_name)
         .cloned()
