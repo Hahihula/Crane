@@ -1,0 +1,99 @@
+//! Conservative graph simplification performed when an ONNX session is built.
+
+mod constant_fold;
+mod eliminate;
+
+use std::collections::{HashMap, HashSet};
+
+use candle_core::{Result, Tensor};
+
+use super::proto::GraphProto;
+
+#[derive(Clone, Debug)]
+pub struct SessionOptions {
+    /// Simplify the graph before preparing its initializer tensors.
+    pub optimize: bool,
+    /// Refuse to retain a newly folded constant larger than this many elements.
+    pub max_folded_elements: usize,
+    /// Stop fixed-point optimization after this many iterations.
+    pub max_optimization_passes: usize,
+}
+
+impl Default for SessionOptions {
+    fn default() -> Self {
+        Self {
+            optimize: true,
+            max_folded_elements: 1_000_000,
+            max_optimization_passes: 8,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OptimizationReport {
+    pub original_nodes: usize,
+    pub final_nodes: usize,
+    pub folded_nodes: usize,
+    pub removed_alias_nodes: usize,
+    pub removed_dead_nodes: usize,
+    pub removed_initializers: usize,
+    /// DCE is skipped when graph-valued attributes may capture outer values.
+    pub skipped_dce_for_subgraphs: bool,
+}
+
+pub(crate) fn optimize(
+    graph: &mut GraphProto,
+    constants: &mut HashMap<String, Tensor>,
+    options: &SessionOptions,
+) -> Result<OptimizationReport> {
+    let mut report = OptimizationReport {
+        original_nodes: graph.node.len(),
+        ..Default::default()
+    };
+    if !options.optimize {
+        report.final_nodes = graph.node.len();
+        return Ok(report);
+    }
+
+    for _ in 0..options.max_optimization_passes {
+        let folded = constant_fold::fold_constants(graph, constants, options.max_folded_elements)?;
+        let aliases = eliminate::eliminate_alias_nodes(graph);
+        report.folded_nodes += folded;
+        report.removed_alias_nodes += aliases;
+        if folded == 0 && aliases == 0 {
+            break;
+        }
+    }
+
+    if eliminate::contains_subgraphs(graph) {
+        report.skipped_dce_for_subgraphs = true;
+    } else {
+        report.removed_dead_nodes = eliminate::eliminate_dead_nodes(graph);
+    }
+    report.removed_initializers = prune_unused_constants(graph, constants);
+    report.final_nodes = graph.node.len();
+    Ok(report)
+}
+
+fn prune_unused_constants(
+    graph: &mut GraphProto,
+    constants: &mut HashMap<String, Tensor>,
+) -> usize {
+    let mut used = graph
+        .node
+        .iter()
+        .flat_map(|node| node.input.iter())
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .collect::<HashSet<_>>();
+    used.extend(graph.output.iter().map(|output| output.name.clone()));
+    // Older ONNX files also list overridable initializers as graph inputs.
+    used.extend(graph.input.iter().map(|input| input.name.clone()));
+
+    let before = constants.len();
+    constants.retain(|name, _| used.contains(name));
+    graph
+        .initializer
+        .retain(|initializer| constants.contains_key(&initializer.name));
+    before - constants.len()
+}
