@@ -8,7 +8,7 @@ use candle_core::{Device, Tensor};
 
 #[derive(Debug)]
 pub struct SNAC24DecoderONNX {
-    model: candle_onnx::onnx::ModelProto,
+    model: crate::onnx::proto::ModelProto,
 }
 
 impl SNAC24DecoderONNX {
@@ -23,7 +23,7 @@ impl SNAC24DecoderONNX {
                 model_path
             ));
         }
-        let model = candle_onnx::read_file(model_path)?;
+        let model = crate::onnx::read_file(model_path)?;
         Ok(Self { model })
     }
 
@@ -39,7 +39,7 @@ impl SNAC24DecoderONNX {
             ("c3".to_string(), audio_code2.clone()),
         ]);
 
-        let out = candle_onnx::simple_eval(&self.model, inputs).unwrap();
+        let out = crate::onnx::simple_eval(&self.model, inputs).unwrap();
         let out_names = &self.model.graph.as_ref().unwrap().output;
 
         let output = out.get(&out_names[0].name).unwrap().clone();

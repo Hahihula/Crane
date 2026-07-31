@@ -67,8 +67,11 @@ path = "src/voxtral_tts_simple.rs"
 name = "hunyuan_simple"
 path = "src/hunyuan_simple.rs"
 
+[[bin]]
+name = "onnx_probe"
+path = "src/onnx_probe.rs"
+
 [features]
 default = []
-onnx = ["crane/onnx"]
+onnx = ["crane/onnx", "crane-core/onnx"]
 cuda = ["crane/cuda", "crane-core/cuda"]
-

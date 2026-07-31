@@ -11,7 +11,7 @@ use tokenizers::Tokenizer;
 use super::modeling::{Qwen3TTSConfig, Qwen3TTSModel, StreamingState};
 use super::speech_tokenizer_v2::NativeSpeechTokenizerDecoder;
 use crate::generation::SpeechOptions;
-use crate::models::modules::mel::{compute_mel_spectrogram, MelSpectrogramConfig};
+use crate::models::modules::mel::{MelSpectrogramConfig, compute_mel_spectrogram};
 use crate::utils::utils;
 
 // ── Speech Tokenizer decoders (codes → waveform) ───────────────────────
@@ -20,7 +20,7 @@ use crate::utils::utils;
 /// into raw audio waveform.
 #[cfg(feature = "onnx")]
 pub struct SpeechTokenizerDecoder {
-    model: candle_onnx::onnx::ModelProto,
+    model: crate::onnx::proto::ModelProto,
     pub sample_rate: u32,
 }
 
@@ -60,7 +60,7 @@ impl SpeechDecoderBackend {
                 let trim = context_frames * 1920usize;
                 let tw = wav.dim(candle_core::D::Minus1)?;
                 Ok(wav.narrow(candle_core::D::Minus1, trim, tw.saturating_sub(trim))?)
-            }
+            },
         }
     }
 }
@@ -77,7 +77,7 @@ impl SpeechTokenizerDecoder {
                 onnx_path,
             );
         }
-        let model = candle_onnx::read_file(onnx_path)?;
+        let model = crate::onnx::read_file(onnx_path)?;
         Ok(Self {
             model,
             sample_rate: sample_rate.unwrap_or(24000),
@@ -86,9 +86,8 @@ impl SpeechTokenizerDecoder {
 
     /// Decode `[batch, num_quantizers, seq_len]` codes → `[batch, 1, samples]`.
     pub fn decode(&self, codes: &Tensor) -> Result<Tensor> {
-        let inputs =
-            std::collections::HashMap::from_iter([("codes".to_string(), codes.clone())]);
-        let out = candle_onnx::simple_eval(&self.model, inputs)?;
+        let inputs = std::collections::HashMap::from_iter([("codes".to_string(), codes.clone())]);
+        let out = crate::onnx::simple_eval(&self.model, inputs)?;
         let out_names = &self.model.graph.as_ref().unwrap().output;
         let audio = out.get(&out_names[0].name).unwrap().clone();
         Ok(audio)
@@ -195,7 +194,7 @@ impl Model {
                         );
                         None
                     }
-                }
+                },
             }
         } else {
             eprintln!(
@@ -224,10 +223,7 @@ impl Model {
     ///
     /// Returns raw text tokens (no ChatML wrapping).
     /// The role prefix is added by the talker prefill construction.
-    pub fn prepare_tts_input(
-        &self,
-        text: &str,
-    ) -> Result<Vec<u32>> {
+    pub fn prepare_tts_input(&self, text: &str) -> Result<Vec<u32>> {
         let encoding = self.tokenizer.encode(text, false).map_err(E::msg)?;
         Ok(encoding.get_ids().to_vec())
     }
@@ -246,16 +242,17 @@ impl Model {
         self.validate_tts_generation_mode()?;
         let input_ids = self.prepare_tts_input(text)?;
 
-        let codes = self.inner.generate_speech_codes(&input_ids, language, speaker, opts)?;
+        let codes = self
+            .inner
+            .generate_speech_codes(&input_ids, language, speaker, opts)?;
 
         if codes.is_empty() {
             anyhow::bail!("No speech codes generated");
         }
 
-        let speech_decoder = self
-            .speech_decoder
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Speech tokenizer decoder not loaded; cannot decode to audio"))?;
+        let speech_decoder = self.speech_decoder.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Speech tokenizer decoder not loaded; cannot decode to audio")
+        })?;
 
         // Convert codes: Vec<Vec<u32>> of shape [timesteps, num_code_groups]
         // → Tensor [1, num_code_groups, timesteps]
@@ -298,7 +295,9 @@ impl Model {
     ) -> Result<SpeechStream<'_>> {
         self.validate_tts_generation_mode()?;
         let input_ids = self.prepare_tts_input(text)?;
-        let state = self.inner.prepare_streaming(&input_ids, language, speaker, opts)?;
+        let state = self
+            .inner
+            .prepare_streaming(&input_ids, language, speaker, opts)?;
         Ok(SpeechStream {
             model: self,
             state,
@@ -323,7 +322,9 @@ impl Model {
     ) -> Result<Vec<Vec<u32>>> {
         self.validate_tts_generation_mode()?;
         let input_ids = self.prepare_tts_input(text)?;
-        Ok(self.inner.generate_speech_codes(&input_ids, language, speaker, opts)?)
+        Ok(self
+            .inner
+            .generate_speech_codes(&input_ids, language, speaker, opts)?)
     }
 
     /// Convert pre-generated codes to raw audio bytes (PCM 16-bit LE).
@@ -348,7 +349,10 @@ impl Model {
         let audio = audio.to_dtype(DType::F32)?.flatten_all()?;
 
         // Scale to i16 PCM
-        let scaled = audio.affine(32767.0, 0.0)?.clamp(-32768.0, 32767.0)?.round()?;
+        let scaled = audio
+            .affine(32767.0, 0.0)?
+            .clamp(-32768.0, 32767.0)?
+            .round()?;
         let samples = scaled.to_dtype(DType::I64)?.to_vec1::<i64>()?;
 
         let mut pcm_bytes = Vec::with_capacity(samples.len() * 2);
@@ -392,7 +396,7 @@ impl Model {
     ) -> Result<(Tensor, u32)> {
         // 1. Validate model type
         match self.config.tts_model_type.as_deref().unwrap_or("base") {
-            "base" => {} // OK
+            "base" => {}, // OK
             other => anyhow::bail!(
                 "generate_voice_clone requires tts_model_type=base, got '{other}'. \
                  Use Qwen3-TTS-12Hz-0.6B-Base."
@@ -407,8 +411,9 @@ impl Model {
         //    Speaker encoder runs in F32 for precision (matching vendor).
         //    The embedding is later cast to model dtype in build_voice_clone_prefill.
         let spk_embed = {
-            let enc = self.inner.speaker_encoder.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Speaker encoder not loaded (base model required)"))?;
+            let enc = self.inner.speaker_encoder.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Speaker encoder not loaded (base model required)")
+            })?;
             // Speaker encoder mel constants: n_fft=1024, num_mels=128, sr=24000,
             // hop=256, win=1024, fmin=0, fmax=12000 — Hann window, reflect-padded,
             // log-compressed.
@@ -421,15 +426,24 @@ impl Model {
                 fmin: 0.0,
                 fmax: 12000.0,
             };
-            let mels = compute_mel_spectrogram(&SPEAKER_MEL_CONFIG, ref_samples_spk, &self.device, DType::F32)?
-                .unsqueeze(0)?; // [1, n_mels, T_frames] — matches speaker encoder input [B, n_mels, T]
+            let mels = compute_mel_spectrogram(
+                &SPEAKER_MEL_CONFIG,
+                ref_samples_spk,
+                &self.device,
+                DType::F32,
+            )?
+            .unsqueeze(0)?; // [1, n_mels, T_frames] — matches speaker encoder input [B, n_mels, T]
             let embed = enc.forward(&mels)?.squeeze(0)?; // [enc_dim], F32
             if Self::tts_debug_enabled() {
                 let norm: f32 = embed.sqr()?.sum_all()?.sqrt()?.to_scalar()?;
                 eprintln!(
                     "[CRANE_TTS_DEBUG] speaker_embed: dtype={:?}, shape={:?}, norm={:.4}, \
                      mel_shape={:?}, ref_samples={}",
-                    embed.dtype(), embed.dims(), norm, mels.dims(), ref_samples_spk.len(),
+                    embed.dtype(),
+                    embed.dims(),
+                    norm,
+                    mels.dims(),
+                    ref_samples_spk.len(),
                 );
             }
             embed
@@ -438,18 +452,21 @@ impl Model {
         // 4. Encode reference audio to codec codes using speech tokenizer encoder
         //    Load reference audio at codec SR (24kHz) — same SR, reuse ref_samples_spk
         let ref_codes = {
-            let speech_dec = self.speech_decoder.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Speech tokenizer not loaded; cannot encode reference audio"))?;
+            let speech_dec = self.speech_decoder.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Speech tokenizer not loaded; cannot encode reference audio")
+            })?;
             match speech_dec {
                 SpeechDecoderBackend::Native(native) => {
                     // Encode: samples [1, 1, N] → codes [1, T, n_q] → squeeze → [T, n_q]
                     let ref_tensor = Tensor::new(ref_samples_spk, &self.device)?
-                        .unsqueeze(0)?.unsqueeze(0)?; // [1, 1, N]
+                        .unsqueeze(0)?
+                        .unsqueeze(0)?; // [1, 1, N]
                     let codes = native.encode(&ref_tensor)?.squeeze(0)?; // [T, n_q]
                     if Self::tts_debug_enabled() {
                         eprintln!(
                             "[CRANE_TTS_DEBUG] ref_codes: shape={:?}, dtype={:?}",
-                            codes.dims(), codes.dtype(),
+                            codes.dims(),
+                            codes.dtype(),
                         );
                         if let Ok(v) = codes.to_dtype(DType::U32).and_then(|t| t.to_vec2::<u32>()) {
                             if !v.is_empty() {
@@ -469,11 +486,13 @@ impl Model {
                         }
                     }
                     codes
-                }
+                },
                 #[cfg(feature = "onnx")]
                 SpeechDecoderBackend::Onnx(_) => {
-                    anyhow::bail!("Voice-clone requires native speech tokenizer (ONNX encoder not supported)")
-                }
+                    anyhow::bail!(
+                        "Voice-clone requires native speech tokenizer (ONNX encoder not supported)"
+                    )
+                },
             }
         };
 
@@ -496,7 +515,9 @@ impl Model {
             anyhow::bail!("No speech codes generated");
         }
 
-        let speech_decoder = self.speech_decoder.as_ref()
+        let speech_decoder = self
+            .speech_decoder
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Speech tokenizer decoder not loaded"))?;
 
         // 7. Prepend ref_codes to generated codes, decode, then trim ref portion.
@@ -509,14 +530,20 @@ impl Model {
         if Self::tts_debug_enabled() {
             eprintln!(
                 "[CRANE_TTS_DEBUG] voice_clone decode: generated={}, prepend_ref={}",
-                new_codes.len(), ref_t,
+                new_codes.len(),
+                ref_t,
             );
         }
 
         // Build combined codes: [ref_codes; new_codes] → [total_T, num_groups]
-        let ref_flat: Vec<i64> = ref_codes.to_dtype(DType::I64)?.to_vec2::<i64>()?
-            .into_iter().flatten().collect();
-        let new_flat: Vec<i64> = new_codes.iter()
+        let ref_flat: Vec<i64> = ref_codes
+            .to_dtype(DType::I64)?
+            .to_vec2::<i64>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let new_flat: Vec<i64> = new_codes
+            .iter()
             .flat_map(|frame| frame.iter().map(|&c| self.normalize_codec_id(c) as i64))
             .collect();
         let total_t = ref_t + new_codes.len();
@@ -550,7 +577,8 @@ impl Model {
         let ref_samples = ref_audio.dim(2)?;
         let mut cut = ref_samples.min(total_samples.saturating_sub(1));
         if cut == 0 {
-            let proportional = (ref_t as f64 / total_t.max(1) as f64 * total_samples as f64) as usize;
+            let proportional =
+                (ref_t as f64 / total_t.max(1) as f64 * total_samples as f64) as usize;
             cut = proportional.min(total_samples.saturating_sub(1));
         }
         let audio = audio_full.narrow(2, cut, total_samples - cut)?;
@@ -598,12 +626,16 @@ impl SpeechStream<'_> {
         if self.state.step >= self.max_new_tokens {
             return Ok(true);
         }
-        match self.model.inner.generate_one_frame(&mut self.state, &self.all_codes)? {
+        match self
+            .model
+            .inner
+            .generate_one_frame(&mut self.state, &self.all_codes)?
+        {
             None => Ok(true),
             Some(frame) => {
                 self.all_codes.push(frame);
                 Ok(false)
-            }
+            },
         }
     }
 
@@ -638,12 +670,21 @@ impl SpeechStream<'_> {
         let num_groups = self.all_codes[0].len();
 
         // Normalize and flatten codes into [1, num_groups, n_chunk_frames] i64 tensor.
-        let codebook_size = self.model.config.talker_config.code_predictor_config.vocab_size as u32;
+        let codebook_size = self
+            .model
+            .config
+            .talker_config
+            .code_predictor_config
+            .vocab_size as u32;
         let flat: Vec<i64> = self.all_codes[chunk_start..chunk_end]
             .iter()
             .flat_map(|frame| {
                 frame.iter().map(move |&c| {
-                    let normalized = if codebook_size == 0 { c } else { c.min(codebook_size - 1) };
+                    let normalized = if codebook_size == 0 {
+                        c
+                    } else {
+                        c.min(codebook_size - 1)
+                    };
                     normalized as i64
                 })
             })
@@ -653,9 +694,14 @@ impl SpeechStream<'_> {
             .transpose(0, 1)?
             .unsqueeze(0)?;
 
-        let speech_decoder = self.model.speech_decoder.as_ref()
+        let speech_decoder = self
+            .model
+            .speech_decoder
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("speech decoder not loaded"))?;
-        let audio = speech_decoder.decode_chunk(&codes_tensor, ctx)?.flatten_all()?;
+        let audio = speech_decoder
+            .decode_chunk(&codes_tensor, ctx)?
+            .flatten_all()?;
 
         self.emitted_up_to = chunk_end;
 
@@ -682,8 +728,7 @@ impl Iterator for SpeechStream<'_> {
             Err(e) => {
                 self.done = true;
                 Some(Err(e))
-            }
+            },
         }
     }
 }
-

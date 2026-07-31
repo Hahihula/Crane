@@ -10,10 +10,10 @@ use std::{
     mem::take,
 };
 
+use crate::onnx::{self, proto::ModelProto};
 /// Result type used by Candle core.
 pub use candle_core::Result;
 use candle_core::{DType, Device, Error, Tensor, bail, utils};
-use candle_onnx::onnx::ModelProto;
 use ribo::utils::log;
 
 use crate::utils::select_device;
@@ -312,9 +312,9 @@ impl Vad {
             let model_file = hf_hub::api::sync::Api::new()
                 .and_then(|api| api.model(DEFAULT_MODEL_NAME.into()).get(DEFAULT_MODEL_FILE))
                 .map_err(Error::wrap)?;
-            candle_onnx::read_file(model_file)?
+            onnx::read_file(model_file)?
         } else {
-            candle_onnx::read_file(model_file)?
+            onnx::read_file(model_file)?
         };
         self.model = Some(model);
         log::info!(
@@ -554,7 +554,7 @@ impl Vad {
         let chunk = Tensor::from_vec(chunk, (1, self.chunk_size), &self.device)?;
         let chunk = Tensor::cat(&[&self.state[2], &chunk], 1)?;
         let model = self.model()?;
-        let out = candle_onnx::simple_eval(model, self.inputs(chunk))?;
+        let out = onnx::simple_eval(model, self.inputs(chunk))?;
         let out_names = &model
             .graph
             .as_ref()

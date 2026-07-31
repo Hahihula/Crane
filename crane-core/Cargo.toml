@@ -17,7 +17,6 @@ anyhow = "1.0.97"
 
 candle-nn = { workspace = true }
 candle-transformers = { workspace = true }
-candle-onnx = { workspace = true, optional = true }
 clap = { version = "4.5.32", features = ["derive"] }
 hf-hub = "0.5.0"
 minijinja = { version = "2.21", features = ["builtins", "preserve_order"] }
@@ -38,6 +37,7 @@ intel-mkl-src = { version = "0.8.1", optional = true }
 rustfft = "6"
 image = "0.25"
 half = "2"
+prost = { version = "0.14.3", optional = true }
 
 # candle-core = { workspace = true, features = ["accelerate"] }
 
@@ -66,9 +66,10 @@ mkl = [
     "candle-transformers/mkl",
 ]
 accelerate = ["candle-core/accelerate"]
-onnx = ["dep:candle-onnx"]
+onnx = ["dep:prost", "dep:prost-build"]
 [dev-dependencies]
 tempfile = "3"
 
 [build-dependencies]
 bindgen_cuda = { version = "0.1.6", optional = true }
+prost-build = { version = "0.14.3", optional = true }
