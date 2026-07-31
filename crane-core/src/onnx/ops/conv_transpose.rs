@@ -18,7 +18,10 @@ pub(crate) fn conv_transpose(
     validate_common_attributes(node)?;
     let group = int_attribute(node, "group", 1)?;
     if group <= 0 {
-        bail!("ConvTranspose node '{}' has invalid group {group}", node.name);
+        bail!(
+            "ConvTranspose node '{}' has invalid group {group}",
+            node.name
+        );
     }
 
     let output = match weight.rank() {
@@ -88,7 +91,11 @@ fn validate_common_attributes(node: &NodeProto) -> Result<()> {
             node.name
         );
     }
-    if node.attribute.iter().any(|attribute| attribute.name == "output_shape") {
+    if node
+        .attribute
+        .iter()
+        .any(|attribute| attribute.name == "output_shape")
+    {
         bail!(
             "ConvTranspose node '{}' uses output_shape, which is not supported; export with pads and output_padding instead",
             node.name
@@ -97,8 +104,17 @@ fn validate_common_attributes(node: &NodeProto) -> Result<()> {
     Ok(())
 }
 
-fn symmetric_value(node: &NodeProto, name: &str, default: usize, spatial_dims: usize) -> Result<usize> {
-    let Some(attribute) = node.attribute.iter().find(|attribute| attribute.name == name) else {
+fn symmetric_value(
+    node: &NodeProto,
+    name: &str,
+    default: usize,
+    spatial_dims: usize,
+) -> Result<usize> {
+    let Some(attribute) = node
+        .attribute
+        .iter()
+        .find(|attribute| attribute.name == name)
+    else {
         return Ok(default);
     };
     if attribute.r#type() != proto::attribute_proto::AttributeType::Ints {
@@ -109,7 +125,11 @@ fn symmetric_value(node: &NodeProto, name: &str, default: usize, spatial_dims: u
             attribute.r#type()
         );
     }
-    let expected_len = if name == "pads" { spatial_dims * 2 } else { spatial_dims };
+    let expected_len = if name == "pads" {
+        spatial_dims * 2
+    } else {
+        spatial_dims
+    };
     if attribute.ints.len() != expected_len || attribute.ints.iter().any(|&value| value < 0) {
         bail!(
             "ConvTranspose node '{}' has invalid '{}'={:?}; expected {expected_len} non-negative value(s)",
@@ -119,7 +139,11 @@ fn symmetric_value(node: &NodeProto, name: &str, default: usize, spatial_dims: u
         );
     }
     let value = attribute.ints[0] as usize;
-    if attribute.ints.iter().any(|&candidate| candidate as usize != value) {
+    if attribute
+        .ints
+        .iter()
+        .any(|&candidate| candidate as usize != value)
+    {
         bail!(
             "ConvTranspose node '{}' has asymmetric '{}'={:?}; the current Candle kernel requires identical values on every spatial axis",
             node.name,
@@ -131,7 +155,11 @@ fn symmetric_value(node: &NodeProto, name: &str, default: usize, spatial_dims: u
 }
 
 fn int_attribute(node: &NodeProto, name: &str, default: i64) -> Result<i64> {
-    let Some(attribute) = node.attribute.iter().find(|attribute| attribute.name == name) else {
+    let Some(attribute) = node
+        .attribute
+        .iter()
+        .find(|attribute| attribute.name == name)
+    else {
         return Ok(default);
     };
     if attribute.r#type() != proto::attribute_proto::AttributeType::Int {
@@ -146,7 +174,11 @@ fn int_attribute(node: &NodeProto, name: &str, default: i64) -> Result<i64> {
 }
 
 fn string_attribute<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a str>> {
-    let Some(attribute) = node.attribute.iter().find(|attribute| attribute.name == name) else {
+    let Some(attribute) = node
+        .attribute
+        .iter()
+        .find(|attribute| attribute.name == name)
+    else {
         return Ok(None);
     };
     if attribute.r#type() != proto::attribute_proto::AttributeType::String {
@@ -157,5 +189,7 @@ fn string_attribute<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a st
             attribute.r#type()
         );
     }
-    std::str::from_utf8(&attribute.s).map(Some).map_err(candle_core::Error::wrap)
+    std::str::from_utf8(&attribute.s)
+        .map(Some)
+        .map_err(candle_core::Error::wrap)
 }

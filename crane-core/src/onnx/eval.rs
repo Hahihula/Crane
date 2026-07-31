@@ -1,7 +1,7 @@
+use super::ops;
 use super::proto::attribute_proto::AttributeType;
 use super::proto::tensor_proto::DataType;
 use super::proto::{self as onnx, GraphProto};
-use super::ops;
 use candle::{DType, Device, IndexOp, Result, Tensor, bail};
 use candle_core as candle;
 use candle_core::Module;
@@ -226,7 +226,8 @@ fn same_upper_conv_pads(
         let input_size = input.dims()[axis + 2] as i64;
         let kernel_size = weight.dims()[axis + 2] as i64;
         let output_size = (input_size + stride - 1) / stride;
-        let total = ((output_size - 1) * stride + (kernel_size - 1) * dilation + 1 - input_size).max(0);
+        let total =
+            ((output_size - 1) * stride + (kernel_size - 1) * dilation + 1 - input_size).max(0);
         begin.push(total / 2);
         end.push(total - total / 2);
     }
@@ -455,23 +456,8 @@ fn simple_eval_(
             "Reshape" => {
                 let input0 = get(&node.input[0])?;
                 let input1 = get(&node.input[1])?.to_vec1::<i64>()?;
-                // TODO: Check that there is at most a single -1 or 0, handle other neg values.
-                let mut other_than_minus1 = 1usize;
-                for &v in input1.iter() {
-                    if v != -1 && v != 0 {
-                        other_than_minus1 *= v as usize
-                    }
-                }
-                let input1 = input1
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, &v)| match v {
-                        -1 => Ok(input0.elem_count() / other_than_minus1),
-                        0 => input0.dim(idx),
-                        _ => Ok(v as usize),
-                    })
-                    .collect::<Result<Vec<usize>>>()?;
-                let output = input0.reshape(input1)?;
+                // Crane Added 20260731: correctly infer dynamic batched shapes.
+                let output = ops::reshape::reshape(input0, &input1)?;
                 values.insert(node.output[0].clone(), output);
             },
             "LogSoftmax" => {
@@ -502,7 +488,17 @@ fn simple_eval_(
                     None => input.t()?,
                     Some(perm) => {
                         let perm = perm.iter().map(|&v| v as usize).collect::<Vec<_>>();
-                        input.permute(perm)?.contiguous()?
+                        input
+                            .permute(perm.clone())
+                            .and_then(|output| output.contiguous())
+                            .map_err(|error| {
+                                candle::Error::Msg(format!(
+                                    "Transpose node '{}' failed for shape {:?} and perm {:?}: {error}",
+                                    node.name,
+                                    input.dims(),
+                                    perm
+                                ))
+                            })?
                     },
                 };
                 values.insert(node.output[0].clone(), output);
@@ -626,26 +622,10 @@ fn simple_eval_(
             },
             "Squeeze" => {
                 let xs = get(&node.input[0])?;
-                let mut axes = if node.input.len() <= 1 {
-                    // contract all the dimensions with size 1 except the batch dim.
-                    xs.dims()
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(idx, &s)| if s == 1 && idx > 0 { Some(idx) } else { None })
-                        .collect()
-                } else {
-                    get(&node.input[1])?
-                        .to_vec1::<i64>()?
-                        .iter()
-                        .map(|&i| xs.normalize_axis(i))
-                        .collect::<Result<Vec<_>>>()?
-                };
-                axes.sort();
-                let mut xs = xs.clone();
-                for &axis in axes.iter().rev() {
-                    xs = xs.squeeze(axis)?
-                }
-                values.insert(node.output[0].clone(), xs);
+                let axes = get_opt(1).transpose()?;
+                // Crane Added 20260731: support axes attributes used by PaddleOCR.
+                let output = ops::squeeze::squeeze(node, xs, axes)?;
+                values.insert(node.output[0].clone(), output);
             },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#ConstantOfShape
             "ConstantOfShape" => {
@@ -2700,13 +2680,18 @@ fn same_upper_pool2d_pads(
     let stride_h = strides.and_then(|v| v.first()).copied().unwrap_or(1);
     let stride_w = strides.and_then(|v| v.get(1)).copied().unwrap_or(stride_h);
     let dilation_h = dilations.and_then(|v| v.first()).copied().unwrap_or(1);
-    let dilation_w = dilations.and_then(|v| v.get(1)).copied().unwrap_or(dilation_h);
+    let dilation_w = dilations
+        .and_then(|v| v.get(1))
+        .copied()
+        .unwrap_or(dilation_h);
     if stride_h <= 0 || stride_w <= 0 || dilation_h <= 0 || dilation_w <= 0 {
         bail!("MaxPool SAME_UPPER requires positive strides and dilations")
     }
     let one_axis = |input_size: usize, kernel: usize, stride: i64, dilation: i64| {
         let output_size = (input_size as i64 + stride - 1) / stride;
-        let total = ((output_size - 1) * stride + (kernel as i64 - 1) * dilation + 1 - input_size as i64).max(0) as usize;
+        let total = ((output_size - 1) * stride + (kernel as i64 - 1) * dilation + 1
+            - input_size as i64)
+            .max(0) as usize;
         (total / 2, total - total / 2)
     };
     let (h0, h1) = one_axis(input.dim(2)?, kernel_h, stride_h, dilation_h);

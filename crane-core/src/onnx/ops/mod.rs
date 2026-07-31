@@ -3,3 +3,5 @@
 pub(crate) mod activation;
 pub(crate) mod conv_transpose;
 pub(crate) mod pooling;
+pub(crate) mod reshape;
+pub(crate) mod squeeze;

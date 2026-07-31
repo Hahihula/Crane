@@ -21,12 +21,16 @@ pub mod proto {
 #[path = "onnx/eval.rs"]
 pub mod eval;
 
+#[path = "onnx/session.rs"]
+mod session;
+
 /// Crane-specific ONNX operators. Keep evaluator dispatch in `eval.rs` so
 /// upstream evaluator updates remain straightforward to merge.
 #[path = "onnx/ops/mod.rs"]
 pub(crate) mod ops;
 
 pub use eval::{dtype, simple_eval};
+pub use session::Session;
 
 /// Decodes an ONNX protobuf model from disk.
 pub fn read_file<P: AsRef<Path>>(path: P) -> CandleResult<proto::ModelProto> {
