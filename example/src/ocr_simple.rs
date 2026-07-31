@@ -11,11 +11,16 @@ fn main() -> CraneResult<()> {
         .unwrap_or("data/images/test_chart.png");
 
     let config = CommonConfig {
-        // model_path: "checkpoints/PaddleOCR-VL".to_string(),
-        model_path: "checkpoints/PaddleOCR-VL-1.5".to_string(),
-        model_type: LlmModelType::PaddleOcrVl,
-        // device: DeviceConfig::Cpu,
-        device: DeviceConfig::Cuda(0),
+        model_path: args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| "checkpoints/PaddleOCRv6".to_string()),
+        model_type: if args.get(3).map(String::as_str) == Some("vl") {
+            LlmModelType::PaddleOcrVl
+        } else {
+            LlmModelType::PaddleOcrV6
+        },
+        device: DeviceConfig::Cpu,
         // dtype: DataType::BF16,
         dtype: DataType::F32,
         max_memory: None,
@@ -25,12 +30,15 @@ fn main() -> CraneResult<()> {
 
     println!("Performing OCR on image: {}", image_path);
 
-    // let response = ocr_client.extract_text_from_image(image_path)?;
-    // println!("OCR result: {}", response);
-
-    // streaming way
-    let _ = ocr_client.extract_text_from_image_stream(image_path)?;
-    println!("");
+    let result = ocr_client.extract_text_with_locations(image_path)?;
+    println!("Detected {} text region(s)", result.regions.len());
+    for region in &result.regions {
+        println!(
+            "  [{}, {}, {}, {}] {:.3}: {}",
+            region.left, region.top, region.right, region.bottom, region.confidence, region.text
+        );
+    }
+    println!("OCR result:\n{}", result.text);
 
     Ok(())
 }

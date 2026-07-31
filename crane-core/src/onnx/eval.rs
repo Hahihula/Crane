@@ -191,6 +191,49 @@ fn get_attr_opt_owned<T: AttrOwned>(node: &onnx::NodeProto, name: &str) -> Resul
     }
 }
 
+// Crane Added 20260731: ONNX SAME_UPPER padding for Conv exports such as PaddleOCR.
+fn same_upper_conv_pads(
+    input: &Tensor,
+    weight: &Tensor,
+    strides: Option<&[i64]>,
+    dilations: Option<&[i64]>,
+) -> Result<Vec<i64>> {
+    let spatial_dims = weight.rank().checked_sub(2).ok_or_else(|| {
+        candle::Error::Msg("Conv weight must have at least two dimensions".to_string())
+    })?;
+    if input.rank() != spatial_dims + 2 {
+        bail!(
+            "Conv input rank {} does not match weight rank {}",
+            input.rank(),
+            weight.rank()
+        );
+    }
+    let default_strides = vec![1; spatial_dims];
+    let default_dilations = vec![1; spatial_dims];
+    let strides = strides.unwrap_or(&default_strides);
+    let dilations = dilations.unwrap_or(&default_dilations);
+    if strides.len() != spatial_dims || dilations.len() != spatial_dims {
+        bail!("Conv SAME_UPPER has invalid strides or dilations")
+    }
+    let mut begin = Vec::with_capacity(spatial_dims);
+    let mut end = Vec::with_capacity(spatial_dims);
+    for axis in 0..spatial_dims {
+        let stride = strides[axis];
+        let dilation = dilations[axis];
+        if stride <= 0 || dilation <= 0 {
+            bail!("Conv SAME_UPPER requires positive strides and dilations")
+        }
+        let input_size = input.dims()[axis + 2] as i64;
+        let kernel_size = weight.dims()[axis + 2] as i64;
+        let output_size = (input_size + stride - 1) / stride;
+        let total = ((output_size - 1) * stride + (kernel_size - 1) * dilation + 1 - input_size).max(0);
+        begin.push(total / 2);
+        end.push(total - total / 2);
+    }
+    begin.extend(end);
+    Ok(begin)
+}
+
 pub fn get_tensor(t: &onnx::TensorProto, name: &str) -> Result<Tensor> {
     let dims: Vec<usize> = t.dims.iter().map(|&x| x as usize).collect();
     match DataType::try_from(t.data_type) {
@@ -321,6 +364,20 @@ fn simple_eval_(
             )
         }
     }
+    // Crane Added 20260731: release intermediates after their last consumer.
+    // Upstream simple_eval retained the full graph, which can OOM on image models.
+    let graph_outputs = graph
+        .output
+        .iter()
+        .map(|output| output.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut remaining_uses = HashMap::<&str, usize>::new();
+    for node in &graph.node {
+        for input in node.input.iter().filter(|input| !input.is_empty()) {
+            *remaining_uses.entry(input.as_str()).or_default() += 1;
+        }
+    }
+
     // The nodes are topologically sorted so we can just process them in order.
     for node in graph.node.iter() {
         let get = |input_name: &str| match values.get(input_name) {
@@ -463,8 +520,8 @@ fn simple_eval_(
                 let strides = get_attr_opt::<[i64]>(node, "strides")?;
                 let auto_pad = get_attr_opt::<str>(node, "auto_pad")?;
                 match auto_pad {
-                    None | Some("NOTSET") => (),
-                    Some(s) => bail!("unsupported auto_pad {s}"),
+                    None | Some("NOTSET") | Some("SAME_UPPER") => (),
+                    Some(s) => bail!("unsupported MaxPool auto_pad {s} for {}", node.name),
                 };
                 if let Some(d) = dilations {
                     if d.iter().any(|&v| v != 1) {
@@ -480,6 +537,14 @@ fn simple_eval_(
                 let (k1, k2) = match kernel_shape {
                     [k1, k2] => (*k1 as usize, *k2 as usize),
                     _ => bail!("only 2d MaxPool is supported, kernel shape {kernel_shape:?}"),
+                };
+                let xs = if auto_pad == Some("SAME_UPPER") {
+                    let (pad_h_before, pad_h_after, pad_w_before, pad_w_after) =
+                        same_upper_pool2d_pads(xs, k1, k2, strides, dilations)?;
+                    xs.pad_with_zeros(2, pad_h_before, pad_h_after)?
+                        .pad_with_zeros(3, pad_w_before, pad_w_after)?
+                } else {
+                    xs.clone()
                 };
                 let ys = match strides {
                     None => xs.max_pool2d((k1, k2))?,
@@ -499,7 +564,7 @@ fn simple_eval_(
                 let auto_pad = get_attr_opt::<str>(node, "auto_pad")?;
                 match auto_pad {
                     None | Some("NOTSET") => (),
-                    Some(s) => bail!("unsupported auto_pad {s}"),
+                    Some(s) => bail!("unsupported AveragePool auto_pad {s} for {}", node.name),
                 };
                 if let Some(d) = dilations {
                     if d.iter().any(|&v| v != 1) {
@@ -871,15 +936,17 @@ fn simple_eval_(
                 let pads = get_attr_opt::<[i64]>(node, "pads")?;
                 let strides = get_attr_opt::<[i64]>(node, "strides")?;
                 let auto_pad = get_attr_opt::<str>(node, "auto_pad")?;
-                match auto_pad {
-                    None | Some("NOTSET") => (),
-                    Some(s) => bail!("unsupported auto_pad {s}"),
-                };
                 let xs = get(&node.input[0])?;
                 let ws = get(&node.input[1])?;
+                // Crane Added 20260731: PaddleOCR exports Conv with SAME_UPPER.
+                let pads = match auto_pad {
+                    None | Some("NOTSET") => pads.map(|pads| pads.to_vec()),
+                    Some("SAME_UPPER") => Some(same_upper_conv_pads(xs, ws, strides, dilations)?),
+                    Some(s) => bail!("unsupported Conv auto_pad {s} for {}", node.name),
+                };
                 let ys = match ws.rank() {
                     3 => {
-                        let (pads, xs) = match pads {
+                        let (pads, xs) = match pads.as_deref() {
                             None => (0, xs.clone()),
                             Some([p]) => (*p as usize, xs.clone()),
                             Some([p1, p2]) => {
@@ -910,7 +977,7 @@ fn simple_eval_(
                         xs.conv1d(ws, pads, strides, dilations, groups as usize)?
                     },
                     4 => {
-                        let (pads, xs) = match pads {
+                        let (pads, xs) = match pads.as_deref() {
                             None => (0, xs.clone()),
                             Some([p]) => (*p as usize, xs.clone()),
                             Some(&[p1, p2, p3, p4]) => {
@@ -928,17 +995,14 @@ fn simple_eval_(
                                 bail!("more pads than expected in conv2d {pads:?} {}", node.name)
                             },
                         };
-                        let strides = match strides {
-                            None => 1,
-                            Some([p]) => *p as usize,
-                            Some([p1, p2]) => {
-                                if p1 != p2 {
-                                    bail!(
-                                        "strides have to be the same on both axis {pads:?} {}",
-                                        node.name
-                                    )
-                                }
-                                *p1 as usize
+                        // Crane Added 20260731: Candle's kernel has one stride value.
+                        // For ONNX anisotropic stride, run stride=1 then select output rows/cols.
+                        let (stride, output_stride) = match strides {
+                            None => (1, None),
+                            Some([p]) => (*p as usize, None),
+                            Some([p1, p2]) if p1 == p2 => (*p1 as usize, None),
+                            Some([p1, p2]) if *p1 > 0 && *p2 > 0 => {
+                                (1, Some((*p1 as usize, *p2 as usize)))
                             },
                             Some(s) => {
                                 bail!("more strides than expected in conv2d {s:?} {}", node.name)
@@ -960,7 +1024,25 @@ fn simple_eval_(
                                 bail!("more dilations than expected in conv2d {s:?} {}", node.name)
                             },
                         };
-                        xs.conv2d(ws, pads, strides, dilations, groups as usize)?
+                        let ys = xs.conv2d(ws, pads, stride, dilations, groups as usize)?;
+                        match output_stride {
+                            None => ys,
+                            Some((stride_h, stride_w)) => {
+                                let rows = Tensor::arange_step(
+                                    0u32,
+                                    ys.dim(2)? as u32,
+                                    stride_h as u32,
+                                    ys.device(),
+                                )?;
+                                let cols = Tensor::arange_step(
+                                    0u32,
+                                    ys.dim(3)? as u32,
+                                    stride_w as u32,
+                                    ys.device(),
+                                )?;
+                                ys.index_select(&rows, 2)?.index_select(&cols, 3)?
+                            },
+                        }
                     },
                     rank => bail!(
                         "unsupported rank for weight matrix {rank} in conv {}",
@@ -2587,6 +2669,15 @@ fn simple_eval_(
             },
             op_type => bail!("unsupported op_type {op_type} for op {node:?}"),
         }
+
+        for input in node.input.iter().filter(|input| !input.is_empty()) {
+            if let Some(count) = remaining_uses.get_mut(input.as_str()) {
+                *count -= 1;
+                if *count == 0 && !graph_outputs.contains(input.as_str()) {
+                    values.remove(input);
+                }
+            }
+        }
     }
     graph
         .output
@@ -2596,6 +2687,31 @@ fn simple_eval_(
             Some(value) => Ok((output.name.clone(), value)),
         })
         .collect()
+}
+
+// Crane Added 20260731: ONNX SAME_UPPER padding for PaddleOCR MaxPool.
+fn same_upper_pool2d_pads(
+    input: &Tensor,
+    kernel_h: usize,
+    kernel_w: usize,
+    strides: Option<&[i64]>,
+    dilations: Option<&[i64]>,
+) -> Result<(usize, usize, usize, usize)> {
+    let stride_h = strides.and_then(|v| v.first()).copied().unwrap_or(1);
+    let stride_w = strides.and_then(|v| v.get(1)).copied().unwrap_or(stride_h);
+    let dilation_h = dilations.and_then(|v| v.first()).copied().unwrap_or(1);
+    let dilation_w = dilations.and_then(|v| v.get(1)).copied().unwrap_or(dilation_h);
+    if stride_h <= 0 || stride_w <= 0 || dilation_h <= 0 || dilation_w <= 0 {
+        bail!("MaxPool SAME_UPPER requires positive strides and dilations")
+    }
+    let one_axis = |input_size: usize, kernel: usize, stride: i64, dilation: i64| {
+        let output_size = (input_size as i64 + stride - 1) / stride;
+        let total = ((output_size - 1) * stride + (kernel as i64 - 1) * dilation + 1 - input_size as i64).max(0) as usize;
+        (total / 2, total - total / 2)
+    };
+    let (h0, h1) = one_axis(input.dim(2)?, kernel_h, stride_h, dilation_h);
+    let (w0, w1) = one_axis(input.dim(3)?, kernel_w, stride_w, dilation_w);
+    Ok((h0, h1, w0, w1))
 }
 
 fn broadcast_shape(shape_a: &[usize], shape_b: &[usize]) -> Result<Vec<usize>> {

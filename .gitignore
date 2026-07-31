@@ -13,3 +13,4 @@ outputs/
 .vscode/
 /vendor
 __pycache__/
+output/

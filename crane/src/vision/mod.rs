@@ -4,4 +4,4 @@ mod image_analysis;
 mod ocr;
 
 pub use image_analysis::VisionClient;
-pub use ocr::OcrClient;
+pub use ocr::{OcrClient, OcrDocument, OcrRegion};
