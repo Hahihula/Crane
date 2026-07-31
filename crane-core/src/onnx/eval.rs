@@ -1111,6 +1111,18 @@ fn simple_eval_(
                 let output = ops::atan::atan(input)?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260731: fused atan2(y, x) — produced by the
+            // optimizer's atan2-decomposition fusion pass, not present in
+            // the original ONNX model.
+            "Atan2" => {
+                let y = get(&node.input[0])?;
+                let x = get(&node.input[1])?;
+                let shape = broadcast_shape(y.dims(), x.dims())?;
+                let y = y.broadcast_as(shape.clone())?;
+                let x = x.broadcast_as(shape)?;
+                let output = ops::atan::atan2(&y, &x)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Cos" => {
                 let input = get(&node.input[0])?;
                 let output = input.cos()?;

@@ -2,6 +2,7 @@
 
 mod constant_fold;
 mod eliminate;
+pub(crate) mod fuse_atan2;
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,6 +38,8 @@ pub struct OptimizationReport {
     pub removed_alias_nodes: usize,
     pub removed_dead_nodes: usize,
     pub removed_initializers: usize,
+    /// Number of decomposed `atan2(y, x)` patterns fused into single nodes.
+    pub fused_atan2_nodes: usize,
     /// DCE is skipped when graph-valued attributes may capture outer values.
     pub skipped_dce_for_subgraphs: bool,
 }
@@ -54,6 +57,9 @@ pub(crate) fn optimize(
         report.final_nodes = graph.node.len();
         return Ok(report);
     }
+
+    report.removed_alias_nodes += eliminate::eliminate_alias_nodes(graph);
+    report.fused_atan2_nodes = fuse_atan2::fuse_atan2_decomposition(graph);
 
     for _ in 0..options.max_optimization_passes {
         let folded = constant_fold::fold_constants(graph, constants, options.max_folded_elements)?;
