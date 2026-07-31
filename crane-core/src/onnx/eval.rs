@@ -1176,6 +1176,12 @@ fn simple_eval_(
                 let output = input.floor()?;
                 values.insert(node.output[0].clone(), output);
             },
+            // https://onnx.ai/onnx/operators/onnx__Round.html
+            "Round" => {
+                let input = get(&node.input[0])?;
+                let output = input.round()?;
+                values.insert(node.output[0].clone(), output);
+            },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#Constant
             "Constant" => {
                 let value = match node.attribute.iter().find(|attr| attr.name == "value") {
@@ -2764,5 +2770,50 @@ fn to_vec0_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
         t.flatten_all()?.i(0)?.to_vec0::<T>()
     } else {
         t.to_vec0::<T>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, Result};
+
+    use super::{Value, simple_eval};
+    use crate::onnx::proto::{GraphProto, ModelProto, NodeProto, ValueInfoProto};
+
+    #[test]
+    fn round_rounds_half_away_from_zero() -> Result<()> {
+        // ONNX Round: nearest integer per element; candle's round() (and
+        // this evaluator) breaks exact .5 ties away from zero rather than
+        // to even, matching the tie-breaking already used elsewhere in
+        // Crane's ONNX graph rewrites.
+        let model = ModelProto {
+            graph: Some(GraphProto {
+                input: vec![ValueInfoProto {
+                    name: "x".to_string(),
+                    ..Default::default()
+                }],
+                node: vec![NodeProto {
+                    op_type: "Round".to_string(),
+                    input: vec!["x".to_string()],
+                    output: vec!["y".to_string()],
+                    ..Default::default()
+                }],
+                output: vec![ValueInfoProto {
+                    name: "y".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let x = Value::new(&[0.5f32, 2.5, -0.5, -2.5, 1.4, 1.6], &Device::Cpu)?;
+        let outputs = simple_eval(&model, [("x".to_string(), x)].into())?;
+
+        assert_eq!(
+            outputs["y"].to_vec1::<f32>()?,
+            vec![1.0, 3.0, -1.0, -3.0, 1.0, 2.0]
+        );
+        Ok(())
     }
 }
