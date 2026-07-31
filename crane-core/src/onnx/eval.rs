@@ -1105,6 +1105,12 @@ fn simple_eval_(
                 let output = input.abs()?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260731: implementation lives in ops/atan.rs.
+            "Atan" => {
+                let input = get(&node.input[0])?;
+                let output = ops::atan::atan(input)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Cos" => {
                 let input = get(&node.input[0])?;
                 let output = input.cos()?;

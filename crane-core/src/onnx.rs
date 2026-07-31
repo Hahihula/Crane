@@ -256,6 +256,7 @@ const CANDLE_SIMPLE_EVAL_OPS: &[&str] = &[
     "And",
     "ArgMax",
     "ArgMin",
+    "Atan",
     "AveragePool",
     "BatchNormalization",
     "Cast",
