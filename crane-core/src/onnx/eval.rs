@@ -620,6 +620,14 @@ fn simple_eval_(
                 let xs = xs.broadcast_mul(&weight)?.broadcast_add(&bias)?;
                 values.insert(node.output[0].clone(), xs);
             },
+            // Crane Added 20260731: implementation lives in ops/layer_norm.rs.
+            "LayerNormalization" => {
+                let x = get(&node.input[0])?;
+                let scale = get(&node.input[1])?;
+                let bias = get_opt(2).transpose()?;
+                let output = ops::layer_norm::layer_norm(node, x, scale, bias)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Squeeze" => {
                 let xs = get(&node.input[0])?;
                 let axes = get_opt(1).transpose()?;
