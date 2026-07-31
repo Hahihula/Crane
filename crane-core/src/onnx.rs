@@ -317,6 +317,7 @@ const CANDLE_SIMPLE_EVAL_OPS: &[&str] = &[
     "Relu",
     "Reshape",
     "Resize",
+    "STFT",
     "ScatterND",
     "Selu",
     "Shape",

@@ -826,6 +826,15 @@ fn simple_eval_(
                 let output = xs.sqrt()?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260731: implementation lives in ops/stft.rs.
+            "STFT" => {
+                let signal = get(&node.input[0])?;
+                let frame_step = get(&node.input[1])?;
+                let window = get_opt(2).transpose()?;
+                let frame_length = get_opt(3).transpose()?;
+                let output = ops::stft::stft(node, signal, frame_step, window, frame_length)?;
+                values.insert(node.output[0].clone(), output);
+            },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#Range
             "Range" => {
                 let start = get(&node.input[0])?;
