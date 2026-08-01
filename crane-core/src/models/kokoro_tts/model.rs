@@ -369,6 +369,12 @@ impl Model {
         // via f32::atan2 instead of through the numerically fragile
         // decomposition.
         crate::onnx::fuse_atan2_decomposition(graph);
+        // Rewrite ops unmodified `simple_eval()` handles incorrectly (Trilu
+        // NaN on +/-inf inputs, and more added as Kokoro's export needs
+        // them) into decompositions it handles correctly — see the
+        // `onnx_compat` module doc.
+        crate::models::onnx_compat::rewrite_unsupported_ops(graph)
+            .context("rewriting unsupported ops in Kokoro ONNX graph")?;
         // `ConvTranspose` and `STFT` can't be fixed by rewriting the graph
         // into other ops `crate::onnx::simple_eval()` supports — see the
         // `native_ops` module doc. Splitting the node list into segments
@@ -1028,8 +1034,9 @@ mod tests {
     /// Longer, punctuated multi-word input than [`generate_speech_real_model`]
     /// — regression test for a phase-computation NaN that only manifested on
     /// inputs producing enough STFT frames to hit an exact zero-magnitude
-    /// bin (`0.0/0.0` feeding `Atan`). See `native_ops::AtanOp`'s doc
-    /// comment for the full story.
+    /// bin (`0.0/0.0` feeding `Atan`). See
+    /// `crate::onnx::optimizer::fuse_atan2`'s doc comment for the full
+    /// story.
     #[test]
     #[ignore = "needs CRANE_KOKORO_DIR and CRANE_G2P_EN_US_DIR"]
     fn generate_speech_real_model_longer_sentence_is_not_nan() {

@@ -5,6 +5,8 @@ pub mod g2p;
 pub mod kokoro_tts;
 #[cfg(feature = "onnx")]
 pub mod moonshine_asr;
+#[cfg(feature = "onnx")]
+pub(crate) mod onnx_compat;
 pub mod orpheus;
 pub mod paddleocr_vl;
 #[cfg(feature = "onnx")]
