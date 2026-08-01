@@ -11,7 +11,8 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::backend::{
-    Gemma4Backend, HunyuanBackend, ModelBackend, Qwen25Backend, Qwen3Backend, Qwen3_5Backend,
+    Gemma4Backend, HunyuanBackend, Minicpm5Backend, ModelBackend, Qwen25Backend, Qwen3Backend,
+    Qwen3_5Backend,
 };
 use crate::chat_template::{AutoChatTemplate, ChatTemplateProcessor, HunyuanChatTemplate};
 
@@ -26,6 +27,7 @@ pub enum ModelType {
     Gemma4,
     Gemma4VL,
     HunyuanDense,
+    Minicpm5,
     Qwen25,
     Qwen3,
     Qwen3_5,
@@ -47,6 +49,10 @@ impl ModelType {
             "gemma4" | "gemma-4" | "gemma4_e2b" => Self::Gemma4,
             "gemma4_vl" | "gemma4-vl" | "gemma4vl" => Self::Gemma4VL,
             "hunyuan" | "hunyuan_dense" | "hunyuandense" => Self::HunyuanDense,
+            // Bare "minicpm" is aliased to MiniCPM5 for now, since it's the
+            // only OpenBMB family member Crane supports; re-scope this once
+            // MiniCPM-o/MiniCPM-V land as their own `ModelType`s.
+            "minicpm5" | "minicpm-5" | "minicpm_5" | "minicpm" => Self::Minicpm5,
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
             "qwen3" => Self::Qwen3,
             "qwen3_5" | "qwen3.5" | "qwen35" | "qwen3_5_dense" => Self::Qwen3_5,
@@ -69,6 +75,7 @@ impl ModelType {
             Self::Gemma4 => "gemma4",
             Self::Gemma4VL => "gemma4_vl",
             Self::HunyuanDense => "hunyuan",
+            Self::Minicpm5 => "minicpm5",
             Self::Qwen25 => "qwen25",
             Self::Qwen3 => "qwen3",
             Self::Qwen3_5 => "qwen3_5",
@@ -253,6 +260,12 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::Gemma4
     } else if path_lower.contains("hunyuan") {
         ModelType::HunyuanDense
+    } else if path_lower.contains("minicpm") {
+        // MiniCPM5's config.json is a plain `LlamaForCausalLM`
+        // (model_type/architectures give no distinctive signal), so this
+        // path-name heuristic is the only auto-detect route; use
+        // `--model-type minicpm5` explicitly for renamed directories.
+        ModelType::Minicpm5
     } else if path_lower.contains("qwen3-tts") || path_lower.contains("qwen3_tts") || path_lower.contains("qwen3tts") {
         ModelType::Qwen3TTS
     } else if path_lower.contains("qwen3-asr") || path_lower.contains("qwen3_asr") || path_lower.contains("qwen3asr") {
@@ -295,6 +308,11 @@ fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
         "qwen3" | "qwen3moe" => Some(ModelType::Qwen3),
         "qwen2" => Some(ModelType::Qwen25),
         a if a.starts_with("hunyuan") => Some(ModelType::HunyuanDense),
+        // Deliberately specific (not bare "llama") — MiniCPM5 GGUF
+        // conversions may use "llama" as `general.architecture` since the
+        // checkpoint itself is architecturally plain Llama, in which case
+        // this won't fire and `--model-type minicpm5` is required instead.
+        a if a.starts_with("minicpm") => Some(ModelType::Minicpm5),
         a if a.starts_with("gemma") => Some(ModelType::Gemma4),
         other => {
             tracing::warn!("Unrecognized GGUF architecture '{other}'");
@@ -354,6 +372,14 @@ pub fn create_backend(
                 ModelFormat::Auto => crane_core::models::gemma4::ModelFormat::Auto,
             };
             Ok(Box::new(Gemma4Backend::new(model_path, device, dtype, g4_fmt)?))
+        }
+        ModelType::Minicpm5 => {
+            let mc_fmt = match format {
+                ModelFormat::Safetensors => crane_core::models::minicpm5::ModelFormat::Safetensors,
+                ModelFormat::Gguf => crane_core::models::minicpm5::ModelFormat::Gguf,
+                ModelFormat::Auto => crane_core::models::minicpm5::ModelFormat::Auto,
+            };
+            Ok(Box::new(Minicpm5Backend::new(model_path, device, dtype, mc_fmt)?))
         }
         ModelType::Qwen25 => Ok(Box::new(Qwen25Backend::new(model_path, device, dtype)?)),
         ModelType::Qwen3 => Ok(Box::new(Qwen3Backend::new(model_path, device, dtype)?)),
@@ -571,6 +597,15 @@ mod tests {
     }
 
     #[test]
+    fn model_type_from_str_minicpm5_variants() {
+        assert_eq!(ModelType::from_str("minicpm5"), ModelType::Minicpm5);
+        assert_eq!(ModelType::from_str("minicpm-5"), ModelType::Minicpm5);
+        assert_eq!(ModelType::from_str("minicpm_5"), ModelType::Minicpm5);
+        assert_eq!(ModelType::from_str("minicpm"), ModelType::Minicpm5);
+        assert_eq!(ModelType::from_str("MINICPM5"), ModelType::Minicpm5);
+    }
+
+    #[test]
     fn model_type_from_str_voxtral_variants() {
         assert_eq!(ModelType::from_str("voxtral_tts"), ModelType::VoxtralTTS);
         assert_eq!(ModelType::from_str("voxtral-tts"), ModelType::VoxtralTTS);
@@ -623,6 +658,7 @@ mod tests {
     fn model_type_display_name() {
         assert_eq!(ModelType::Auto.display_name(), "auto");
         assert_eq!(ModelType::HunyuanDense.display_name(), "hunyuan");
+        assert_eq!(ModelType::Minicpm5.display_name(), "minicpm5");
         assert_eq!(ModelType::Qwen25.display_name(), "qwen25");
         assert_eq!(ModelType::Qwen3.display_name(), "qwen3");
         assert_eq!(ModelType::Qwen3ASR.display_name(), "qwen3_asr");
@@ -730,6 +766,29 @@ mod tests {
     fn detect_path_heuristic_hunyuan() {
         let result = detect_model_type("/models/Hunyuan-Dense-7B");
         assert_eq!(result, ModelType::HunyuanDense);
+    }
+
+    #[test]
+    fn detect_path_heuristic_minicpm5() {
+        let result = detect_model_type("/models/MiniCPM5-1B");
+        assert_eq!(result, ModelType::Minicpm5);
+    }
+
+    #[test]
+    fn detect_from_config_json_llama_architecture_is_not_minicpm5() {
+        // MiniCPM5's own config.json is a plain LlamaForCausalLM — verify
+        // that alone does NOT get claimed by Minicpm5 (would misfire on
+        // real Llama checkpoints). Falls through to the Qwen25 default
+        // since there's no path-name signal in this temp dir.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"model_type": "llama", "architectures": ["LlamaForCausalLM"]}"#,
+        )
+        .unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_ne!(result, ModelType::Minicpm5);
     }
 
     #[test]

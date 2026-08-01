@@ -18,6 +18,7 @@ pub mod qwen3_tts;
 // pub mod qwen3_vl;
 pub mod gemma4;
 pub mod hunyuan_dense;
+pub mod minicpm5;
 pub mod voxtral_tts;
 
 #[cfg(feature = "onnx")]
