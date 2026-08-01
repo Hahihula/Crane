@@ -55,6 +55,14 @@ pub struct NativeLinearResize {
     /// downsample); output length is `floor(input_length * scale)`, per
     /// the ONNX `Resize` spec.
     scale: f32,
+    /// Length of the decoded `scales` array, checked against the data
+    /// input's actual rank in [`Self::compute`]. `axis` is found by
+    /// scanning `scales` alone, with nothing to check it was actually
+    /// indexing the right tensor — a `scales` array shorter than `data`'s
+    /// rank (e.g. one meant to pair with an `axes` input, which this
+    /// implementation doesn't support) would otherwise have `axis`
+    /// silently resolve against the wrong dimension.
+    scales_len: usize,
 }
 
 impl NativeLinearResize {
@@ -93,7 +101,7 @@ impl NativeLinearResize {
         let axis =
             axis.with_context(|| format!("Resize node {:?}: no axis has a non-1.0 scale", node.name))?;
 
-        Ok(Self { data_input, output, axis, scale: scales[axis] })
+        Ok(Self { data_input, output, axis, scale: scales[axis], scales_len: scales.len() })
     }
 
     /// Computes ONNX's half-pixel linear resize along [`Self::axis`] using
@@ -105,11 +113,21 @@ impl NativeLinearResize {
     ///
     /// # Errors
     ///
-    /// Returns an error if `values` is missing this node's data input.
+    /// Returns an error if `values` is missing this node's data input, or
+    /// if the decoded `scales` array's length doesn't match the data
+    /// input's actual rank.
     fn compute(&self, values: &HashMap<String, Tensor>) -> Result<Tensor> {
         let x = values
             .get(&self.data_input)
             .with_context(|| format!("missing Resize input {:?}", self.data_input))?;
+        if self.scales_len != x.rank() {
+            bail!(
+                "Resize node: scales has {} value(s) but input {:?} has rank {}",
+                self.scales_len,
+                self.data_input,
+                x.rank()
+            );
+        }
         let in_len = x.dim(self.axis)?;
         // `scale` and `in_len` are both bounded, ordinary model dimensions
         // (at most a few hundred thousand samples), so this product stays
@@ -237,6 +255,7 @@ mod tests {
             output: "y".to_string(),
             axis: 1,
             scale: 2.0,
+            scales_len: 2,
         };
         // Shape [1, 4]: a simple ramp, easy to hand-check half-pixel linear
         // interpolation against.
@@ -261,12 +280,32 @@ mod tests {
             output: "y".to_string(),
             axis: 1,
             scale: 0.5,
+            scales_len: 2,
         };
         let x = Tensor::new(&[[0f32, 10., 20., 30.]], &Device::Cpu).unwrap();
         let values = values_with("x", x);
 
         let y = node.compute(&values).unwrap();
         assert_eq!(y.dims(), &[1, 2]);
+    }
+
+    // A `scales` array shorter than the input's actual rank must now error
+    // instead of silently resolving `axis` against the wrong dimension.
+    #[test]
+    fn linear_resize_scales_length_mismatch_errors() {
+        let node = NativeLinearResize {
+            data_input: "x".to_string(),
+            output: "y".to_string(),
+            axis: 1,
+            scale: 2.0,
+            scales_len: 2,
+        };
+        // Rank 3, but scales_len claims rank 2.
+        let x = Tensor::new(&[[[0f32, 10., 20., 30.]]], &Device::Cpu).unwrap();
+        let values = values_with("x", x);
+
+        let err = node.compute(&values).unwrap_err();
+        assert!(err.to_string().contains("scales"));
     }
 
     #[test]
