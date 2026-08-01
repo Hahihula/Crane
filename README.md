@@ -15,17 +15,14 @@
 
 
 
-![](data/aa.gif)
-
-![GGUF support out-of-box](data/assets/crane-qwen3-5-2b.gif)
-
 **Crane (🦩)** - **C**andle-based **R**ust **A**ccelerated **N**eural **E**ngine
 A high-performance inference framework leveraging Rust's Candle for maximum speed on CPU/GPU.
 
 **Supported Models**:
 
 - [ ] more to come....
-- [ ] Qwen3-VLA, Qwen3.5-GR00T;
+- [ ] Qwen3.5-VLA, Qwen3.5-GR00T, Pi0.5;
+- [ ] Audio8-TTS;
 - [x] PaddleOCR-v6;
 - [x] Qwen 3.5 (0.8B; hybrid Gated Delta Net + softmax attention, CPU/CUDA/Metal) + Ornith-1.0-9B (agentic, tool calling)
 - [x] Hunyuan Dense
@@ -38,7 +35,7 @@ A high-performance inference framework leveraging Rust's Candle for maximum spee
 - [x] Silero VAD
 - [x] 🎙️ Qwen3-TTS (12Hz, 24kHz, 16-codebook RVQGAN + native Candle decoder, voice cloning)
 - [x] 🎙️ [Voxtral-4B-TTS](https://arxiv.org/abs/2603.25551) (12.5Hz, 24kHz, autoregressive + flow-matching, 20 preset voices across 10 languages)
-- [ ] 🎙️ TTS: [Spark-TTS](https://github.com/SparkAudio/Spark-TTS) | [Orpheus-TTS](https://github.com/canopyai/Orpheus-TTS) (WIP)
+- [ ] ~~🎙️ TTS: [Spark-TTS](https://github.com/SparkAudio/Spark-TTS) | [Orpheus-TTS](https://github.com/canopyai/Orpheus-TTS) (WIP)~~
 
 
 submit your models make other users use it easier!
@@ -71,6 +68,11 @@ We include:
 - ASR;
 - VAD;
 - .... (Any AI ability you want power with AI.)
+
+
+![](data/aa.gif)
+
+![GGUF support out-of-box](data/assets/crane-qwen3-5-2b.gif)
 
 
 ## 🔥 Updates
