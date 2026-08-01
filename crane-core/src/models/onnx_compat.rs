@@ -57,7 +57,8 @@ enum Rewritten {
 /// once, at model load time, before the graph (or its segments) is passed
 /// to `crate::onnx::simple_eval`.
 pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
-    let constants = collect_constant_i64_values(graph);
+    let constant_tensors = collect_constant_tensors(graph);
+    let constants = collect_constant_i64_values(&constant_tensors);
     let orig_nodes = std::mem::take(&mut graph.node);
     let mut new_nodes = Vec::with_capacity(orig_nodes.len());
 
@@ -78,6 +79,13 @@ pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
                 }
             },
             "CumSum" => fix_int_cumsum(node, graph, &mut new_nodes),
+            "Resize" => {
+                if let Rewritten::No =
+                    fix_rank3_nearest_resize(node, graph, &constant_tensors, &mut new_nodes)
+                {
+                    new_nodes.push(node.clone());
+                }
+            },
             _ => new_nodes.push(node.clone()),
         }
     }
@@ -86,18 +94,15 @@ pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
     Ok(())
 }
 
-/// Collects every graph initializer and `Constant`-node output that decodes
-/// to an integer tensor, flattened to `Vec<i64>` via
-/// [`crate::onnx::eval::get_tensor`] (which also upcasts `Int32` to `i64`).
-/// Used to resolve small integer inputs (like `axes`) to compile-time
-/// constants when possible, so rewrites can fall back to a (larger, but
-/// universally correct) dynamic subgraph only when genuinely needed.
-fn collect_constant_i64_values(graph: &GraphProto) -> HashMap<String, Vec<i64>> {
+/// Collects every graph initializer and `Constant`-node output's full
+/// `TensorProto`, keyed by name. Must run before `rewrite_unsupported_ops`
+/// takes `graph.node` out of the graph to build its replacement node list,
+/// since this scans the original (pre-rewrite) node list for `Constant`
+/// nodes.
+fn collect_constant_tensors(graph: &GraphProto) -> HashMap<String, TensorProto> {
     let mut constants = HashMap::new();
     for initializer in &graph.initializer {
-        if let Some(values) = tensor_proto_to_i64_vec(initializer, &initializer.name) {
-            constants.insert(initializer.name.clone(), values);
-        }
+        constants.insert(initializer.name.clone(), initializer.clone());
     }
     for node in &graph.node {
         if node.op_type != "Constant" || node.output.len() != 1 {
@@ -109,11 +114,26 @@ fn collect_constant_i64_values(graph: &GraphProto) -> HashMap<String, Vec<i64>> 
         let Some(tensor_proto) = &value_attr.t else {
             continue;
         };
-        if let Some(values) = tensor_proto_to_i64_vec(tensor_proto, &node.output[0]) {
-            constants.insert(node.output[0].clone(), values);
-        }
+        constants.insert(node.output[0].clone(), tensor_proto.clone());
     }
     constants
+}
+
+/// Decodes every constant tensor in `constant_tensors` that holds an
+/// integer type, flattened to `Vec<i64>` via
+/// [`crate::onnx::eval::get_tensor`] (which also upcasts `Int32` to `i64`).
+/// Used to resolve small integer inputs (like `axes`) to compile-time
+/// constants when possible, so rewrites can fall back to a (larger, but
+/// universally correct) dynamic subgraph only when genuinely needed.
+fn collect_constant_i64_values(
+    constant_tensors: &HashMap<String, TensorProto>,
+) -> HashMap<String, Vec<i64>> {
+    constant_tensors
+        .iter()
+        .filter_map(|(name, tensor_proto)| {
+            tensor_proto_to_i64_vec(tensor_proto, name).map(|values| (name.clone(), values))
+        })
+        .collect()
 }
 
 /// Decodes `tensor_proto` and flattens it to a `Vec<i64>`, or `None` if it
@@ -424,6 +444,156 @@ fn fix_int_cumsum(node: &NodeProto, graph: &GraphProto, new_nodes: &mut Vec<Node
         .and_then(|dt| DataType::try_from(dt).ok())
         .unwrap_or(DataType::Double);
     new_nodes.push(cast_node(&cumsum_out_name, output, back_dtype));
+}
+
+/// Rewrites a rank-3 (`[N, C, L]`), `mode="nearest"` `Resize` node — which
+/// `eval.rs`'s `Resize` bails on outright, since it only implements rank-4
+/// input — into `Unsqueeze(axis=2)` → rank-4 `Resize` → `Squeeze(axis=2)`,
+/// extending whichever of `scales`/`sizes` is present with a `1` at
+/// position 2 (matching the synthetic axis the `Unsqueeze` inserts).
+///
+/// `mode="linear"` is explicitly left untouched — that's a real DSP
+/// computation with no decomposition into ops `eval.rs` already runs
+/// correctly, so it's handled by native graph segmentation instead (see
+/// `crate::models::kokoro_tts::native_ops`), not a rewrite.
+///
+/// Requires *both* `data`'s rank to be declared as exactly 3 in
+/// `graph.value_info`, and whichever of `scales`/`sizes` is present to be a
+/// compile-time constant (a literal initializer or `Constant` node) —
+/// known limitations, not fixed here, since exporters that ran full ONNX
+/// shape inference (which is what populates `value_info` in the first
+/// place) also virtually always bake `Resize` scale factors as constants.
+/// Kokoro's export is confirmed to satisfy both.
+///
+/// Returns [`Rewritten::No`] (leaving `node` untouched) when `mode` is
+/// anything other than `"nearest"`/absent, `data`'s declared rank isn't
+/// exactly 3, or neither `scales` nor `sizes` resolves to a constant.
+fn fix_rank3_nearest_resize(
+    node: &NodeProto,
+    graph: &GraphProto,
+    constant_tensors: &HashMap<String, TensorProto>,
+    new_nodes: &mut Vec<NodeProto>,
+) -> Rewritten {
+    if let Some(mode) = node.attribute.iter().find(|attr| attr.name == "mode")
+        && mode.s != b"nearest"
+    {
+        return Rewritten::No;
+    }
+    let data = &node.input[0];
+    if declared_rank(graph, data) != Some(3) {
+        return Rewritten::No;
+    }
+
+    let output = &node.output[0];
+    let unsqueeze_axes_name = format!("{output}__onnx_compat_unsqueeze_axes");
+    new_nodes.push(int64_constant_node(&unsqueeze_axes_name, vec![1], vec![2]));
+    let data_4d_name = format!("{output}__onnx_compat_data_4d");
+    new_nodes.push(binary_node(
+        "Unsqueeze",
+        data,
+        &unsqueeze_axes_name,
+        &data_4d_name,
+    ));
+
+    let mut rewritten = node.clone();
+    rewritten.input[0] = data_4d_name;
+
+    if let Some(scales_name) = node.input.get(2).filter(|name| !name.is_empty()) {
+        let Some(extended) =
+            extend_f32_at_position_2(constant_tensors, scales_name, output, "scales", new_nodes)
+        else {
+            return Rewritten::No;
+        };
+        while rewritten.input.len() < 3 {
+            rewritten.input.push(String::new());
+        }
+        rewritten.input[2] = extended;
+    } else if let Some(sizes_name) = node.input.get(3).filter(|name| !name.is_empty()) {
+        let Some(extended) =
+            extend_i64_at_position_2(constant_tensors, sizes_name, output, "sizes", new_nodes)
+        else {
+            return Rewritten::No;
+        };
+        while rewritten.input.len() < 4 {
+            rewritten.input.push(String::new());
+        }
+        rewritten.input[3] = extended;
+    } else {
+        return Rewritten::No;
+    }
+
+    let resized_4d_name = format!("{output}__onnx_compat_resized_4d");
+    rewritten.output = vec![resized_4d_name.clone()];
+    new_nodes.push(rewritten);
+
+    let squeeze_axes_name = format!("{output}__onnx_compat_squeeze_axes");
+    new_nodes.push(int64_constant_node(&squeeze_axes_name, vec![1], vec![2]));
+    new_nodes.push(binary_node(
+        "Squeeze",
+        &resized_4d_name,
+        &squeeze_axes_name,
+        output,
+    ));
+
+    Rewritten::Yes
+}
+
+/// Resolves `name` to a compile-time constant float array and returns a
+/// new `Constant` node's output name holding that array with a `1.0`
+/// spliced in at index 2. `None` if `name` isn't a resolvable constant.
+fn extend_f32_at_position_2(
+    constant_tensors: &HashMap<String, TensorProto>,
+    name: &str,
+    output: &str,
+    label: &str,
+    new_nodes: &mut Vec<NodeProto>,
+) -> Option<String> {
+    let tensor_proto = constant_tensors.get(name)?;
+    let tensor = crate::onnx::eval::get_tensor(tensor_proto, name).ok()?;
+    let mut values = tensor.flatten_all().ok()?.to_dtype(DType::F32).ok()?.to_vec1::<f32>().ok()?;
+    values.insert(2, 1.0);
+
+    let extended_name = format!("{output}__onnx_compat_{label}_4d");
+    #[allow(clippy::cast_possible_wrap)]
+    let dims = vec![values.len() as i64];
+    new_nodes.push(NodeProto {
+        op_type: "Constant".to_string(),
+        output: vec![extended_name.clone()],
+        attribute: vec![AttributeProto {
+            name: "value".to_string(),
+            r#type: AttributeType::Tensor as i32,
+            t: Some(TensorProto {
+                data_type: DataType::Float as i32,
+                dims,
+                float_data: values,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    Some(extended_name)
+}
+
+/// Resolves `name` to a compile-time constant integer array and returns a
+/// new `Constant` node's output name holding that array with a `1`
+/// spliced in at index 2. `None` if `name` isn't a resolvable constant.
+fn extend_i64_at_position_2(
+    constant_tensors: &HashMap<String, TensorProto>,
+    name: &str,
+    output: &str,
+    label: &str,
+    new_nodes: &mut Vec<NodeProto>,
+) -> Option<String> {
+    let tensor_proto = constant_tensors.get(name)?;
+    let mut values = tensor_proto_to_i64_vec(tensor_proto, name)?;
+    values.insert(2, 1);
+
+    let extended_name = format!("{output}__onnx_compat_{label}_4d");
+    #[allow(clippy::cast_possible_wrap)]
+    let dims = vec![values.len() as i64];
+    new_nodes.push(int64_constant_node(&extended_name, dims, values));
+    Some(extended_name)
 }
 
 /// Builds a single-input, single-output node with no attributes.
@@ -1052,5 +1222,125 @@ mod tests {
         };
         let err = crate::onnx::simple_eval(&model, inputs).unwrap_err();
         assert!(err.to_string().contains("exclusive"));
+    }
+
+    fn string_attribute(name: &str, value: &str) -> AttributeProto {
+        AttributeProto {
+            name: name.to_string(),
+            r#type: AttributeType::String as i32,
+            s: value.as_bytes().to_vec(),
+            ..Default::default()
+        }
+    }
+
+    // eval.rs's Resize only ever accepts nearest_mode="floor" and
+    // coordinate_transformation_mode="asymmetric" (their *defaults* are
+    // different values it then rejects), so every Resize test needs both
+    // spelled out explicitly to reach the code path being tested at all.
+    fn resize_node_nearest(data: &str, scales: &str, output: &str) -> NodeProto {
+        NodeProto {
+            op_type: "Resize".to_string(),
+            input: vec![data.to_string(), String::new(), scales.to_string()],
+            output: vec![output.to_string()],
+            attribute: vec![
+                string_attribute("mode", "nearest"),
+                string_attribute("nearest_mode", "floor"),
+                string_attribute("coordinate_transformation_mode", "asymmetric"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn float_initializer(name: &str, dims: Vec<i64>, values: Vec<f32>) -> TensorProto {
+        TensorProto {
+            name: name.to_string(),
+            data_type: DataType::Float as i32,
+            dims,
+            float_data: values,
+            ..Default::default()
+        }
+    }
+
+    // Kokoro's actual case: a rank-3 [N, C, L] nearest-mode Resize, which
+    // eval.rs's Resize can't run at all (rank-4 only). Must be rewritten
+    // into Unsqueeze/Resize/Squeeze and produce the correct nearest-
+    // neighbor upsample.
+    #[test]
+    fn resize_rank3_nearest_is_rewritten_and_upsamples_correctly() {
+        let mut graph = GraphProto {
+            node: vec![resize_node_nearest("data", "scales", "out")],
+            initializer: vec![float_initializer("scales", vec![3], vec![1.0, 1.0, 2.0])],
+            value_info: vec![declare_rank("data", 3)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert!(graph.node.iter().any(|n| n.op_type == "Unsqueeze"));
+        assert!(graph.node.iter().any(|n| n.op_type == "Squeeze"));
+
+        let data = Tensor::from_vec(
+            vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0],
+            (1, 2, 3),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data);
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap().to_vec3::<f32>().unwrap();
+        assert_eq!(out, vec![vec![
+            vec![10.0, 10.0, 20.0, 20.0, 30.0, 30.0],
+            vec![40.0, 40.0, 50.0, 50.0, 60.0, 60.0]
+        ]]);
+    }
+
+    // A rank-4 input is already what eval.rs's Resize natively supports —
+    // must be left completely untouched.
+    #[test]
+    fn resize_rank4_is_left_untouched() {
+        let mut graph = GraphProto {
+            node: vec![resize_node_nearest("data", "scales", "out")],
+            value_info: vec![declare_rank("data", 4)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].op_type, "Resize");
+    }
+
+    // mode="linear" is out of scope for this rewrite (handled by native
+    // graph segmentation instead) and must be left untouched even when
+    // data's rank is declared as 3.
+    #[test]
+    fn resize_mode_linear_is_left_untouched() {
+        let mut graph = GraphProto {
+            node: vec![NodeProto {
+                op_type: "Resize".to_string(),
+                input: vec!["data".to_string(), String::new(), "scales".to_string()],
+                output: vec!["out".to_string()],
+                attribute: vec![string_attribute("mode", "linear")],
+                ..Default::default()
+            }],
+            value_info: vec![declare_rank("data", 3)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].op_type, "Resize");
+        assert_eq!(graph.node[0].input[0], "data");
     }
 }
