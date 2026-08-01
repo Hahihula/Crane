@@ -33,6 +33,29 @@
 //!   instead of the intended value. [`expand_trilu`] rewrites `Trilu` into
 //!   a `Where`-based selection between `data` and a same-dtype zero
 //!   tensor, which never multiplies and so never produces this NaN.
+//! - **`ReduceSum` doesn't normalize negative axes.** `eval.rs` casts a
+//!   negative axis directly via `x as usize`, producing an out-of-range
+//!   index instead of wrapping. [`fix_reduce_sum_negative_axes`] rewrites
+//!   `axes` to a normalized form, either at rewrite time (when `axes` is a
+//!   compile-time constant with a declared rank) or via a small runtime
+//!   subgraph otherwise.
+//! - **`ReduceMean` doesn't read the opset-18+ `axes` input.** `eval.rs`'s
+//!   `ReduceMean` only ever reads the older `axes` *attribute*, so an
+//!   axes-as-input export silently reduces over every axis instead of the
+//!   intended ones. [`fix_reduce_mean_axes_input`] folds a compile-time
+//!   constant axes input into the attribute form.
+//! - **`CumSum` doesn't support `int64`, and doesn't normalize negative
+//!   axes either.** `eval.rs`'s `CumSum` is a matmul-based, float-only
+//!   implementation, and (like `ReduceSum`) never normalizes a negative
+//!   `axis` input. [`fix_int_cumsum`] wraps `data` in a `Double` round-trip
+//!   cast and normalizes `axis` dynamically.
+//! - **`Resize` `mode="nearest"` only supports rank 4.** `eval.rs` bails on
+//!   any other input rank. [`fix_rank3_nearest_resize`] wraps a rank-3
+//!   `Resize` in `Unsqueeze`/`Squeeze` to reach the rank-4 path.
+//! - **`LSTM` only implements `direction == "forward"`.** `eval.rs` bails
+//!   immediately on `"bidirectional"`. [`expand_bidirectional_lstm`] splits
+//!   a bidirectional `LSTM` into two independent forward-direction `LSTM`
+//!   nodes (one fed the reversed sequence) and recombines their outputs.
 
 use std::collections::HashMap;
 
@@ -83,6 +106,11 @@ pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
                 if let Rewritten::No =
                     fix_rank3_nearest_resize(node, graph, &constant_tensors, &mut new_nodes)
                 {
+                    new_nodes.push(node.clone());
+                }
+            },
+            "LSTM" if is_bidirectional(node) => {
+                if let Rewritten::No = expand_bidirectional_lstm(node, &mut new_nodes) {
                     new_nodes.push(node.clone());
                 }
             },
@@ -594,6 +622,260 @@ fn extend_i64_at_position_2(
     let dims = vec![values.len() as i64];
     new_nodes.push(int64_constant_node(&extended_name, dims, values));
     Some(extended_name)
+}
+
+/// Whether `node` (an `LSTM`) declares `direction == "bidirectional"`.
+fn is_bidirectional(node: &NodeProto) -> bool {
+    node.attribute
+        .iter()
+        .find(|attr| attr.name == "direction")
+        .is_some_and(|attr| attr.s == b"bidirectional")
+}
+
+/// Splits a bidirectional `LSTM` node into two independent forward-
+/// direction `LSTM` nodes — one processing the sequence normally, one
+/// processing it reversed along the time axis — recombining their outputs
+/// to match what a single bidirectional node would have produced.
+///
+/// `eval.rs`'s `LSTM` bails immediately on any `direction` other than
+/// `"forward"`, so bidirectional support has to come from decomposing it
+/// into ops `eval.rs` already runs correctly, same as this module's other
+/// rewrites.
+///
+/// Unlike the earlier abandoned attempt at this rewrite, this doesn't
+/// inspect `sequence_lens`/peephole (`P`)/`activations` values at rewrite
+/// time to decide whether to bail. Splitting is *unconditionally*
+/// structurally correct regardless of those values: `sequence_lens` isn't
+/// direction-shaped, so it's forwarded to both split nodes unchanged;
+/// `P` is direction-shaped, so it's sliced like `W`/`R`/`initial_h`/
+/// `initial_c`; a present `activations` attribute (which must have exactly
+/// 6 entries — two triples — for a bidirectional node) is split 3-and-3
+/// between the two directions. Each split node is still a single-direction
+/// `LSTM`, so `eval.rs`'s own existing runtime checks (`seq_lens_is_default`,
+/// `p_is_zeros`, `activations != activations_default`) independently
+/// accept or reject each direction's values exactly as they would for any
+/// other single-direction `LSTM` node — nothing here needs to duplicate
+/// that validation.
+///
+/// The one place this *does* need care: `Y`'s backward-direction output is
+/// produced in time-reversed order (since its input was reversed) and must
+/// be reversed back before concatenating with the forward direction. `Y_h`
+/// and `Y_c` (the final hidden/cell states) must **not** be reversed —
+/// each split node's final state already corresponds to having consumed
+/// the *original* sequence's first timestep last (for the backward
+/// direction), which is exactly the state ONNX's backward-direction output
+/// is defined to be.
+///
+/// Returns [`Rewritten::No`] (leaving `node` untouched) only when
+/// `activations` is present with a length other than 6 — a malformed
+/// bidirectional `LSTM` this rewrite can't meaningfully split.
+fn expand_bidirectional_lstm(node: &NodeProto, new_nodes: &mut Vec<NodeProto>) -> Rewritten {
+    let activations = node.attribute.iter().find(|attr| attr.name == "activations");
+    let (fwd_activations, bwd_activations) = match activations {
+        None => (None, None),
+        Some(attr) if attr.strings.len() == 6 => {
+            (Some(attr.strings[0..3].to_vec()), Some(attr.strings[3..6].to_vec()))
+        },
+        Some(_) => return Rewritten::No,
+    };
+
+    let output = node.output.first().map_or("lstm", String::as_str);
+    let x = node.input[0].clone();
+    let x_reversed = reverse_along_axis(&x, 0, output, "x", new_nodes);
+
+    let mut fwd_inputs = vec![x];
+    let mut bwd_inputs = vec![x_reversed];
+    for (idx, name) in node.input.iter().enumerate().skip(1) {
+        if idx == 4 {
+            // sequence_lens isn't direction-shaped (it's per-batch-item,
+            // shared across directions) -- forward unchanged.
+            fwd_inputs.push(name.clone());
+            bwd_inputs.push(name.clone());
+        } else if name.is_empty() {
+            fwd_inputs.push(String::new());
+            bwd_inputs.push(String::new());
+        } else {
+            fwd_inputs.push(slice_direction(name, 0, idx, output, new_nodes));
+            bwd_inputs.push(slice_direction(name, 1, idx, output, new_nodes));
+        }
+    }
+
+    let mut fwd_attributes = base_lstm_attributes(node);
+    if let Some(activations) = fwd_activations {
+        fwd_attributes.push(strings_attribute("activations", activations));
+    }
+    let mut bwd_attributes = base_lstm_attributes(node);
+    if let Some(activations) = bwd_activations {
+        bwd_attributes.push(strings_attribute("activations", activations));
+    }
+
+    let fwd_outputs = node
+        .output
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            if name.is_empty() {
+                String::new()
+            } else {
+                format!("{output}__onnx_compat_lstm_fwd_out{idx}")
+            }
+        })
+        .collect::<Vec<_>>();
+    let bwd_outputs = node
+        .output
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            if name.is_empty() {
+                String::new()
+            } else {
+                format!("{output}__onnx_compat_lstm_bwd_out{idx}")
+            }
+        })
+        .collect::<Vec<_>>();
+
+    new_nodes.push(NodeProto {
+        name: format!("{}/onnx_compat_fwd", node.name),
+        op_type: "LSTM".to_string(),
+        input: fwd_inputs,
+        output: fwd_outputs.clone(),
+        attribute: fwd_attributes,
+        ..Default::default()
+    });
+    new_nodes.push(NodeProto {
+        name: format!("{}/onnx_compat_bwd", node.name),
+        op_type: "LSTM".to_string(),
+        input: bwd_inputs,
+        output: bwd_outputs.clone(),
+        attribute: bwd_attributes,
+        ..Default::default()
+    });
+
+    if let Some(y_name) = node.output.first().filter(|name| !name.is_empty()) {
+        let bwd_y_reversed = reverse_along_axis(&bwd_outputs[0], 0, output, "y_bwd", new_nodes);
+        new_nodes.push(NodeProto {
+            op_type: "Concat".to_string(),
+            input: vec![fwd_outputs[0].clone(), bwd_y_reversed],
+            output: vec![y_name.clone()],
+            attribute: vec![axis_attribute(1)],
+            ..Default::default()
+        });
+    }
+    for idx in 1..=2 {
+        if let Some(name) = node.output.get(idx).filter(|name| !name.is_empty()) {
+            new_nodes.push(NodeProto {
+                op_type: "Concat".to_string(),
+                input: vec![fwd_outputs[idx].clone(), bwd_outputs[idx].clone()],
+                output: vec![name.clone()],
+                attribute: vec![axis_attribute(0)],
+                ..Default::default()
+            });
+        }
+    }
+
+    Rewritten::Yes
+}
+
+/// Copies every attribute from an `LSTM` node except `direction` (the
+/// split nodes are implicitly forward-direction, `eval.rs`'s default) and
+/// `activations` (split 3-and-3 between directions by the caller).
+fn base_lstm_attributes(node: &NodeProto) -> Vec<AttributeProto> {
+    node.attribute
+        .iter()
+        .filter(|attr| attr.name != "direction" && attr.name != "activations")
+        .cloned()
+        .collect()
+}
+
+/// Builds an `Ints`-free `axis` `INT` attribute (as used by `Concat`).
+fn axis_attribute(axis: i64) -> AttributeProto {
+    AttributeProto {
+        name: "axis".to_string(),
+        r#type: AttributeType::Int as i32,
+        i: axis,
+        ..Default::default()
+    }
+}
+
+/// Builds a `STRINGS` attribute.
+fn strings_attribute(name: &str, values: Vec<Vec<u8>>) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        r#type: AttributeType::Strings as i32,
+        strings: values,
+        ..Default::default()
+    }
+}
+
+/// Pushes a `Gather(name, [index], axis=0)` node selecting direction
+/// `index`'s slice (keeping the leading dimension, at size 1) from a
+/// `[num_directions, ...]`-shaped `LSTM` input, returning the new tensor's
+/// name.
+///
+/// `input_idx` is the sliced input's ordinal position among the `LSTM`
+/// node's own inputs (e.g. 5 for `initial_h`, 6 for `initial_c`) and is
+/// used, not `name`, to keep the generated node names unique: `initial_h`
+/// and `initial_c` are both zero-initialized with the same shape in
+/// Kokoro's export, so they can share one `ConstantOfShape` tensor as
+/// `name` — keying on `name` alone would then emit two `Constant`/`Gather`
+/// pairs with identical output names, an SSA violation that surfaces
+/// downstream as a "cannot find output" error when both copies are
+/// requested as a segment output.
+fn slice_direction(
+    name: &str,
+    index: i64,
+    input_idx: usize,
+    output: &str,
+    new_nodes: &mut Vec<NodeProto>,
+) -> String {
+    let indices_name = format!("{output}__onnx_compat_lstm_dir{index}_indices_in{input_idx}");
+    new_nodes.push(int64_constant_node(&indices_name, vec![1], vec![index]));
+    let sliced_name = format!("{output}__onnx_compat_lstm_dir{index}_in{input_idx}");
+    new_nodes.push(NodeProto {
+        op_type: "Gather".to_string(),
+        input: vec![name.to_string(), indices_name],
+        output: vec![sliced_name.clone()],
+        attribute: vec![axis_attribute(0)],
+        ..Default::default()
+    });
+    sliced_name
+}
+
+/// Pushes a `Slice` node reversing `name` along `axis`, returning the new
+/// tensor's name. Uses the standard ONNX "reverse an entire axis" idiom:
+/// `starts=[-1]` (the last index), `ends=[i64::MIN]` (a sentinel that,
+/// even after `eval.rs`'s negative-value normalization, clamps to exactly
+/// one-before-the-first index), `steps=[-1]`.
+fn reverse_along_axis(
+    name: &str,
+    axis: i64,
+    output: &str,
+    label: &str,
+    new_nodes: &mut Vec<NodeProto>,
+) -> String {
+    let starts_name = format!("{output}__onnx_compat_{label}_rev_starts");
+    new_nodes.push(int64_constant_node(&starts_name, vec![1], vec![-1]));
+    let ends_name = format!("{output}__onnx_compat_{label}_rev_ends");
+    new_nodes.push(int64_constant_node(&ends_name, vec![1], vec![i64::MIN]));
+    let axes_name = format!("{output}__onnx_compat_{label}_rev_axes");
+    new_nodes.push(int64_constant_node(&axes_name, vec![1], vec![axis]));
+    let steps_name = format!("{output}__onnx_compat_{label}_rev_steps");
+    new_nodes.push(int64_constant_node(&steps_name, vec![1], vec![-1]));
+
+    let reversed_name = format!("{output}__onnx_compat_{label}_reversed");
+    new_nodes.push(NodeProto {
+        op_type: "Slice".to_string(),
+        input: vec![
+            name.to_string(),
+            starts_name,
+            ends_name,
+            axes_name,
+            steps_name,
+        ],
+        output: vec![reversed_name.clone()],
+        ..Default::default()
+    });
+    reversed_name
 }
 
 /// Builds a single-input, single-output node with no attributes.
@@ -1342,5 +1624,487 @@ mod tests {
         assert_eq!(graph.node.len(), 1);
         assert_eq!(graph.node[0].op_type, "Resize");
         assert_eq!(graph.node[0].input[0], "data");
+    }
+
+    const LSTM_HIDDEN: usize = 2;
+    const LSTM_INPUT: usize = 2;
+    const LSTM_SEQ_LEN: usize = 3;
+
+    fn out(name: &str) -> ValueInfoProto {
+        ValueInfoProto {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn lstm_node(inputs: &[&str], outputs: &[&str], bidirectional: bool) -> NodeProto {
+        let mut attribute = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            r#type: AttributeType::Int as i32,
+            #[allow(clippy::cast_possible_wrap)]
+            i: LSTM_HIDDEN as i64,
+            ..Default::default()
+        }];
+        if bidirectional {
+            attribute.push(AttributeProto {
+                name: "direction".to_string(),
+                r#type: AttributeType::String as i32,
+                s: b"bidirectional".to_vec(),
+                ..Default::default()
+            });
+        }
+        NodeProto {
+            op_type: "LSTM".to_string(),
+            input: inputs.iter().map(|s| (*s).to_string()).collect(),
+            output: outputs.iter().map(|s| (*s).to_string()).collect(),
+            attribute,
+            ..Default::default()
+        }
+    }
+
+    // Deterministic, non-symmetric pseudo-random floats -- small enough to
+    // avoid sigmoid/tanh saturation, distinct enough between calls (via
+    // `seed`) that forward and backward weights can never accidentally
+    // produce identical results.
+    fn deterministic_values(n: usize, seed: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i as f32) * 0.7 + seed).sin() * 0.3).collect()
+    }
+
+    fn reverse_time_major(values: &[f32], step: usize) -> Vec<f32> {
+        let mut chunks: Vec<&[f32]> = values.chunks(step).collect();
+        chunks.reverse();
+        chunks.concat()
+    }
+
+    // The motivating fix: eval.rs's LSTM bails outright on
+    // direction=="bidirectional". A bidirectional LSTM's Y must match
+    // concatenating an independent forward pass over the original sequence
+    // with an independent forward pass over the reversed sequence (itself
+    // reversed back), and Y_h/Y_c must match those two passes' final
+    // states *without* reversing them -- the classic bidirectional-LSTM
+    // gotcha this rewrite has to get right.
+    #[test]
+    fn bidirectional_lstm_matches_two_independent_forward_passes() {
+        let w_fwd = deterministic_values(4 * LSTM_HIDDEN * LSTM_INPUT, 0.0);
+        let r_fwd = deterministic_values(4 * LSTM_HIDDEN * LSTM_HIDDEN, 1.0);
+        let b_fwd = deterministic_values(8 * LSTM_HIDDEN, 2.0);
+        let w_bwd = deterministic_values(4 * LSTM_HIDDEN * LSTM_INPUT, 3.0);
+        let r_bwd = deterministic_values(4 * LSTM_HIDDEN * LSTM_HIDDEN, 4.0);
+        let b_bwd = deterministic_values(8 * LSTM_HIDDEN, 5.0);
+
+        let x_data = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let x = Tensor::from_vec(x_data.clone(), (LSTM_SEQ_LEN, 1, LSTM_INPUT), &Device::Cpu).unwrap();
+        let x_rev_data = reverse_time_major(&x_data, LSTM_INPUT);
+        let x_rev =
+            Tensor::from_vec(x_rev_data, (LSTM_SEQ_LEN, 1, LSTM_INPUT), &Device::Cpu).unwrap();
+
+        // Reference pass 1: plain forward LSTM over the original sequence.
+        let mut fwd_graph = GraphProto {
+            node: vec![lstm_node(&["x", "w", "r", "b"], &["y", "y_h", "y_c"], false)],
+            output: vec![out("y"), out("y_h"), out("y_c")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut fwd_graph).unwrap();
+        let mut fwd_inputs = HashMap::new();
+        fwd_inputs.insert("x".to_string(), x.clone());
+        fwd_inputs.insert(
+            "w".to_string(),
+            Tensor::from_vec(w_fwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_INPUT), &Device::Cpu)
+                .unwrap(),
+        );
+        fwd_inputs.insert(
+            "r".to_string(),
+            Tensor::from_vec(r_fwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_HIDDEN), &Device::Cpu)
+                .unwrap(),
+        );
+        fwd_inputs.insert(
+            "b".to_string(),
+            Tensor::from_vec(b_fwd.clone(), (1, 8 * LSTM_HIDDEN), &Device::Cpu).unwrap(),
+        );
+        let fwd_ref = run_graph(fwd_graph, fwd_inputs);
+
+        // Reference pass 2: plain forward LSTM over the reversed sequence.
+        let mut bwd_graph = GraphProto {
+            node: vec![lstm_node(&["x", "w", "r", "b"], &["y", "y_h", "y_c"], false)],
+            output: vec![out("y"), out("y_h"), out("y_c")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut bwd_graph).unwrap();
+        let mut bwd_inputs = HashMap::new();
+        bwd_inputs.insert("x".to_string(), x_rev);
+        bwd_inputs.insert(
+            "w".to_string(),
+            Tensor::from_vec(w_bwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_INPUT), &Device::Cpu)
+                .unwrap(),
+        );
+        bwd_inputs.insert(
+            "r".to_string(),
+            Tensor::from_vec(r_bwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_HIDDEN), &Device::Cpu)
+                .unwrap(),
+        );
+        bwd_inputs.insert(
+            "b".to_string(),
+            Tensor::from_vec(b_bwd.clone(), (1, 8 * LSTM_HIDDEN), &Device::Cpu).unwrap(),
+        );
+        let bwd_ref = run_graph(bwd_graph, bwd_inputs);
+
+        let fwd_y = fwd_ref.get("y").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let bwd_y = bwd_ref.get("y").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let bwd_y_reversed = reverse_time_major(&bwd_y, LSTM_HIDDEN);
+        let mut expected_y = Vec::new();
+        for t in 0..LSTM_SEQ_LEN {
+            expected_y.extend_from_slice(&fwd_y[t * LSTM_HIDDEN..(t + 1) * LSTM_HIDDEN]);
+            expected_y.extend_from_slice(&bwd_y_reversed[t * LSTM_HIDDEN..(t + 1) * LSTM_HIDDEN]);
+        }
+
+        let mut expected_y_h =
+            fwd_ref.get("y_h").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        expected_y_h
+            .extend(bwd_ref.get("y_h").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        let mut expected_y_c =
+            fwd_ref.get("y_c").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        expected_y_c
+            .extend(bwd_ref.get("y_c").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap());
+
+        // The bidirectional node under test: W/R/B concatenate the two
+        // directions' weights along axis 0, exactly as the ONNX LSTM spec
+        // requires.
+        let mut graph = GraphProto {
+            node: vec![lstm_node(&["x", "w", "r", "b"], &["y", "y_h", "y_c"], true)],
+            output: vec![out("y"), out("y_h"), out("y_c")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+        assert!(graph.node.iter().filter(|n| n.op_type == "LSTM").count() == 2);
+
+        let mut inputs = HashMap::new();
+        inputs.insert("x".to_string(), x);
+        inputs.insert(
+            "w".to_string(),
+            Tensor::from_vec(
+                [w_fwd, w_bwd].concat(),
+                (2, 4 * LSTM_HIDDEN, LSTM_INPUT),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "r".to_string(),
+            Tensor::from_vec(
+                [r_fwd, r_bwd].concat(),
+                (2, 4 * LSTM_HIDDEN, LSTM_HIDDEN),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "b".to_string(),
+            Tensor::from_vec([b_fwd, b_bwd].concat(), (2, 8 * LSTM_HIDDEN), &Device::Cpu).unwrap(),
+        );
+        let values = run_graph(graph, inputs);
+
+        let actual_y = values.get("y").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let actual_y_h =
+            values.get("y_h").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let actual_y_c =
+            values.get("y_c").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        assert_eq!(actual_y, expected_y);
+        assert_eq!(actual_y_h, expected_y_h);
+        assert_eq!(actual_y_c, expected_y_c);
+    }
+
+    // A forward-only (or default-direction) LSTM must never enter this
+    // rewrite at all -- the dispatch guard is `is_bidirectional`, not the
+    // rewrite function itself.
+    #[test]
+    fn forward_only_lstm_is_left_untouched() {
+        let mut graph = GraphProto {
+            node: vec![lstm_node(&["x", "w", "r"], &["y"], false)],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].op_type, "LSTM");
+    }
+
+    fn minimal_bidirectional_lstm_inputs() -> HashMap<String, Tensor> {
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            Tensor::from_vec(
+                deterministic_values(LSTM_SEQ_LEN * LSTM_INPUT, 0.0),
+                (LSTM_SEQ_LEN, 1, LSTM_INPUT),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "w".to_string(),
+            Tensor::from_vec(
+                deterministic_values(2 * 4 * LSTM_HIDDEN * LSTM_INPUT, 1.0),
+                (2, 4 * LSTM_HIDDEN, LSTM_INPUT),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "r".to_string(),
+            Tensor::from_vec(
+                deterministic_values(2 * 4 * LSTM_HIDDEN * LSTM_HIDDEN, 2.0),
+                (2, 4 * LSTM_HIDDEN, LSTM_HIDDEN),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        inputs
+    }
+
+    // A trivial (all-entries-equal) sequence_lens must be accepted: it's
+    // forwarded unchanged to both split nodes, and eval.rs's own
+    // `seq_lens_is_default` check on each accepts it.
+    #[test]
+    fn bidirectional_lstm_with_trivial_sequence_lens_is_accepted() {
+        let mut graph = GraphProto {
+            node: vec![lstm_node(
+                &["x", "w", "r", "", "sequence_lens"],
+                &["y"],
+                true,
+            )],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let mut inputs = minimal_bidirectional_lstm_inputs();
+        #[allow(clippy::cast_possible_wrap)]
+        let seq_len = LSTM_SEQ_LEN as i64;
+        inputs.insert(
+            "sequence_lens".to_string(),
+            Tensor::from_vec(vec![seq_len], 1, &Device::Cpu).unwrap(),
+        );
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        crate::onnx::simple_eval(&model, inputs).expect("trivial sequence_lens should be accepted");
+    }
+
+    // A non-trivial sequence_lens (an entry shorter than the actual
+    // sequence length) must still be rejected -- eval.rs's own
+    // `seq_lens_is_default` check on each split node catches it, with no
+    // rewrite-time inspection needed.
+    #[test]
+    fn bidirectional_lstm_with_non_trivial_sequence_lens_is_rejected() {
+        let mut graph = GraphProto {
+            node: vec![lstm_node(
+                &["x", "w", "r", "", "sequence_lens"],
+                &["y"],
+                true,
+            )],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let mut inputs = minimal_bidirectional_lstm_inputs();
+        inputs.insert(
+            "sequence_lens".to_string(),
+            Tensor::from_vec(vec![1i64], 1, &Device::Cpu).unwrap(),
+        );
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        let err = crate::onnx::simple_eval(&model, inputs).unwrap_err();
+        assert!(err.to_string().contains("seq_lens"));
+    }
+
+    // An all-zero peephole (`P`) must be accepted: it's sliced per
+    // direction like W/R, and eval.rs's own `p_is_zeros` check on each
+    // split node's half accepts an all-zero slice.
+    #[test]
+    fn bidirectional_lstm_with_zero_peephole_is_accepted() {
+        let mut graph = GraphProto {
+            node: vec![lstm_node(
+                &["x", "w", "r", "", "", "", "", "p"],
+                &["y"],
+                true,
+            )],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let mut inputs = minimal_bidirectional_lstm_inputs();
+        inputs.insert(
+            "p".to_string(),
+            Tensor::zeros((2, 3 * LSTM_HIDDEN), candle_core::DType::F32, &Device::Cpu).unwrap(),
+        );
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        crate::onnx::simple_eval(&model, inputs).expect("all-zero peephole should be accepted");
+    }
+
+    // A non-zero peephole must still be rejected, via eval.rs's own
+    // `p_is_zeros` check on the split node whose half is non-zero.
+    #[test]
+    fn bidirectional_lstm_with_non_zero_peephole_is_rejected() {
+        let mut graph = GraphProto {
+            node: vec![lstm_node(
+                &["x", "w", "r", "", "", "", "", "p"],
+                &["y"],
+                true,
+            )],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let mut inputs = minimal_bidirectional_lstm_inputs();
+        let mut p_values = vec![0.0f32; 2 * 3 * LSTM_HIDDEN];
+        p_values[0] = 1.0;
+        inputs.insert(
+            "p".to_string(),
+            Tensor::from_vec(p_values, (2, 3 * LSTM_HIDDEN), &Device::Cpu).unwrap(),
+        );
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        let err = crate::onnx::simple_eval(&model, inputs).unwrap_err();
+        assert!(err.to_string().contains('p'));
+    }
+
+    // Regression test: Kokoro's export gives `initial_h` and `initial_c`
+    // the same shape, so both can point at one shared `ConstantOfShape`
+    // zero-tensor. `slice_direction` must still emit uniquely-named nodes
+    // for each -- keying its generated names only on the shared tensor
+    // name (rather than on each input's ordinal position) previously
+    // produced two `Constant`/`Gather` pairs with identical output names,
+    // which `Model::run_segment` (which requests every segment node's
+    // output as a graph output) turned into a "cannot find output" error
+    // on the second, already-consumed occurrence.
+    #[test]
+    fn bidirectional_lstm_with_shared_initial_state_tensor_is_supported() {
+        let mut graph = GraphProto {
+            node: vec![lstm_node(
+                &["x", "w", "r", "", "", "shared_init", "shared_init"],
+                &["y"],
+                true,
+            )],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        for node in &graph.node {
+            for output in node.output.iter().filter(|o| !o.is_empty()) {
+                assert!(seen.insert(output.clone()), "duplicate node output name {output:?}");
+            }
+        }
+
+        let mut inputs = minimal_bidirectional_lstm_inputs();
+        inputs.insert(
+            "shared_init".to_string(),
+            Tensor::zeros((2, 1, LSTM_HIDDEN), candle_core::DType::F32, &Device::Cpu).unwrap(),
+        );
+        // Mirrors `Model::run_segment`, which requests every node's output
+        // in the segment as a graph output -- this is what originally
+        // surfaced the bug.
+        graph.output =
+            graph.node.iter().flat_map(|n| n.output.iter()).filter(|o| !o.is_empty()).map(|o| out(o)).collect();
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        crate::onnx::simple_eval(&model, inputs)
+            .expect("shared initial_h/initial_c tensor should not produce duplicate output names");
+    }
+
+    fn default_activations_x6() -> Vec<Vec<u8>> {
+        vec![
+            b"Sigmoid".to_vec(),
+            b"Tanh".to_vec(),
+            b"Tanh".to_vec(),
+            b"Sigmoid".to_vec(),
+            b"Tanh".to_vec(),
+            b"Tanh".to_vec(),
+        ]
+    }
+
+    // An explicit `activations` attribute that spells out the default
+    // triple twice (once per direction) must be accepted and split 3-and-3
+    // between the two directions, each still matching eval.rs's default.
+    #[test]
+    fn bidirectional_lstm_with_default_activations_is_accepted() {
+        let mut node = lstm_node(&["x", "w", "r"], &["y"], true);
+        node.attribute.push(strings_attribute("activations", default_activations_x6()));
+        let mut graph = GraphProto {
+            node: vec![node],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let inputs = minimal_bidirectional_lstm_inputs();
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        crate::onnx::simple_eval(&model, inputs).expect("default activations should be accepted");
+    }
+
+    // A non-default activations triple on one direction must still be
+    // rejected by that split node's own eval.rs check.
+    #[test]
+    fn bidirectional_lstm_with_non_default_activations_is_rejected() {
+        let mut node = lstm_node(&["x", "w", "r"], &["y"], true);
+        let activations = vec![
+            b"Tanh".to_vec(),
+            b"Tanh".to_vec(),
+            b"Tanh".to_vec(),
+            b"Sigmoid".to_vec(),
+            b"Tanh".to_vec(),
+            b"Tanh".to_vec(),
+        ];
+        node.attribute.push(strings_attribute("activations", activations));
+        let mut graph = GraphProto {
+            node: vec![node],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let inputs = minimal_bidirectional_lstm_inputs();
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        let err = crate::onnx::simple_eval(&model, inputs).unwrap_err();
+        assert!(err.to_string().contains("activations"));
+    }
+
+    // A malformed (neither absent nor length-6) activations attribute on a
+    // bidirectional node can't be meaningfully split -- must be left
+    // untouched rather than guessing.
+    #[test]
+    fn bidirectional_lstm_with_malformed_activations_is_left_untouched() {
+        let mut node = lstm_node(&["x", "w", "r"], &["y"], true);
+        node.attribute.push(strings_attribute("activations", vec![b"Sigmoid".to_vec()]));
+        let mut graph = GraphProto {
+            node: vec![node],
+            output: vec![out("y")],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].op_type, "LSTM");
+        assert!(is_bidirectional(&graph.node[0]));
     }
 }
