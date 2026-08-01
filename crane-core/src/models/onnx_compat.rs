@@ -34,29 +34,87 @@
 //!   a `Where`-based selection between `data` and a same-dtype zero
 //!   tensor, which never multiplies and so never produces this NaN.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
+use candle_core::DType;
 
 use crate::onnx::proto::attribute_proto::AttributeType;
 use crate::onnx::proto::tensor_proto::DataType;
 use crate::onnx::proto::{AttributeProto, GraphProto, NodeProto, TensorProto};
+
+/// Whether a rewrite function actually rewrote its node in place, so
+/// [`rewrite_unsupported_ops`] knows whether to also keep the original
+/// node or discard it in favor of the rewrite's replacement(s).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rewritten {
+    Yes,
+    No,
+}
 
 /// Rewrites every node in `graph` that unmodified `crate::onnx::eval`
 /// handles incorrectly into a decomposition it handles correctly. Runs
 /// once, at model load time, before the graph (or its segments) is passed
 /// to `crate::onnx::simple_eval`.
 pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
+    let constants = collect_constant_i64_values(graph);
     let orig_nodes = std::mem::take(&mut graph.node);
     let mut new_nodes = Vec::with_capacity(orig_nodes.len());
 
     for node in &orig_nodes {
         match node.op_type.as_str() {
             "Trilu" => expand_trilu(node, graph, &mut new_nodes)?,
+            "ReduceSum" => {
+                if let Rewritten::No =
+                    fix_reduce_sum_negative_axes(node, graph, &constants, &mut new_nodes)
+                {
+                    new_nodes.push(node.clone());
+                }
+            },
             _ => new_nodes.push(node.clone()),
         }
     }
 
     graph.node = new_nodes;
     Ok(())
+}
+
+/// Collects every graph initializer and `Constant`-node output that decodes
+/// to an integer tensor, flattened to `Vec<i64>` via
+/// [`crate::onnx::eval::get_tensor`] (which also upcasts `Int32` to `i64`).
+/// Used to resolve small integer inputs (like `axes`) to compile-time
+/// constants when possible, so rewrites can fall back to a (larger, but
+/// universally correct) dynamic subgraph only when genuinely needed.
+fn collect_constant_i64_values(graph: &GraphProto) -> HashMap<String, Vec<i64>> {
+    let mut constants = HashMap::new();
+    for initializer in &graph.initializer {
+        if let Some(values) = tensor_proto_to_i64_vec(initializer, &initializer.name) {
+            constants.insert(initializer.name.clone(), values);
+        }
+    }
+    for node in &graph.node {
+        if node.op_type != "Constant" || node.output.len() != 1 {
+            continue;
+        }
+        let Some(value_attr) = node.attribute.iter().find(|attr| attr.name == "value") else {
+            continue;
+        };
+        let Some(tensor_proto) = &value_attr.t else {
+            continue;
+        };
+        if let Some(values) = tensor_proto_to_i64_vec(tensor_proto, &node.output[0]) {
+            constants.insert(node.output[0].clone(), values);
+        }
+    }
+    constants
+}
+
+/// Decodes `tensor_proto` and flattens it to a `Vec<i64>`, or `None` if it
+/// can't be decoded or isn't an integer tensor.
+fn tensor_proto_to_i64_vec(tensor_proto: &TensorProto, name: &str) -> Option<Vec<i64>> {
+    let tensor = crate::onnx::eval::get_tensor(tensor_proto, name).ok()?;
+    let tensor = tensor.flatten_all().ok()?;
+    tensor.to_dtype(DType::I64).ok()?.to_vec1::<i64>().ok()
 }
 
 /// Rewrites `node` (a `Trilu`) in place into a small subgraph that avoids
@@ -158,12 +216,137 @@ fn declared_dtype(graph: &GraphProto, name: &str) -> Option<i32> {
     tensor_type_info(graph, name).map(|tensor_type| tensor_type.elem_type)
 }
 
+/// Looks up `name`'s declared rank (number of dimensions) among `graph`'s
+/// `value_info`, `input`, and `output` lists. Returns `None` when no
+/// declaration is present, or the declaration has no shape at all.
+fn declared_rank(graph: &GraphProto, name: &str) -> Option<usize> {
+    tensor_type_info(graph, name)?
+        .shape
+        .as_ref()
+        .map(|shape| shape.dim.len())
+}
+
+/// Rewrites a `ReduceSum` node whose `axes` input may contain negative
+/// values into one whose `axes` input is guaranteed non-negative, working
+/// around `eval.rs`'s `ReduceSum` casting axes directly via `x as usize`
+/// with no negative-axis normalization at all (unlike `ReduceMean`, which
+/// does normalize negative axes, but only in its older attribute form).
+///
+/// When `axes` resolves to a compile-time constant *and* `data`'s rank is
+/// declared in `graph.value_info`, normalizes `axes` directly and swaps in
+/// a replacement `Constant` node — cheaper, and produces a smaller graph.
+/// Otherwise (axes computed dynamically elsewhere in the graph, or a
+/// constant axes value whose rank isn't declared) emits a small subgraph
+/// that normalizes at runtime: `fixed = axes < 0 ? axes + rank : axes`,
+/// using `Size(Shape(data))` for `rank` — this covers every case, just
+/// with a larger graph than the constant-resolution path needs.
+///
+/// Returns [`Rewritten::No`] (leaving `node` untouched) when `axes` is
+/// absent, empty, or already proven non-negative by a resolved constant.
+fn fix_reduce_sum_negative_axes(
+    node: &NodeProto,
+    graph: &GraphProto,
+    constants: &HashMap<String, Vec<i64>>,
+    new_nodes: &mut Vec<NodeProto>,
+) -> Rewritten {
+    let Some(axes_name) = node.input.get(1).filter(|name| !name.is_empty()) else {
+        return Rewritten::No;
+    };
+    let data = &node.input[0];
+    let output = &node.output[0];
+
+    if let Some(axes_values) = constants.get(axes_name) {
+        if axes_values.iter().all(|&axis| axis >= 0) {
+            return Rewritten::No;
+        }
+        if let Some(rank) = declared_rank(graph, data) {
+            #[allow(clippy::cast_possible_wrap)]
+            let rank = rank as i64;
+            let normalized = axes_values
+                .iter()
+                .map(|&axis| if axis < 0 { axis + rank } else { axis })
+                .collect::<Vec<_>>();
+            let fixed_axes_name = format!("{output}__onnx_compat_axes_fixed");
+            #[allow(clippy::cast_possible_wrap)]
+            let dims = vec![normalized.len() as i64];
+            new_nodes.push(int64_constant_node(&fixed_axes_name, dims, normalized));
+            let mut rewritten = node.clone();
+            rewritten.input[1] = fixed_axes_name;
+            new_nodes.push(rewritten);
+            return Rewritten::Yes;
+        }
+    }
+
+    let zero_name = format!("{output}__onnx_compat_zero_axis");
+    new_nodes.push(int64_constant_node(&zero_name, vec![], vec![0]));
+
+    let shape_name = format!("{output}__onnx_compat_data_shape");
+    new_nodes.push(unary_node("Shape", data, &shape_name));
+
+    let rank_name = format!("{output}__onnx_compat_rank");
+    new_nodes.push(unary_node("Size", &shape_name, &rank_name));
+
+    let is_negative_name = format!("{output}__onnx_compat_axes_negative");
+    new_nodes.push(binary_node("Less", axes_name, &zero_name, &is_negative_name));
+
+    let adjusted_name = format!("{output}__onnx_compat_axes_adjusted");
+    new_nodes.push(binary_node("Add", axes_name, &rank_name, &adjusted_name));
+
+    let fixed_axes_name = format!("{output}__onnx_compat_axes_fixed");
+    new_nodes.push(NodeProto {
+        op_type: "Where".to_string(),
+        input: vec![is_negative_name, adjusted_name, axes_name.clone()],
+        output: vec![fixed_axes_name.clone()],
+        ..Default::default()
+    });
+
+    let mut rewritten = node.clone();
+    rewritten.input[1] = fixed_axes_name;
+    new_nodes.push(rewritten);
+    Rewritten::Yes
+}
+
 /// Builds a single-input, single-output node with no attributes.
 fn unary_node(op_type: &str, input: &str, output: &str) -> NodeProto {
     NodeProto {
         op_type: op_type.to_string(),
         input: vec![input.to_string()],
         output: vec![output.to_string()],
+        ..Default::default()
+    }
+}
+
+/// Builds a two-input, single-output node with no attributes.
+fn binary_node(op_type: &str, a: &str, b: &str, output: &str) -> NodeProto {
+    NodeProto {
+        op_type: op_type.to_string(),
+        input: vec![a.to_string(), b.to_string()],
+        output: vec![output.to_string()],
+        ..Default::default()
+    }
+}
+
+/// Builds a `Constant` node holding an `int64` tensor. Unlike
+/// [`scalar_value_attribute`] (used for `ConstantOfShape`'s `"value"`,
+/// which `eval.rs` decodes via a `raw_data`-only path), `eval.rs`'s
+/// `Constant` handler decodes its `"value"` attribute with
+/// [`crate::onnx::eval::get_tensor`], which reads the type-specific
+/// `int64_data` field directly.
+fn int64_constant_node(output: &str, dims: Vec<i64>, values: Vec<i64>) -> NodeProto {
+    NodeProto {
+        op_type: "Constant".to_string(),
+        output: vec![output.to_string()],
+        attribute: vec![AttributeProto {
+            name: "value".to_string(),
+            r#type: AttributeType::Tensor as i32,
+            t: Some(TensorProto {
+                data_type: DataType::Int64 as i32,
+                dims,
+                int64_data: values,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
         ..Default::default()
     }
 }
@@ -408,5 +591,128 @@ mod tests {
         rewrite_unsupported_ops(&mut graph).unwrap();
         assert_eq!(graph.node.len(), 1);
         assert_eq!(graph.node[0].op_type, "Identity");
+    }
+
+    fn reduce_sum_node(data: &str, axes: &str, output: &str) -> NodeProto {
+        NodeProto {
+            op_type: "ReduceSum".to_string(),
+            input: vec![data.to_string(), axes.to_string()],
+            output: vec![output.to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn int64_initializer(name: &str, dims: Vec<i64>, values: Vec<i64>) -> TensorProto {
+        TensorProto {
+            name: name.to_string(),
+            data_type: DataType::Int64 as i32,
+            dims,
+            int64_data: values,
+            ..Default::default()
+        }
+    }
+
+    fn declare_rank(name: &str, rank: usize) -> ValueInfoProto {
+        ValueInfoProto {
+            name: name.to_string(),
+            r#type: Some(crate::onnx::proto::TypeProto {
+                value: Some(type_proto::Value::TensorType(type_proto::Tensor {
+                    elem_type: DataType::Float as i32,
+                    shape: Some(crate::onnx::proto::TensorShapeProto {
+                        dim: vec![Default::default(); rank],
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn data_2x3() -> Tensor {
+        Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), &Device::Cpu).unwrap()
+    }
+
+    // Kokoro's actual case: a constant negative axis (`[-1]`), with data's
+    // rank declared in value_info, takes the cheap constant-resolution
+    // path (a replacement `Constant` node, not a dynamic subgraph).
+    #[test]
+    fn reduce_sum_constant_negative_axis_with_declared_rank_uses_constant_path() {
+        let mut graph = GraphProto {
+            node: vec![reduce_sum_node("data", "axes", "out")],
+            initializer: vec![int64_initializer("axes", vec![1], vec![-1])],
+            value_info: vec![declare_rank("data", 2)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        // The cheap path swaps in a `Constant` node instead of the dynamic
+        // Shape/Size/Less/Add/Where subgraph.
+        assert!(
+            graph
+                .node
+                .iter()
+                .any(|n| n.op_type == "Constant" && !n.output.is_empty())
+        );
+        assert!(!graph.node.iter().any(|n| n.op_type == "Shape"));
+
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data_2x3());
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(out, vec![vec![6.0], vec![15.0]]);
+    }
+
+    // A constant, already non-negative axis must be left untouched.
+    #[test]
+    fn reduce_sum_constant_positive_axis_is_a_no_op() {
+        let mut graph = GraphProto {
+            node: vec![reduce_sum_node("data", "axes", "out")],
+            initializer: vec![int64_initializer("axes", vec![1], vec![1])],
+            value_info: vec![declare_rank("data", 2)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].op_type, "ReduceSum");
+        assert_eq!(graph.node[0].input[1], "axes");
+    }
+
+    // A dynamic (non-constant) axes input containing a negative value must
+    // still be normalized correctly, proving the runtime Shape/Size/Less/
+    // Add/Where subgraph — not just the constant-resolution path — works.
+    #[test]
+    fn reduce_sum_dynamic_negative_axis_is_normalized_at_runtime() {
+        let mut graph = GraphProto {
+            node: vec![reduce_sum_node("data", "axes", "out")],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        // No declared rank and no constant axes forces the dynamic path.
+        assert!(graph.node.iter().any(|n| n.op_type == "Shape"));
+
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data_2x3());
+        inputs.insert(
+            "axes".to_string(),
+            Tensor::from_vec(vec![-1i64], 1, &Device::Cpu).unwrap(),
+        );
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(out, vec![vec![6.0], vec![15.0]]);
     }
 }
