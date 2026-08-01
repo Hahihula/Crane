@@ -418,6 +418,13 @@ fn simple_eval_(
                 let output = input0.broadcast_div(input1)?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260731: implementation lives in ops/modulo.rs.
+            "Mod" => {
+                let input0 = get(&node.input[0])?;
+                let input1 = get(&node.input[1])?;
+                let output = ops::modulo::modulo(node, input0, input1)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Pow" => {
                 let input0 = get(&node.input[0])?;
                 let input1 = get(&node.input[1])?;
@@ -446,6 +453,12 @@ fn simple_eval_(
                 let xs = get(&node.input[0])?;
                 let xs = xs.eq(&xs.zeros_like()?)?;
                 values.insert(node.output[0].clone(), xs);
+            },
+            // Crane Added 20260731: implementation lives in ops/nonzero.rs.
+            "NonZero" => {
+                let input = get(&node.input[0])?;
+                let output = ops::nonzero::nonzero(node, input)?;
+                values.insert(node.output[0].clone(), output);
             },
             "MatMul" => {
                 let input0 = get(&node.input[0])?;
@@ -619,6 +632,14 @@ fn simple_eval_(
                 let bias = bias.reshape(target_shape)?;
                 let xs = xs.broadcast_mul(&weight)?.broadcast_add(&bias)?;
                 values.insert(node.output[0].clone(), xs);
+            },
+            // Crane Added 20260731: implementation lives in ops/layer_norm.rs.
+            "LayerNormalization" => {
+                let x = get(&node.input[0])?;
+                let scale = get(&node.input[1])?;
+                let bias = get_opt(2).transpose()?;
+                let output = ops::layer_norm::layer_norm(node, x, scale, bias)?;
+                values.insert(node.output[0].clone(), output);
             },
             "Squeeze" => {
                 let xs = get(&node.input[0])?;
@@ -803,6 +824,15 @@ fn simple_eval_(
             "Sqrt" => {
                 let xs = get(&node.input[0])?;
                 let output = xs.sqrt()?;
+                values.insert(node.output[0].clone(), output);
+            },
+            // Crane Added 20260731: implementation lives in ops/stft.rs.
+            "STFT" => {
+                let signal = get(&node.input[0])?;
+                let frame_step = get(&node.input[1])?;
+                let window = get_opt(2).transpose()?;
+                let frame_length = get_opt(3).transpose()?;
+                let output = ops::stft::stft(node, signal, frame_step, window, frame_length)?;
                 values.insert(node.output[0].clone(), output);
             },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#Range
@@ -1090,6 +1120,24 @@ fn simple_eval_(
                 let output = input.abs()?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260731: implementation lives in ops/atan.rs.
+            "Atan" => {
+                let input = get(&node.input[0])?;
+                let output = ops::atan::atan(input)?;
+                values.insert(node.output[0].clone(), output);
+            },
+            // Crane Added 20260731: fused atan2(y, x) — produced by the
+            // optimizer's atan2-decomposition fusion pass, not present in
+            // the original ONNX model.
+            "Atan2" => {
+                let y = get(&node.input[0])?;
+                let x = get(&node.input[1])?;
+                let shape = broadcast_shape(y.dims(), x.dims())?;
+                let y = y.broadcast_as(shape.clone())?;
+                let x = x.broadcast_as(shape)?;
+                let output = ops::atan::atan2(&y, &x)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Cos" => {
                 let input = get(&node.input[0])?;
                 let output = input.cos()?;
@@ -1159,6 +1207,12 @@ fn simple_eval_(
             "Floor" => {
                 let input = get(&node.input[0])?;
                 let output = input.floor()?;
+                values.insert(node.output[0].clone(), output);
+            },
+            // https://onnx.ai/onnx/operators/onnx__Round.html
+            "Round" => {
+                let input = get(&node.input[0])?;
+                let output = input.round()?;
                 values.insert(node.output[0].clone(), output);
             },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#Constant
@@ -2749,5 +2803,50 @@ fn to_vec0_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
         t.flatten_all()?.i(0)?.to_vec0::<T>()
     } else {
         t.to_vec0::<T>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, Result};
+
+    use super::{Value, simple_eval};
+    use crate::onnx::proto::{GraphProto, ModelProto, NodeProto, ValueInfoProto};
+
+    #[test]
+    fn round_rounds_half_away_from_zero() -> Result<()> {
+        // ONNX Round: nearest integer per element; candle's round() (and
+        // this evaluator) breaks exact .5 ties away from zero rather than
+        // to even, matching the tie-breaking already used elsewhere in
+        // Crane's ONNX graph rewrites.
+        let model = ModelProto {
+            graph: Some(GraphProto {
+                input: vec![ValueInfoProto {
+                    name: "x".to_string(),
+                    ..Default::default()
+                }],
+                node: vec![NodeProto {
+                    op_type: "Round".to_string(),
+                    input: vec!["x".to_string()],
+                    output: vec!["y".to_string()],
+                    ..Default::default()
+                }],
+                output: vec![ValueInfoProto {
+                    name: "y".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let x = Value::new(&[0.5f32, 2.5, -0.5, -2.5, 1.4, 1.6], &Device::Cpu)?;
+        let outputs = simple_eval(&model, [("x".to_string(), x)].into())?;
+
+        assert_eq!(
+            outputs["y"].to_vec1::<f32>()?,
+            vec![1.0, 3.0, -1.0, -3.0, 1.0, 2.0]
+        );
+        Ok(())
     }
 }
