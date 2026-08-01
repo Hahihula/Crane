@@ -95,6 +95,9 @@ pub struct MRotaryEmbedding {
     cos_table: Tensor,
     sin_table: Tensor,
     rot_dim: usize,
+    /// Doubled mrope_section (`[22, 22, 20]` for Qwen 3.5). Cached for the
+    /// vision-path gather.
+    mrope_section_doubled: Vec<usize>,
 }
 
 impl MRotaryEmbedding {
@@ -124,17 +127,108 @@ impl MRotaryEmbedding {
         let cos_table = freqs.cos()?.contiguous()?;
         let sin_table = freqs.sin()?.contiguous()?;
 
+        let mrope_section_doubled: Vec<usize> =
+            cfg.rope_parameters.mrope_section.iter().map(|s| s * 2).collect();
+
         Ok(Self {
             cos_table,
             sin_table,
             rot_dim,
+            mrope_section_doubled,
         })
     }
 
-    /// Slice cos/sin for positions `[start, start+seq_len)`.
+    /// Slice cos/sin for positions `[start, start+seq_len)`. Used by the
+    /// text-only path where all three axes share the same position.
     pub fn cos_sin(&self, start: usize, seq_len: usize) -> Result<(Tensor, Tensor)> {
         let cos = self.cos_table.narrow(0, start, seq_len)?;
         let sin = self.sin_table.narrow(0, start, seq_len)?;
+        Ok((cos, sin))
+    }
+
+    /// Build cos/sin for a sequence with **per-token 3D position ids** (vision).
+    ///
+    /// `position_ids` has shape `[3, S]` on the same device as the tables:
+    /// row 0 = temporal position (T), row 1 = height position (H),
+    /// row 2 = width position (W). Each row is gathered against
+    /// `cos_table` / `sin_table` to produce a `[S, rot_dim/2]` per-axis tensor;
+    /// the three per-axis tensors are then combined under the interleaved
+    /// MRoPE scheme using `mrope_section` (see HF's
+    /// `apply_multimodal_rotary_pos_emb` for the reference).
+    ///
+    /// Returns `(cos, sin)` of shape `[S, rot_dim/2]`, ready to feed into
+    /// [`apply_mrope`] (candle's `rotary_emb::rope` pairs each entry with
+    /// its `i + rot_dim/2` counterpart inside the rotary slice, matching the
+    /// HF behavior of the `q * cos + rotate_half(q) * sin` formulation when
+    /// the cos/sin tables are not pair-duplicated).
+    pub fn cos_sin_with_position_ids(
+        &self,
+        position_ids: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let (_three, seq_len) = position_ids.dims2()?;
+        let half_rot = self.rot_dim / 2;
+
+        // Gather one cos/sin slice per axis. position_ids must be U32 (candle's
+        // index_select requirement); the caller (vlm.rs::build_position_ids)
+        // builds the tensor from a `Vec<u32>`.
+        let mut per_axis_cos: Vec<Tensor> = Vec::with_capacity(3);
+        let mut per_axis_sin: Vec<Tensor> = Vec::with_capacity(3);
+        for axis in 0..3 {
+            let ids = position_ids.narrow(0, axis, 1)?.squeeze(0)?;
+            let cos = self.cos_table.index_select(&ids, 0)?; // [S, half_rot]
+            let sin = self.sin_table.index_select(&ids, 0)?;
+            per_axis_cos.push(cos);
+            per_axis_sin.push(sin);
+        }
+
+        // Interleaved MRoPE, matching HF `Qwen3_5TextRotaryEmbedding
+        // .apply_interleaved_mrope`: this is an INDEX-interleave, not a
+        // contiguous chunking. Start from the T axis everywhere, then let H
+        // claim columns `slice(1, 3*section[1], 3)` and W claim columns
+        // `slice(2, 3*section[2], 3)` — each axis keeps the frequency index of
+        // the column it lands in.
+        //
+        // For `mrope_section = [11, 11, 10]` (half_rot = 32) the ownership is
+        //   H -> 1, 4, 7, ..., 31   (11 columns)
+        //   W -> 2, 5, 8, ..., 29   (10 columns)
+        //   T -> 0, 3, 6, ..., 30   (the remaining 11)
+        // i.e. column i is served by axis (i % 3) until each section runs out.
+        //
+        // Note this is a no-op when T == H == W (the text-only case): all three
+        // gathers are identical, so the result reduces to the plain rope table.
+        let mut axis_of = vec![0usize; half_rot];
+        for (dim, offset) in [(1usize, 1usize), (2usize, 2usize)] {
+            let section = self.mrope_section_doubled[dim] / 2;
+            let limit = (section * 3).min(half_rot);
+            let mut i = offset;
+            while i < limit {
+                axis_of[i] = dim;
+                i += 3;
+            }
+        }
+
+        // Combine with per-axis 0/1 masks so the whole thing stays a couple of
+        // fused elementwise ops instead of `half_rot` narrow/cat calls.
+        let dtype = self.cos_table.dtype();
+        let device = self.cos_table.device();
+        let mut cos = Tensor::zeros((seq_len, half_rot), dtype, device)?;
+        let mut sin = Tensor::zeros((seq_len, half_rot), dtype, device)?;
+        for axis in 0..3 {
+            let mask: Vec<f32> = axis_of
+                .iter()
+                .map(|a| if *a == axis { 1.0 } else { 0.0 })
+                .collect();
+            if mask.iter().all(|v| *v == 0.0) {
+                continue;
+            }
+            let mask = Tensor::from_vec(mask, (1, half_rot), device)?.to_dtype(dtype)?;
+            cos = (cos + per_axis_cos[axis].broadcast_mul(&mask)?)?;
+            sin = (sin + per_axis_sin[axis].broadcast_mul(&mask)?)?;
+        }
+
+        let cos = cos.contiguous()?;
+        let sin = sin.contiguous()?;
+        debug_assert_eq!(cos.dims(), &[seq_len, half_rot]);
         Ok((cos, sin))
     }
 
