@@ -71,6 +71,12 @@ pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
                     new_nodes.push(node.clone());
                 }
             },
+            "ReduceMean" => {
+                if let Rewritten::No = fix_reduce_mean_axes_input(node, &constants, &mut new_nodes)
+                {
+                    new_nodes.push(node.clone());
+                }
+            },
             _ => new_nodes.push(node.clone()),
         }
     }
@@ -302,6 +308,55 @@ fn fix_reduce_sum_negative_axes(
 
     let mut rewritten = node.clone();
     rewritten.input[1] = fixed_axes_name;
+    new_nodes.push(rewritten);
+    Rewritten::Yes
+}
+
+/// Rewrites a `ReduceMean` node passing `axes` as an opset-18+ input into
+/// the older attribute form, working around `eval.rs`'s `ReduceMean`
+/// reading *only* the `axes` attribute and never an `axes` input at all —
+/// an axes-as-input node silently reduces over every axis instead of the
+/// intended ones.
+///
+/// Unlike [`fix_reduce_sum_negative_axes`], this can only resolve `axes`
+/// to a compile-time constant: `eval.rs`'s `ReduceMean` has no path to
+/// accept a non-attribute axes value, so a dynamic-subgraph fallback
+/// (which still has to produce *some* form eval.rs reads) isn't possible
+/// here — that's inherent to targeting unmodified `eval.rs`, not a bug in
+/// this rewrite. Negative entries in `axes` don't need normalizing before
+/// becoming the attribute: `eval.rs`'s `ReduceMean` already normalizes
+/// negative axes in its attribute-reading path.
+///
+/// Known limitation inherited from `eval.rs`, not fixed here: `eval.rs`'s
+/// `ReduceMean` never reads `noop_with_empty_axes` at all, so a node with
+/// no axes input/attribute and `noop_with_empty_axes=1` still incorrectly
+/// reduces every axis instead of being a no-op. Not fixed because doing so
+/// means rewriting an absent/empty-axes node into an `Identity`, and
+/// Kokoro's export always passes non-empty axes as an input for every one
+/// of its `ReduceMean` nodes, so the gap doesn't manifest in practice.
+///
+/// Returns [`Rewritten::No`] (leaving `node` untouched) when `axes` is
+/// absent, empty, or not a compile-time constant.
+fn fix_reduce_mean_axes_input(
+    node: &NodeProto,
+    constants: &HashMap<String, Vec<i64>>,
+    new_nodes: &mut Vec<NodeProto>,
+) -> Rewritten {
+    let Some(axes_name) = node.input.get(1).filter(|name| !name.is_empty()) else {
+        return Rewritten::No;
+    };
+    let Some(axes_values) = constants.get(axes_name) else {
+        return Rewritten::No;
+    };
+
+    let mut rewritten = node.clone();
+    rewritten.input.truncate(1);
+    rewritten.attribute.push(AttributeProto {
+        name: "axes".to_string(),
+        r#type: AttributeType::Ints as i32,
+        ints: axes_values.clone(),
+        ..Default::default()
+    });
     new_nodes.push(rewritten);
     Rewritten::Yes
 }
@@ -714,5 +769,105 @@ mod tests {
         let values = run_graph(graph, inputs);
         let out = values.get("out").unwrap().to_vec2::<f32>().unwrap();
         assert_eq!(out, vec![vec![6.0], vec![15.0]]);
+    }
+
+    fn reduce_mean_node(data: &str, axes: Option<&str>, output: &str) -> NodeProto {
+        let mut input = vec![data.to_string()];
+        if let Some(axes) = axes {
+            input.push(axes.to_string());
+        }
+        NodeProto {
+            op_type: "ReduceMean".to_string(),
+            input,
+            output: vec![output.to_string()],
+            ..Default::default()
+        }
+    }
+
+    // Kokoro's actual case: a constant positive axes input must be
+    // converted to the attribute form eval.rs's ReduceMean actually reads.
+    #[test]
+    fn reduce_mean_constant_positive_axis_input_becomes_attribute() {
+        let mut graph = GraphProto {
+            node: vec![reduce_mean_node("data", Some("axes"), "out")],
+            initializer: vec![int64_initializer("axes", vec![1], vec![1])],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].input.len(), 1);
+        assert!(graph.node[0].attribute.iter().any(|a| a.name == "axes"));
+
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data_2x3());
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(out, vec![vec![2.0], vec![5.0]]);
+    }
+
+    // A constant negative axes input must also convert correctly — eval.rs
+    // already normalizes negative axes once they're in the attribute form.
+    #[test]
+    fn reduce_mean_constant_negative_axis_input_becomes_attribute() {
+        let mut graph = GraphProto {
+            node: vec![reduce_mean_node("data", Some("axes"), "out")],
+            initializer: vec![int64_initializer("axes", vec![1], vec![-1])],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data_2x3());
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(out, vec![vec![2.0], vec![5.0]]);
+    }
+
+    // A ReduceMean with no axes input at all (attribute-only form, or a
+    // deliberate full reduction) must be left untouched.
+    #[test]
+    fn reduce_mean_without_axes_input_is_a_no_op() {
+        let mut graph = GraphProto {
+            node: vec![reduce_mean_node("data", None, "out")],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].input.len(), 1);
+        assert!(graph.node[0].attribute.is_empty());
+    }
+
+    // A non-constant axes input can't be resolved at rewrite time, since
+    // eval.rs's ReduceMean has no path to accept axes as anything but an
+    // attribute — the node must be left untouched (conservative, documented
+    // limitation) rather than guessing.
+    #[test]
+    fn reduce_mean_non_constant_axes_input_is_a_no_op() {
+        let mut graph = GraphProto {
+            node: vec![reduce_mean_node("data", Some("axes"), "out")],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        assert_eq!(graph.node.len(), 1);
+        assert_eq!(graph.node[0].input, vec!["data".to_string(), "axes".to_string()]);
     }
 }
