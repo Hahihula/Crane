@@ -28,6 +28,7 @@ pub enum ModelType {
     Gemma4VL,
     HunyuanDense,
     Minicpm5,
+    MinicpmV46,
     Qwen25,
     Qwen3,
     Qwen3_5,
@@ -52,6 +53,7 @@ impl ModelType {
             // Bare "minicpm" is aliased to MiniCPM5 for now, since it's the
             // only OpenBMB family member Crane supports; re-scope this once
             // MiniCPM-o/MiniCPM-V land as their own `ModelType`s.
+            "minicpmv46" | "minicpmv4.6" | "minicpmv4_6" | "minicpm-v4.6" | "minicpm-v-4.6" | "minicpmv" => Self::MinicpmV46,
             "minicpm5" | "minicpm-5" | "minicpm_5" | "minicpm" => Self::Minicpm5,
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
             "qwen3" => Self::Qwen3,
@@ -76,6 +78,7 @@ impl ModelType {
             Self::Gemma4VL => "gemma4_vl",
             Self::HunyuanDense => "hunyuan",
             Self::Minicpm5 => "minicpm5",
+            Self::MinicpmV46 => "minicpmv4_6",
             Self::Qwen25 => "qwen25",
             Self::Qwen3 => "qwen3",
             Self::Qwen3_5 => "qwen3_5",
@@ -91,7 +94,7 @@ impl ModelType {
     /// Whether this model type is a vision-language model.
     #[must_use]
     pub fn is_vlm(&self) -> bool {
-        matches!(self, Self::PaddleOcrVl | Self::Gemma4VL | Self::Qwen3_5VL)
+        matches!(self, Self::PaddleOcrVl | Self::Gemma4VL | Self::Qwen3_5VL | Self::MinicpmV46)
     }
 
     /// Whether this model type is a TTS model.
@@ -181,6 +184,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                         ModelType::Qwen3_5
                     };
                 }
+                "minicpmv4_6" | "minicpmv4.6" => return ModelType::MinicpmV46,
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
                 "qwen3_asr" | "qwen3asr" => return ModelType::Qwen3ASR,
                 "style_text_to_speech_2" => return ModelType::Kokoro,
@@ -202,6 +206,9 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 if a.contains("gemma4") {
                     return ModelType::Gemma4;
+                }
+                if a.contains("minicpmv4_6") {
+                    return ModelType::MinicpmV46;
                 }
                 if a.contains("qwen3ttsforconditional") || a.contains("qwen3_tts") {
                     return ModelType::Qwen3TTS;
@@ -260,6 +267,11 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::Gemma4
     } else if path_lower.contains("hunyuan") {
         ModelType::HunyuanDense
+    } else if path_lower.contains("minicpm-v") || path_lower.contains("minicpmv") {
+        // Checked before the bare "minicpm" branch below — "MiniCPM-V-4.6"
+        // contains "minicpm" too, and would otherwise be mis-claimed by the
+        // Minicpm5 fallback.
+        ModelType::MinicpmV46
     } else if path_lower.contains("minicpm") {
         // MiniCPM5's config.json is a plain `LlamaForCausalLM`
         // (model_type/architectures give no distinctive signal), so this
@@ -404,6 +416,9 @@ pub fn create_backend(
         }
         ModelType::Qwen3_5VL => {
             anyhow::bail!("Qwen3_5-VL is a VLM model — use the Qwen3_5-VL endpoint instead of create_backend()")
+        }
+        ModelType::MinicpmV46 => {
+            anyhow::bail!("MiniCPM-V-4.6 is a VLM model — use the MiniCPM-V-4.6 endpoint instead of create_backend()")
         }
         ModelType::Qwen3TTS => {
             anyhow::bail!("Qwen3-TTS is a TTS model — use create_tts() instead of create_backend()")
@@ -606,6 +621,45 @@ mod tests {
     }
 
     #[test]
+    fn model_type_from_str_minicpm_v46_variants() {
+        assert_eq!(ModelType::from_str("minicpmv46"), ModelType::MinicpmV46);
+        assert_eq!(ModelType::from_str("minicpmv4.6"), ModelType::MinicpmV46);
+        assert_eq!(ModelType::from_str("minicpmv4_6"), ModelType::MinicpmV46);
+        assert_eq!(ModelType::from_str("minicpm-v4.6"), ModelType::MinicpmV46);
+        assert_eq!(ModelType::from_str("MINICPMV4_6"), ModelType::MinicpmV46);
+    }
+
+    #[test]
+    fn model_type_is_vlm_includes_minicpm_v46() {
+        assert!(ModelType::MinicpmV46.is_vlm());
+        assert!(!ModelType::Minicpm5.is_vlm());
+    }
+
+    #[test]
+    fn detect_from_config_json_model_type_minicpmv4_6() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "minicpmv4_6"}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::MinicpmV46);
+    }
+
+    #[test]
+    fn detect_from_config_json_architectures_minicpmv4_6() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"architectures": ["MiniCPMV4_6ForConditionalGeneration"]}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::MinicpmV46);
+    }
+
+    #[test]
+    fn detect_path_heuristic_minicpm_v46_not_claimed_by_minicpm5() {
+        let result = detect_model_type("/models/MiniCPM-V-4.6");
+        assert_eq!(result, ModelType::MinicpmV46);
+    }
+
+    #[test]
     fn model_type_from_str_voxtral_variants() {
         assert_eq!(ModelType::from_str("voxtral_tts"), ModelType::VoxtralTTS);
         assert_eq!(ModelType::from_str("voxtral-tts"), ModelType::VoxtralTTS);
@@ -659,6 +713,7 @@ mod tests {
         assert_eq!(ModelType::Auto.display_name(), "auto");
         assert_eq!(ModelType::HunyuanDense.display_name(), "hunyuan");
         assert_eq!(ModelType::Minicpm5.display_name(), "minicpm5");
+        assert_eq!(ModelType::MinicpmV46.display_name(), "minicpmv4_6");
         assert_eq!(ModelType::Qwen25.display_name(), "qwen25");
         assert_eq!(ModelType::Qwen3.display_name(), "qwen3");
         assert_eq!(ModelType::Qwen3ASR.display_name(), "qwen3_asr");

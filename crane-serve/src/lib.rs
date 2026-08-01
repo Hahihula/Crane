@@ -23,7 +23,7 @@ use engine::model_factory::{ModelFormat, ModelType};
 use engine::{EngineHandle, InferenceEngine, MemoryConfig};
 use handlers::asr::AsrTranscribeRequest;
 use handlers::tts::TtsGenerateRequest;
-use handlers::vlm::{Gemma4VlmRequest, Qwen3_5VlmRequest, VlmRequest};
+use handlers::vlm::{Gemma4VlmRequest, MinicpmVVlmRequest, Qwen3_5VlmRequest, VlmRequest};
 use openai_api::ErrorResponse;
 
 #[derive(Parser, Debug, Clone)]
@@ -72,6 +72,7 @@ pub struct AppState {
     pub vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>>,
     pub gemma4_vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>>,
     pub qwen3_5_vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>>,
+    pub minicpm_v_vlm_tx: Option<tokio::sync::mpsc::UnboundedSender<MinicpmVVlmRequest>>,
     pub tts_tx: Option<tokio::sync::mpsc::UnboundedSender<TtsGenerateRequest>>,
     /// Channel to the ASR engine thread; `None` unless an ASR model is loaded.
     pub asr_tx: Option<tokio::sync::mpsc::UnboundedSender<AsrTranscribeRequest>>,
@@ -338,6 +339,7 @@ pub async fn run(args: Args) -> Result<()> {
         vlm_tx_opt,
         gemma4_vlm_tx_opt,
         qwen3_5_vlm_tx_opt,
+        minicpm_v_vlm_tx_opt,
         tts_tx_opt,
         asr_tx_opt,
     ): (
@@ -348,6 +350,7 @@ pub async fn run(args: Args) -> Result<()> {
         Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>>,
+        Option<tokio::sync::mpsc::UnboundedSender<MinicpmVVlmRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<TtsGenerateRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<AsrTranscribeRequest>>,
     ) = if is_tts {
@@ -396,7 +399,7 @@ pub async fn run(args: Args) -> Result<()> {
             });
         let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
         let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, None, Some(tts_tx), None)
+        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, Some(tts_tx), None)
     } else if is_asr {
         info!("Loading ASR model ({:?}) from: {}", resolved_type, args.model_path);
         let model_path_clone = args.model_path.clone();
@@ -443,7 +446,7 @@ pub async fn run(args: Args) -> Result<()> {
             });
         let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
         let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, Some(asr_tx))
+        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, None, Some(asr_tx))
     } else if is_vlm {
         let use_cpu = args.cpu || {
             #[cfg(feature = "cuda")]
@@ -465,7 +468,44 @@ pub async fn run(args: Args) -> Result<()> {
         let mut vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>> = None;
         let mut gemma4_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>> = None;
         let mut qwen3_5_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>> = None;
-        if resolved_type == engine::model_factory::ModelType::Qwen3_5VL {
+        let mut minicpm_v_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<MinicpmVVlmRequest>> = None;
+        if resolved_type == engine::model_factory::ModelType::MinicpmV46 {
+            info!("Loading MiniCPM-V-4.6 model from: {}", args.model_path);
+            let model_path_clone = args.model_path.clone();
+            let device_clone = device.clone();
+            let dtype_clone = dtype;
+            let (mcpv_tx, mut mcpv_rx) = tokio::sync::mpsc::unbounded_channel::<MinicpmVVlmRequest>();
+            std::thread::Builder::new().name("minicpm-v-vlm-engine".into()).spawn(move || {
+                use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
+                let mut vlm = match MinicpmV46VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::error!("Failed to load MiniCPM-V-4.6 model: {e}");
+                        return;
+                    }
+                };
+                info!("MiniCPM-V-4.6 engine thread started");
+                while let Some(req) = mcpv_rx.blocking_recv() {
+                    let MinicpmVVlmRequest { img_path, text_prompt, max_tokens, tx } = req;
+                    let res = (|| -> anyhow::Result<String> {
+                        let img = image::open(&img_path)?;
+                        let cfg = VlGenerationConfig {
+                            max_new_tokens: max_tokens,
+                            ..Default::default()
+                        };
+                        let started = std::time::Instant::now();
+                        let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
+                        tracing::info!("MiniCPM-V-4.6 request completed in {:?}", started.elapsed());
+                        Ok(out)
+                    })();
+                    if let Err(ref e) = res {
+                        tracing::error!("MiniCPM-V-4.6 request failed: {e}");
+                    }
+                    let _ = tx.send(res.map_err(|e| e.to_string()));
+                }
+            }).expect("Failed to spawn MiniCPM-V-4.6 thread");
+            minicpm_v_vlm_tx_opt_inner = Some(mcpv_tx);
+        } else if resolved_type == engine::model_factory::ModelType::Qwen3_5VL {
             info!("Loading Qwen 3.5 VL model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let device_clone = device.clone();
@@ -597,7 +637,7 @@ pub async fn run(args: Args) -> Result<()> {
         }
         info!("VLM model routing established (type: {:?})", resolved_type);
         let eos_id = tokenizer.token_to_id("</s>").or_else(|| tokenizer.token_to_id("<end_of_turn>")) .or_else(|| tokenizer.token_to_id("<|end_of_sentence|>")) .unwrap_or(1);
-        (None, tokenizer, vec![eos_id], chat_template, vlm_tx_opt_inner, gemma4_vlm_tx_opt_inner, qwen3_5_vlm_tx_opt_inner, None, None)
+        (None, tokenizer, vec![eos_id], chat_template, vlm_tx_opt_inner, gemma4_vlm_tx_opt_inner, qwen3_5_vlm_tx_opt_inner, minicpm_v_vlm_tx_opt_inner, None, None)
     } else {
         // Only one of the TTS/ASR/VLM/LLM branches runs per process, so each is
         // the sole long-lived consumer of candle's process-wide rayon pool.
@@ -616,7 +656,7 @@ pub async fn run(args: Args) -> Result<()> {
         let (engine, handle) = InferenceEngine::new(backend, args.max_concurrent, args.decode_tokens_per_seq, memory_config);
         std::thread::Builder::new().name("inference-engine".into()).spawn(move || engine.run()).expect("Failed to spawn engine thread");
         info!("Inference engine started (max_concurrent={}, decode_tokens_per_seq={})", args.max_concurrent, args.decode_tokens_per_seq);
-        (Some(handle), tokenizer, eos_token_id, chat_template, None, None, None, None, None)
+        (Some(handle), tokenizer, eos_token_id, chat_template, None, None, None, None, None, None)
     };
 
     let model_name = args.model_name.clone().unwrap_or_else(|| {
@@ -636,6 +676,7 @@ pub async fn run(args: Args) -> Result<()> {
         vlm_tx: vlm_tx_opt,
         gemma4_vlm_tx: gemma4_vlm_tx_opt,
         qwen3_5_vlm_tx: qwen3_5_vlm_tx_opt,
+        minicpm_v_vlm_tx: minicpm_v_vlm_tx_opt,
         tts_tx: tts_tx_opt,
         asr_tx: asr_tx_opt,
         model_path: args.model_path.clone(),
