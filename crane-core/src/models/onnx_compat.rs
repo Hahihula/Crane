@@ -77,6 +77,7 @@ pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
                     new_nodes.push(node.clone());
                 }
             },
+            "CumSum" => fix_int_cumsum(node, graph, &mut new_nodes),
             _ => new_nodes.push(node.clone()),
         }
     }
@@ -283,33 +284,53 @@ fn fix_reduce_sum_negative_axes(
         }
     }
 
-    let zero_name = format!("{output}__onnx_compat_zero_axis");
-    new_nodes.push(int64_constant_node(&zero_name, vec![], vec![0]));
-
-    let shape_name = format!("{output}__onnx_compat_data_shape");
-    new_nodes.push(unary_node("Shape", data, &shape_name));
-
-    let rank_name = format!("{output}__onnx_compat_rank");
-    new_nodes.push(unary_node("Size", &shape_name, &rank_name));
-
-    let is_negative_name = format!("{output}__onnx_compat_axes_negative");
-    new_nodes.push(binary_node("Less", axes_name, &zero_name, &is_negative_name));
-
-    let adjusted_name = format!("{output}__onnx_compat_axes_adjusted");
-    new_nodes.push(binary_node("Add", axes_name, &rank_name, &adjusted_name));
-
-    let fixed_axes_name = format!("{output}__onnx_compat_axes_fixed");
-    new_nodes.push(NodeProto {
-        op_type: "Where".to_string(),
-        input: vec![is_negative_name, adjusted_name, axes_name.clone()],
-        output: vec![fixed_axes_name.clone()],
-        ..Default::default()
-    });
-
+    let fixed_axes_name =
+        push_dynamic_axis_normalization(data, axes_name, output, "axes", new_nodes);
     let mut rewritten = node.clone();
     rewritten.input[1] = fixed_axes_name;
     new_nodes.push(rewritten);
     Rewritten::Yes
+}
+
+/// Pushes nodes computing `axis < 0 ? axis + rank : axis` at runtime —
+/// `rank` via `Size(Shape(data))` — and returns the name of the resulting
+/// non-negative axis/axes tensor. Shared by every rewrite that needs to
+/// normalize a negative axis input dynamically, since `data`'s rank isn't
+/// known until the graph actually runs.
+///
+/// `label` only distinguishes this call site's intermediate tensor names
+/// from another rewrite's in the same graph (e.g. `"axes"` vs `"axis"`);
+/// it has no effect on the computation.
+fn push_dynamic_axis_normalization(
+    data: &str,
+    axis_name: &str,
+    output: &str,
+    label: &str,
+    new_nodes: &mut Vec<NodeProto>,
+) -> String {
+    let zero_name = format!("{output}__onnx_compat_zero_{label}");
+    new_nodes.push(int64_constant_node(&zero_name, vec![], vec![0]));
+
+    let shape_name = format!("{output}__onnx_compat_data_shape_{label}");
+    new_nodes.push(unary_node("Shape", data, &shape_name));
+
+    let rank_name = format!("{output}__onnx_compat_rank_{label}");
+    new_nodes.push(unary_node("Size", &shape_name, &rank_name));
+
+    let is_negative_name = format!("{output}__onnx_compat_{label}_negative");
+    new_nodes.push(binary_node("Less", axis_name, &zero_name, &is_negative_name));
+
+    let adjusted_name = format!("{output}__onnx_compat_{label}_adjusted");
+    new_nodes.push(binary_node("Add", axis_name, &rank_name, &adjusted_name));
+
+    let fixed_name = format!("{output}__onnx_compat_{label}_fixed");
+    new_nodes.push(NodeProto {
+        op_type: "Where".to_string(),
+        input: vec![is_negative_name, adjusted_name, axis_name.to_string()],
+        output: vec![fixed_name.clone()],
+        ..Default::default()
+    });
+    fixed_name
 }
 
 /// Rewrites a `ReduceMean` node passing `axes` as an opset-18+ input into
@@ -359,6 +380,50 @@ fn fix_reduce_mean_axes_input(
     });
     new_nodes.push(rewritten);
     Rewritten::Yes
+}
+
+/// Rewrites every `CumSum` node to fix two independent gaps in `eval.rs`'s
+/// `CumSum`, unconditionally (there's no "already fine" case worth
+/// detecting, unlike this module's other rewrites):
+///
+/// - `candle_core::Tensor::cumsum` is a matmul-based implementation that
+///   only supports floating-point dtypes, so an int64 `data` input fails
+///   outright. Wrapping `data` in `Cast(to=Double)` before, and back to
+///   its original declared dtype (or `Double`, if undeclared) after,
+///   routes every dtype through the same working float path. `Double` (not
+///   `Float`) matches the precision the dropped `ops/cumsum.rs`
+///   implementation used, since `Float`/f32 loses exactness above 2^24 —
+///   plausible for cumulative sums longer than a couple thousand terms.
+/// - `axis` is an `eval.rs` *input* (not an attribute), cast via
+///   `to_dtype(DType::U32)` then to `usize` with no negative-axis
+///   normalization at all — the same wraparound bug
+///   [`fix_reduce_sum_negative_axes`] fixes for `ReduceSum`. Always
+///   normalized dynamically via [`push_dynamic_axis_normalization`], since
+///   (unlike `ReduceSum`) there's no meaningfully cheaper constant-
+///   resolution path worth adding just for this.
+///
+/// `exclusive`/`reverse` attributes, if present, are preserved verbatim on
+/// the rewritten node — this rewrite only touches `data` and `axis`.
+fn fix_int_cumsum(node: &NodeProto, graph: &GraphProto, new_nodes: &mut Vec<NodeProto>) {
+    let data = &node.input[0];
+    let axis = &node.input[1];
+    let output = &node.output[0];
+
+    let cast_in_name = format!("{output}__onnx_compat_cumsum_in");
+    new_nodes.push(cast_node(data, &cast_in_name, DataType::Double));
+
+    let fixed_axis = push_dynamic_axis_normalization(data, axis, output, "axis", new_nodes);
+
+    let cumsum_out_name = format!("{output}__onnx_compat_cumsum_out");
+    let mut rewritten = node.clone();
+    rewritten.input = vec![cast_in_name, fixed_axis];
+    rewritten.output = vec![cumsum_out_name.clone()];
+    new_nodes.push(rewritten);
+
+    let back_dtype = declared_dtype(graph, data)
+        .and_then(|dt| DataType::try_from(dt).ok())
+        .unwrap_or(DataType::Double);
+    new_nodes.push(cast_node(&cumsum_out_name, output, back_dtype));
 }
 
 /// Builds a single-input, single-output node with no attributes.
@@ -869,5 +934,123 @@ mod tests {
 
         assert_eq!(graph.node.len(), 1);
         assert_eq!(graph.node[0].input, vec!["data".to_string(), "axes".to_string()]);
+    }
+
+    fn cumsum_node(
+        data: &str,
+        axis: &str,
+        output: &str,
+        exclusive: Option<i64>,
+        reverse: Option<i64>,
+    ) -> NodeProto {
+        let mut attribute = vec![];
+        if let Some(value) = exclusive {
+            attribute.push(AttributeProto {
+                name: "exclusive".to_string(),
+                r#type: AttributeType::Int as i32,
+                i: value,
+                ..Default::default()
+            });
+        }
+        if let Some(value) = reverse {
+            attribute.push(AttributeProto {
+                name: "reverse".to_string(),
+                r#type: AttributeType::Int as i32,
+                i: value,
+                ..Default::default()
+            });
+        }
+        NodeProto {
+            op_type: "CumSum".to_string(),
+            input: vec![data.to_string(), axis.to_string()],
+            output: vec![output.to_string()],
+            attribute,
+            ..Default::default()
+        }
+    }
+
+    // Kokoro's actual case: int64 data with a negative axis. Both bugs
+    // (float-only cumsum, un-normalized negative axis) are exercised at
+    // once, and the output must come back as int64, not float.
+    #[test]
+    fn cumsum_int64_negative_axis_produces_correct_int64_output() {
+        let mut graph = GraphProto {
+            node: vec![cumsum_node("data", "axis", "out", None, None)],
+            value_info: vec![declare_tensor_type("data", DataType::Int64)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let data = Tensor::from_vec(vec![1i64, 2, 3, 4, 5, 6], (2, 3), &Device::Cpu).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data);
+        inputs.insert("axis".to_string(), Tensor::new(-1i64, &Device::Cpu).unwrap());
+
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap();
+        assert_eq!(out.dtype(), candle_core::DType::I64);
+        assert_eq!(out.to_vec2::<i64>().unwrap(), vec![vec![1, 3, 6], vec![4, 9, 15]]);
+    }
+
+    // Float data with a positive axis must round-trip through the Double
+    // intermediate cast without changing the result or the output dtype.
+    #[test]
+    fn cumsum_float_data_round_trips_through_double_precision() {
+        let mut graph = GraphProto {
+            node: vec![cumsum_node("data", "axis", "out", None, None)],
+            value_info: vec![declare_tensor_type("data", DataType::Float)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let data =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), &Device::Cpu).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data);
+        inputs.insert("axis".to_string(), Tensor::new(1i64, &Device::Cpu).unwrap());
+
+        let values = run_graph(graph, inputs);
+        let out = values.get("out").unwrap();
+        assert_eq!(out.dtype(), candle_core::DType::F32);
+        assert_eq!(out.to_vec2::<f32>().unwrap(), vec![vec![1.0, 3.0, 6.0], vec![
+            4.0, 9.0, 15.0
+        ]]);
+    }
+
+    // An `exclusive`/`reverse` attribute must survive the rewrite verbatim
+    // rather than being silently dropped — eval.rs still rejects
+    // `exclusive != 0` explicitly, so the error proves the attribute made
+    // it onto the rewritten node instead of being lost.
+    #[test]
+    fn cumsum_exclusive_attribute_is_preserved_and_still_rejected() {
+        let mut graph = GraphProto {
+            node: vec![cumsum_node("data", "axis", "out", Some(1), None)],
+            output: vec![ValueInfoProto {
+                name: "out".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rewrite_unsupported_ops(&mut graph).unwrap();
+
+        let data = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], 3, &Device::Cpu).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), data);
+        inputs.insert("axis".to_string(), Tensor::new(0i64, &Device::Cpu).unwrap());
+
+        let model = ModelProto {
+            graph: Some(graph),
+            ..Default::default()
+        };
+        let err = crate::onnx::simple_eval(&model, inputs).unwrap_err();
+        assert!(err.to_string().contains("exclusive"));
     }
 }
