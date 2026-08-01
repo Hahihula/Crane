@@ -78,4 +78,6 @@ path = "src/onnx_probe.rs"
 [features]
 default = []
 onnx = ["crane/onnx", "crane-core/onnx"]
+metal = ["crane/metal", "crane-core/metal"]
+accelerate = ["crane/accelerate", "crane-core/accelerate"]
 cuda = ["crane/cuda", "crane-core/cuda"]

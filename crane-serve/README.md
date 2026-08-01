@@ -81,8 +81,8 @@ cargo build -p crane-serve --release
 # CUDA
 cargo build -p crane-serve --release --features "cuda"
 
-# macOS Metal (auto-enabled by target)
-cargo build -p crane-serve --release
+# macOS Metal GPU + Accelerate CPU math
+cargo build -p crane-serve --release --features "metal,accelerate"
 
 # Start the TTS server (auto-detected from config.json)
 ./target/release/crane \
@@ -357,8 +357,8 @@ cargo build -p crane-serve --release
 # CUDA
 cargo build -p crane-serve --release --features "cuda"
 
-# macOS Metal (auto-enabled by target)
-cargo build -p crane-serve --release
+# macOS Metal GPU + Accelerate CPU math
+cargo build -p crane-serve --release --features "metal,accelerate"
 ```
 
 **3. Start the server:**
@@ -479,8 +479,8 @@ cargo build -p crane-serve --release
 # CUDA
 cargo build -p crane-serve --release --features "cuda"
 
-# macOS Metal (auto-enabled by target)
-cargo build -p crane-serve --release
+# macOS Metal GPU + Accelerate CPU math
+cargo build -p crane-serve --release --features "metal,accelerate"
 ```
 
 **3. Start the server:**

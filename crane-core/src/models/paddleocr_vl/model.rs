@@ -1,6 +1,8 @@
 use anyhow::{Error as E, Result};
 use candle_core::{DType, Device, Tensor, D};
 use candle_nn::VarBuilder;
+// TODO(candle-transformers-removal): Full PaddleOCR-VL model dependency; see
+// CANDLE_TRANSFORMERS.md.
 use candle_transformers::models::paddleocr_vl::{Config, PaddleOCRVLModel};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::path::Path;

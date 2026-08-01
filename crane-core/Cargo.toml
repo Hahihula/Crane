@@ -16,6 +16,8 @@ ahash = "0.8"
 anyhow = "1.0.97"
 
 candle-nn = { workspace = true }
+# TODO(candle-transformers-removal): See CANDLE_TRANSFORMERS.md for the
+# remaining model/component and generation-helper call sites.
 candle-transformers = { workspace = true }
 clap = { version = "4.5.32", features = ["derive"] }
 hf-hub = "0.5.0"
@@ -34,6 +36,7 @@ zip = "8"
 
 
 intel-mkl-src = { version = "0.8.1", optional = true }
+accelerate-src = { version = "0.3.2", optional = true }
 rustfft = "6"
 image = "0.25"
 half = "2"
@@ -52,6 +55,11 @@ candle-core = { workspace = true, features = ["accelerate"] }
 candle-core = { workspace = true }
 
 [features]
+metal = [
+    "candle-core/metal",
+    "candle-nn/metal",
+    "candle-transformers/metal",
+]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
@@ -65,7 +73,12 @@ mkl = [
     "candle-nn/mkl",
     "candle-transformers/mkl",
 ]
-accelerate = ["candle-core/accelerate"]
+accelerate = [
+    "dep:accelerate-src",
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+    "candle-transformers/accelerate",
+]
 onnx = ["dep:prost", "dep:prost-build"]
 [dev-dependencies]
 tempfile = "3"

@@ -10,6 +10,7 @@ use anyhow::{Error as E, Result};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
+// TODO(candle-transformers-removal): Generation helpers only; see CANDLE_TRANSFORMERS.md.
 use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 

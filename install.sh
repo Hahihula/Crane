@@ -25,8 +25,10 @@ say() {
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   PLATFORM="macos"
+  BUILD_FEATURES+=("metal")
+  BUILD_FEATURES+=("accelerate")
   say "${YELLOW}${BOLD}Detected platform:${NC} macOS"
-  say "${YELLOW}Note:${NC} Metal backend will be used automatically at runtime when available."
+  say "${YELLOW}Enabled Cargo features:${NC} metal,accelerate"
 elif [[ "$(uname -s)" == "Linux" ]]; then
   if have_cmd nvidia-smi; then
     PLATFORM="linux-cuda"

@@ -1,11 +1,23 @@
-# Crane 🦩
+
+
+
+<div align="center">
+
+![Crane Banner](data/assets/banner.webp)
+
+</div>
+
+<div align="center">
+<h1>Crane 🦩</h1>
+</div>
 
 > Crane focusing on accelerate LLM inference speed with the power of kernels in candle framework, while reducing development overhead, make it portable and fast run model on both CPU and GPU.
 
-![GGUF support out-of-box](data/assets/crane-qwen3-5-2b.gif)
+
 
 ![](data/aa.gif)
 
+![GGUF support out-of-box](data/assets/crane-qwen3-5-2b.gif)
 
 **Crane (🦩)** - **C**andle-based **R**ust **A**ccelerated **N**eural **E**ngine
 A high-performance inference framework leveraging Rust's Candle for maximum speed on CPU/GPU.
@@ -14,6 +26,7 @@ A high-performance inference framework leveraging Rust's Candle for maximum spee
 
 - [ ] more to come....
 - [ ] Qwen3-VLA, Qwen3.5-GR00T;
+- [x] PaddleOCR-v6;
 - [x] Qwen 3.5 (0.8B; hybrid Gated Delta Net + softmax attention, CPU/CUDA/Metal) + Ornith-1.0-9B (agentic, tool calling)
 - [x] Hunyuan Dense
 - [x] Gemma 4 (text and vision; no audio)
@@ -199,6 +212,9 @@ To use `crane`, here are some notes:
    # CPU
    cargo build --release
 
+   # Metal GPU + Accelerate CPU math (macOS)
+   cargo build --release --features "metal,accelerate"
+
    # CUDA (GPU)
    cargo build --release --features cuda
    ```
@@ -213,6 +229,8 @@ Start a server compatible with OpenAI SDK and SGLang client:
 # Build
 # CPU
 cargo build -p crane-serve --release
+# Metal GPU + Accelerate CPU math (macOS)
+cargo build -p crane-serve --release --features "metal,accelerate"
 # CUDA
 cargo build -p crane-serve --release --features cuda
 

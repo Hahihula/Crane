@@ -31,6 +31,15 @@ jobs:
       - name: Test
         run: cargo test --workspace --features onnx
 
+  build-metal:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (Metal + Accelerate)
+        run: cargo build --workspace --release --features "metal,accelerate"
+
   build-cuda:
     runs-on: ubuntu-latest
     steps:

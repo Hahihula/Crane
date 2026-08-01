@@ -16,6 +16,7 @@
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{linear, linear_no_bias, Embedding, Linear, RmsNorm, VarBuilder};
+// TODO(candle-transformers-removal): Generation helpers only; see CANDLE_TRANSFORMERS.md.
 use candle_transformers::generation::LogitsProcessor;
 use crate::generation::SpeechOptions;
 use crate::models::modules::attention::{AttentionConfig, RopeMode};

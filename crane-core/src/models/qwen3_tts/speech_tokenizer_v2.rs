@@ -8,6 +8,8 @@ use candle_nn::{
     VarBuilder,
 };
 use super::super::modules::ffn::SwiGluFfn;
+// TODO(candle-transformers-removal): Mimi is a model-component dependency; see
+// CANDLE_TRANSFORMERS.md.
 use candle_transformers::models::mimi;
 use serde::Deserialize;
 use std::cell::RefCell;

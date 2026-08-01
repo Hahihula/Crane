@@ -20,6 +20,7 @@
 //!
 //! | Flag | Effect |
 //! |---|
+//! | `metal` | Enable Metal GPU acceleration on macOS |
 //! | `cuda` | Enable CUDA device and custom PTX kernels (requires CUDA toolkit) |
 //! | `accelerate` | Link against Apple Accelerate for CPU BLAS |
 //! | `mkl` | Link against Intel MKL for CPU BLAS |
