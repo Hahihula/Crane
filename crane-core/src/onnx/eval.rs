@@ -2434,12 +2434,11 @@ fn simple_eval_(
                 let output = input * hard_sigmoid;
                 values.insert(node.output[0].clone(), output?);
             },
+            // Crane Added 20260802: support rank-3 `[N, C, L]` inputs via
+            // `upsample_nearest1d`, in addition to the existing rank-4
+            // `[N, C, H, W]` support.
             "Resize" => {
                 let input = get(&node.input[0])?;
-
-                if input.rank() != 4 {
-                    bail!("Unsupported rank for nearest resize: {}", input.rank());
-                }
 
                 let scales = if node.input.len() > 2 && !node.input[2].is_empty() {
                     Some(get(&node.input[2])?)
@@ -2498,9 +2497,11 @@ fn simple_eval_(
                     );
                 }
 
-                let h = output_dims[2];
-                let w = output_dims[3];
-                let output = input.upsample_nearest2d(h, w)?;
+                let output = match input.rank() {
+                    3 => input.upsample_nearest1d(output_dims[2])?,
+                    4 => input.upsample_nearest2d(output_dims[2], output_dims[3])?,
+                    rank => bail!("Unsupported rank for nearest resize: {rank}"),
+                };
 
                 values.insert(node.output[0].clone(), output);
             },
