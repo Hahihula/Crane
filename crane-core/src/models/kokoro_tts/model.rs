@@ -22,7 +22,6 @@ use crate::models::g2p::Phonemizer;
 use crate::models::g2p::ipa_postprocess::IpaNormalizer;
 
 use super::ipa::build_kokoro_normalizer;
-use super::native_ops;
 
 /// Kokoro always outputs mono PCM at 24 kHz.
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -277,28 +276,14 @@ fn push_trimmed(chunks: &mut Vec<String>, piece: &str) {
 /// after construction. Voice style embeddings are loaded lazily on first use
 /// via [`Model::voice`] and cached for the lifetime of the model.
 pub struct Model {
-    /// Loaded ONNX model graph. Run segment-by-segment via
-    /// `crate::onnx::simple_eval()` rather than in one call — see
-    /// [`Self::segments`].
+    /// Loaded ONNX model graph, run in full via `crate::onnx::simple_eval()`
+    /// on each [`Model::generate_speech`] call.
     onnx_graph: crate::onnx::proto::ModelProto,
-    /// `onnx_graph.graph.node`, split into segments at each
-    /// `ConvTranspose`/`STFT` node (computed natively instead — see
-    /// [`Self::special_nodes`]), so `Model::run_onnx_segments` can run
-    /// each segment through `simple_eval()` independently. Has one more
-    /// entry than `special_nodes`. Computed once in [`Model::new`] by
-    /// [`native_ops::extract_segments`].
-    segments: Vec<Vec<crate::onnx::proto::NodeProto>>,
-    /// The `ConvTranspose`/`STFT` node originally between `segments[i]`
-    /// and `segments[i + 1]`, with its parameters and weights pre-decoded
-    /// at load time. See the `native_ops` module doc for why these two op
-    /// types can't run through `crate::onnx::simple_eval()` at all.
-    special_nodes: Vec<native_ops::SpecialNode>,
     /// ONNX graph initializers (model weights) pre-decoded from their
-    /// protobuf `TensorProto` representation into candle `Tensor`s once
-    /// in [`Model::new`], so [`Self::run_onnx_segments`] can seed each
-    /// segment's input map without `simple_eval()` re-decoding them on
-    /// every call. The raw initializers in `onnx_graph.graph.initializer`
-    /// are cleared after decoding.
+    /// protobuf `TensorProto` representation into candle `Tensor`s once in
+    /// [`Model::new`], so each `simple_eval()` call doesn't re-decode them.
+    /// The raw initializers in `onnx_graph.graph.initializer` are cleared
+    /// after decoding.
     decoded_initializers: HashMap<String, Tensor>,
     /// Phoneme character to token ID, from `tokenizer.json`'s `model.vocab`.
     vocab: HashMap<char, i64>,
@@ -335,10 +320,8 @@ impl Model {
     ///
     /// # Errors
     ///
-    /// Returns an error if any required file is missing or malformed, if
-    /// `config.json`'s `model_type` doesn't match the expected Kokoro value,
-    /// or if a `ConvTranspose`/`STFT` node's parameters can't be extracted
-    /// (see [`native_ops::extract_segments`]).
+    /// Returns an error if any required file is missing or malformed, or if
+    /// `config.json`'s `model_type` doesn't match the expected Kokoro value.
     ///
     /// # Panics
     ///
@@ -380,16 +363,6 @@ impl Model {
         let onnx_options = crate::onnx::SessionOptions::default();
         crate::onnx::optimize(graph, &mut decoded_initializers, &onnx_options)
             .context("optimizing Kokoro ONNX graph")?;
-        // `ConvTranspose` and `STFT` can't be fixed by rewriting the graph
-        // into other ops `crate::onnx::simple_eval()` supports — see the
-        // `native_ops` module doc. Splitting the node list into segments
-        // here means `generate_speech()` can run each through
-        // `simple_eval()` independently, computing these two op types
-        // natively in between. Must run before `graph.initializer` is
-        // cleared below: it looks weight/scale initializers up there
-        // directly, by name.
-        let (segments, special_nodes) =
-            native_ops::extract_segments(graph).context("splitting Kokoro ONNX graph around ConvTranspose/STFT")?;
         graph.initializer.clear();
 
         // Fail fast on a broken model directory by loading one voice now,
@@ -416,8 +389,6 @@ impl Model {
 
         Ok(Self {
             onnx_graph,
-            segments,
-            special_nodes,
             decoded_initializers,
             vocab,
             voices,
@@ -585,8 +556,9 @@ impl Model {
             inputs.insert("input_ids".to_string(), input_ids);
             inputs.insert("style".to_string(), style);
             inputs.insert("speed".to_string(), speed);
+            inputs.extend(self.decoded_initializers.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-            let mut values = self.run_onnx_segments(inputs)?;
+            let mut values = crate::onnx::simple_eval(&self.onnx_graph, inputs)?;
             let waveform =
                 values.remove("waveform").context("Kokoro ONNX output is missing 'waveform'")?;
             waveform_chunks.push(waveform);
@@ -599,77 +571,6 @@ impl Model {
         };
 
         Ok((waveform, KOKORO_SAMPLE_RATE))
-    }
-
-    /// Runs the ONNX graph via [`Self::segments`]/[`Self::special_nodes`],
-    /// computing each special node natively in between segments (see the
-    /// `native_ops` module doc) instead of running the whole graph through
-    /// one `crate::onnx::simple_eval()` call.
-    ///
-    /// `inputs` seeds the accumulated value map (`input_ids`/`style`/
-    /// `speed`); every segment's outputs and every special node's result
-    /// are merged into it as execution proceeds, so later segments can
-    /// reference anything computed earlier.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any segment's `simple_eval()` call fails, or if
-    /// a special node's native computation fails.
-    fn run_onnx_segments(&mut self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        let mut values = inputs;
-        values.extend(self.decoded_initializers.iter().map(|(k, v)| (k.clone(), v.clone())));
-        for i in 0..self.segments.len() {
-            // `simple_eval` consumes its input map by value, so the clone
-            // is required. Tensor clones are cheap Arc bumps; the String
-            // keys are the only real allocation.
-            let outputs = self.run_segment(i, values.clone())?;
-            values.extend(outputs);
-            if let Some(special) = self.special_nodes.get(i) {
-                let result = special.compute(&values)?;
-                values.insert(special.output().to_string(), result);
-            }
-        }
-        Ok(values)
-    }
-
-    /// Runs `self.segments[index]` through `crate::onnx::simple_eval()`,
-    /// requesting every node output in that segment.
-    ///
-    /// The model's weights (ONNX initializers) are pre-decoded once in
-    /// [`Model::new`] and passed in via `inputs`; `graph.initializer` is
-    /// empty, so `simple_eval()` doesn't re-decode anything. The graph's
-    /// `node`/`output` fields are temporarily swapped to this segment's
-    /// nodes/outputs via [`std::mem::replace`] and restored before
-    /// returning — even on error.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the graph is missing, or if `simple_eval()`
-    /// fails for this segment.
-    fn run_segment(&mut self, index: usize, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        let segment_nodes = std::mem::take(&mut self.segments[index]);
-        let output_names: Vec<crate::onnx::proto::ValueInfoProto> = segment_nodes
-            .iter()
-            .flat_map(|n| n.output.iter())
-            .filter(|o| !o.is_empty())
-            .map(|o| crate::onnx::proto::ValueInfoProto { name: o.clone(), ..Default::default() })
-            .collect();
-
-        let graph = self.onnx_graph.graph.as_mut().context("Kokoro ONNX model has no graph")?;
-        let saved_nodes = std::mem::replace(&mut graph.node, segment_nodes);
-        let saved_output = std::mem::replace(&mut graph.output, output_names);
-
-        let result = crate::onnx::simple_eval(&self.onnx_graph, inputs);
-
-        // Restore both the graph's original node/output lists and this
-        // segment's node list, regardless of whether `simple_eval` above
-        // succeeded.
-        let graph = self.onnx_graph.graph.as_mut().expect("checked above");
-        let segment_nodes = std::mem::replace(&mut graph.node, saved_nodes);
-        graph.output = saved_output;
-        self.segments[index] = segment_nodes;
-
-        Ok(result?)
     }
 }
 
@@ -776,8 +677,6 @@ mod tests {
             .collect();
         Model {
             onnx_graph: crate::onnx::proto::ModelProto::default(),
-            segments: Vec::new(),
-            special_nodes: Vec::new(),
             decoded_initializers: HashMap::new(),
             vocab: HashMap::new(),
             voices,
