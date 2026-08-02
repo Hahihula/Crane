@@ -28,7 +28,7 @@ This directory contains simple, user-friendly examples showing how to use the Cr
 
 MiniCPM comes in several forms in this codebase; not all of them have a dedicated example binary yet:
 
-- **MiniCPM5-1B** (plain dense chat model): use `chat_cli.rs` with `--model-type minicpm5` (see below) — no separate binary.
+- **MiniCPM5-1B** (plain dense chat model): use `chat_cli.rs` with `--model-type minicpm5` (see below) — no separate binary. Both safetensors and GGUF checkpoints work (`-m` auto-detects by file extension) — a bare `.gguf` with no sibling files loads fine, since the tokenizer/chat-template are read straight from GGUF metadata. See `AGENTS.md`'s "MiniCPM5-1B" section.
 - **MiniCPM-o-4.5** (full omni: vision + audio understanding, speech-token TTS, full-duplex live audio chat): `minicpmo_duplex_simple.rs` is the live full-duplex demo — connects to `crane-serve`'s `/v1/audio/duplex` WebSocket, streams mic (or `--wav` file) audio in, prints listen/speak arbitration state, plays back and saves any spoken response. It talks to a running server, so start `crane-serve --model-type minicpmo` first (see below). Turn-based (non-duplex) vision/audio understanding and TTS generation are implemented in `crane-core` but not yet exposed through a dedicated `example/` binary or the `crane` SDK traits — see `AGENTS.md`'s "MiniCPM-o-4.5 (full omni)" section for the current API surface (`MiniCpmOVlModel`, `MiniCpmTts`, `Token2Wav`, direct Rust API only).
 - **MiniCPM-V-4.6** (vision-language chat): served via `crane-serve`'s OpenAI-compatible `/v1/chat/completions` with multimodal `image_url` content parts (`--model-type minicpmv4_6` or auto-detected from `config.json`) — no `example/` binary yet either.
 
@@ -64,8 +64,9 @@ cargo run --bin tts_voice_clone --release -- vendor/Qwen3-TTS-12Hz-0.6B-Base
 # TTS — Auto-detect model type
 cargo run --bin tts_simple --release -- vendor/Qwen3-TTS-12Hz-0.6B-CustomVoice
 
-# MiniCPM5-1B chat (interactive REPL)
+# MiniCPM5-1B chat (interactive REPL) — safetensors dir or a bare .gguf file both work
 cargo run --bin chat_cli --release -- -m /path/to/MiniCPM5-1B --model-type minicpm5
+cargo run --bin chat_cli --release -- -m /path/to/MiniCPM5-1B-Q8_0.gguf --model-type minicpm5
 
 # MiniCPM-o-4.5 full-duplex live audio chat — start the server first...
 cargo run -p crane-serve --features cuda --release --bin crane-serve -- -m /path/to/MiniCPM-o-4_5 --model-type minicpmo

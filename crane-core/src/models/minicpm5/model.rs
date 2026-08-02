@@ -163,45 +163,17 @@ impl Model {
 
     /// Load a GGUF quantized model file.
     ///
-    /// `model_path` should point to a `.gguf` file. The tokenizer is loaded
-    /// from a `tokenizer.json` in the same directory (or a sibling directory).
+    /// `model_path` should point to a `.gguf` file. The tokenizer is read
+    /// from the GGUF itself (`tokenizer.ggml.tokens`/`merges`/`token_type`);
+    /// a sibling `tokenizer.json` is only consulted as a fallback for older
+    /// or third-party quantizers that lack the embedded metadata.
     fn from_gguf(model_path: &str, device: &Device) -> Result<Model> {
-        let gguf_path = std::path::Path::new(model_path);
-
-        // Find tokenizer: same dir, parent dir, or model_path if it's a directory
-        let tokenizer_path = {
-            let same_dir = gguf_path
-                .parent()
-                .unwrap_or(gguf_path)
-                .join("tokenizer.json");
-            if same_dir.exists() {
-                same_dir
-            } else {
-                let parent = gguf_path
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .unwrap_or(gguf_path)
-                    .join("tokenizer.json");
-                if parent.exists() {
-                    parent
-                } else {
-                    anyhow::bail!(
-                        "Cannot find tokenizer.json near {}. \
-                         Place tokenizer.json in the same directory as the GGUF file.",
-                        gguf_path.display()
-                    );
-                }
-            }
+        use crate::utils::tokenizer_utils::{
+            build_tokenizer_from_gguf_path, gguf_has_embedded_tokenizer,
         };
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(E::msg)?;
 
-        // Look for a sibling generation_config.json / config.json for EOS ids
-        // (GGUF metadata doesn't carry these; fall back to an empty set if
-        // no sibling HF config is present).
-        let eos_token_ids = gguf_path
-            .parent()
-            .map(|p| read_eos_token_ids(&p.to_string_lossy()))
-            .unwrap_or_default();
+        let gguf_path = std::path::Path::new(model_path);
+        let parent = gguf_path.parent().unwrap_or(gguf_path);
 
         // Open and parse GGUF
         let mut file = std::fs::File::open(gguf_path)?;
@@ -212,6 +184,54 @@ impl Model {
             ct.tensor_infos.len(),
             ct.metadata.len(),
         );
+
+        // Prefer the embedded tokenizer; fall back to a sibling
+        // tokenizer.json only when the GGUF lacks the necessary metadata.
+        let tokenizer = if gguf_has_embedded_tokenizer(&ct) {
+            build_tokenizer_from_gguf_path(gguf_path)?
+                .ok_or_else(|| anyhow::anyhow!("GGUF reports embedded tokenizer but build returned None"))?
+        } else {
+            let same_dir = parent.join("tokenizer.json");
+            let tokenizer_path = if same_dir.exists() {
+                same_dir
+            } else {
+                let grandparent = parent.parent().unwrap_or(parent).join("tokenizer.json");
+                if grandparent.exists() {
+                    grandparent
+                } else {
+                    anyhow::bail!(
+                        "GGUF lacks `tokenizer.ggml.tokens`/`merges` metadata and no sibling \
+                         tokenizer.json was found near {}. Place tokenizer.json next to the \
+                         GGUF file, or re-export with a current llama.cpp to embed the tokenizer.",
+                        gguf_path.display()
+                    );
+                }
+            };
+            eprintln!("GGUF has no embedded tokenizer; falling back to {}", tokenizer_path.display());
+            Tokenizer::from_file(&tokenizer_path).map_err(E::msg)?
+        };
+
+        // EOS: sibling generation_config.json/config.json wins (may hold the
+        // full multi-id set, e.g. MiniCPM5's `[1, 130073]` — GGUF metadata's
+        // `tokenizer.ggml.eos_token_id` only ever carries one id, `</s>`,
+        // missing the chat template's real turn-end `<|im_end|>`). Always
+        // union in `<|im_end|>` from the (now tokenizer-embedded-or-sibling)
+        // vocabulary too, so a bare GGUF with no sibling config still stops
+        // cleanly instead of running to `max_new_tokens`.
+        let mut eos_token_ids = read_eos_token_ids(&parent.to_string_lossy());
+        if eos_token_ids.is_empty()
+            && let Some(id) = ct
+                .metadata
+                .get("tokenizer.ggml.eos_token_id")
+                .and_then(|v| v.to_u32().ok())
+        {
+            eos_token_ids.push(id);
+        }
+        if let Some(im_end) = tokenizer.token_to_id("<|im_end|>")
+            && !eos_token_ids.contains(&im_end)
+        {
+            eos_token_ids.push(im_end);
+        }
 
         let inner = MiniCpm5Model::from_gguf(ct, &mut file, device)?;
         let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
