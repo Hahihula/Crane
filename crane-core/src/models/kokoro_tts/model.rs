@@ -363,26 +363,6 @@ impl Model {
         let mut onnx_graph = crate::onnx::read_file(&onnx_path)
             .with_context(|| format!("loading Kokoro ONNX model from {}", onnx_path.display()))?;
         let graph = onnx_graph.graph.as_mut().context("Kokoro ONNX model has no graph")?;
-        // Fuse decomposed atan2(imag, real) patterns (Div → Atan →
-        // quadrant-correction Where) into single Atan2 nodes before
-        // segment extraction, so the evaluator computes them directly
-        // via f32::atan2 instead of through the numerically fragile
-        // decomposition.
-        crate::onnx::fuse_atan2_decomposition(graph);
-        // Rewrite ops unmodified `simple_eval()` handles incorrectly (Trilu
-        // NaN on +/-inf inputs, and more added as Kokoro's export needs
-        // them) into decompositions it handles correctly — see the
-        // `onnx_compat` module doc.
-        crate::models::onnx_compat::rewrite_unsupported_ops(graph)
-            .context("rewriting unsupported ops in Kokoro ONNX graph")?;
-        // `ConvTranspose` and `STFT` can't be fixed by rewriting the graph
-        // into other ops `crate::onnx::simple_eval()` supports — see the
-        // `native_ops` module doc. Splitting the node list into segments
-        // here means `generate_speech()` can run each through
-        // `simple_eval()` independently, computing these two op types
-        // natively in between.
-        let (segments, special_nodes) =
-            native_ops::extract_segments(graph).context("splitting Kokoro ONNX graph around ConvTranspose/STFT")?;
 
         let mut decoded_initializers = HashMap::with_capacity(graph.initializer.len());
         for t in &graph.initializer {
@@ -390,6 +370,26 @@ impl Model {
                 .with_context(|| format!("decoding ONNX initializer {:?}", t.name))?;
             decoded_initializers.insert(t.name.clone(), tensor);
         }
+        // Fuses decomposed atan2(imag, real) patterns (Div → Atan →
+        // quadrant-correction Where) into single Atan2 nodes, rewrites ops
+        // unmodified `simple_eval()` handles incorrectly (Trilu NaN on
+        // +/-inf inputs, and more added as Kokoro's export needs them) into
+        // decompositions it handles correctly, and folds/eliminates the
+        // resulting dead and constant nodes — see `crate::onnx::optimizer`
+        // and its `compat` submodule doc.
+        let onnx_options = crate::onnx::SessionOptions::default();
+        crate::onnx::optimize(graph, &mut decoded_initializers, &onnx_options)
+            .context("optimizing Kokoro ONNX graph")?;
+        // `ConvTranspose` and `STFT` can't be fixed by rewriting the graph
+        // into other ops `crate::onnx::simple_eval()` supports — see the
+        // `native_ops` module doc. Splitting the node list into segments
+        // here means `generate_speech()` can run each through
+        // `simple_eval()` independently, computing these two op types
+        // natively in between. Must run before `graph.initializer` is
+        // cleared below: it looks weight/scale initializers up there
+        // directly, by name.
+        let (segments, special_nodes) =
+            native_ops::extract_segments(graph).context("splitting Kokoro ONNX graph around ConvTranspose/STFT")?;
         graph.initializer.clear();
 
         // Fail fast on a broken model directory by loading one voice now,

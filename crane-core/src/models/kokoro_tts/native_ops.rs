@@ -5,9 +5,9 @@
 //!
 //! - `Resize` with `mode="linear"` — `candle-onnx`'s `"Resize"` handler
 //!   only implements `mode="nearest"` (a *different*, rank-4-only gap in
-//!   that same path is fixed by `onnx_compat` instead, since it's a
-//!   rewritable shape problem, not a missing computation). See
-//!   [`NativeLinearResize`].
+//!   that same path is fixed by `crate::onnx::optimizer`'s `compat`
+//!   submodule instead, since it's a rewritable shape problem, not a
+//!   missing computation). See [`NativeLinearResize`].
 //!
 //! [`extract_segments`] splits Kokoro's ONNX graph into segments at each
 //! such node, decoding its static parameters (weights, window
@@ -36,9 +36,10 @@ fn decode_initializer(graph: &GraphProto, name: Option<&str>, what: &str) -> Res
 
 /// A `mode="linear"` `Resize` node's static parameters, extracted once at
 /// load time. The evaluator's `"Resize"` handler only implements
-/// `mode="nearest"` (see the `onnx_compat` module doc for the separate
-/// rank-4-only gap in that path) — `"linear"` bails unconditionally, so
-/// this computes ONNX's half-pixel linear resize directly.
+/// `mode="nearest"` (see `crate::onnx::optimizer`'s `compat` submodule doc
+/// for the separate rank-4-only gap in that path) — `"linear"` bails
+/// unconditionally, so this computes ONNX's half-pixel linear resize
+/// directly.
 ///
 /// Scoped to what Kokoro's graph actually needs: exactly one axis has a
 /// non-`1.0` `scales` entry (every other axis is left unchanged), and
@@ -204,8 +205,8 @@ impl SpecialNode {
 
 /// `true` if `node` is a `Resize` node whose `mode` attribute is present
 /// and not `"nearest"` — i.e. a mode `crate::onnx::simple_eval` can never
-/// run, regardless of rank (unlike the rank-4-only gap `onnx_compat` fixes
-/// for `mode="nearest"`).
+/// run, regardless of rank (unlike the rank-4-only gap `crate::onnx::optimizer`'s
+/// `compat` submodule fixes for `mode="nearest"`).
 fn is_unsupported_resize_mode(node: &NodeProto) -> bool {
     node.attribute.iter().find(|a| a.name == "mode").is_some_and(|a| a.s != b"nearest")
 }

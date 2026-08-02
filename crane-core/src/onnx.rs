@@ -33,7 +33,7 @@ mod optimizer;
 pub(crate) mod ops;
 
 pub use eval::{dtype, simple_eval};
-pub(crate) use optimizer::fuse_atan2::fuse_atan2_decomposition;
+pub(crate) use optimizer::optimize;
 pub use optimizer::{OptimizationReport, SessionOptions};
 pub use session::Session;
 

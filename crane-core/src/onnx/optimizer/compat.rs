@@ -3,7 +3,9 @@
 //! Load-time ONNX graph rewrites that work around gaps in
 //! `crate::onnx::eval`'s vendored evaluator, for models (currently Kokoro
 //! TTS) whose export hits an op `eval.rs` either can't run at all or runs
-//! incorrectly.
+//! incorrectly. Run as part of `crate::onnx::optimizer::optimize`, before
+//! its constant-folding/alias-elimination passes so their output (e.g. the
+//! `Constant` nodes this module's rewrites introduce) gets simplified too.
 //!
 //! Two different kinds of gap exist, and only one of them belongs here:
 //!
@@ -79,7 +81,7 @@ enum Rewritten {
 /// handles incorrectly into a decomposition it handles correctly. Runs
 /// once, at model load time, before the graph (or its segments) is passed
 /// to `crate::onnx::simple_eval`.
-pub(crate) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
+pub(super) fn rewrite_unsupported_ops(graph: &mut GraphProto) -> Result<()> {
     let constant_tensors = collect_constant_tensors(graph);
     let constants = collect_constant_i64_values(&constant_tensors);
     let orig_nodes = std::mem::take(&mut graph.node);

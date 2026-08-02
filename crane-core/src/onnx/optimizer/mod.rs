@@ -1,5 +1,6 @@
 //! Conservative graph simplification performed when an ONNX session is built.
 
+mod compat;
 mod constant_fold;
 mod eliminate;
 pub(crate) mod fuse_atan2;
@@ -53,6 +54,12 @@ pub(crate) fn optimize(
         original_nodes: graph.node.len(),
         ..Default::default()
     };
+
+    // Correctness fixes for gaps in `eval.rs`, not a size optimization —
+    // run unconditionally, even when `options.optimize` disables the
+    // simplification passes below.
+    compat::rewrite_unsupported_ops(graph).map_err(|err| candle_core::Error::Msg(err.to_string()))?;
+
     if !options.optimize {
         report.final_nodes = graph.node.len();
         return Ok(report);
