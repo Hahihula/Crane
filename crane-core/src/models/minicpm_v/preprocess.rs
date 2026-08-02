@@ -63,37 +63,41 @@ pub fn load_preprocessor_config(model_dir: &str) -> Result<PreprocessorConfig> {
 
 // ── Slicing arithmetic (pure, no image ops) ─────────────────────────────
 
-fn ensure_divide(length: f64, divisor: usize) -> usize {
+pub(crate) fn ensure_divide(length: f64, divisor: usize) -> usize {
     ((length / divisor as f64).round() as usize).max(1) * divisor
 }
 
 /// Resize `(height, width)` to fit `scale_resolution` while keeping the
-/// aspect ratio, then round to a multiple of `patch_size * 4` (4 = the two
-/// successive 2x2 merges: the vision tower's window merger + the
-/// hierarchical `Merger`). Direct port of `find_best_resize`.
-fn find_best_resize(height: usize, width: usize, scale_resolution: usize, patch_size: usize, allow_upscale: bool) -> (usize, usize) {
+/// aspect ratio, then round to a multiple of `unit`. Direct port of
+/// `find_best_resize` — `unit` is `patch_size * 4` for MiniCPM-V-4.6 (4 = the
+/// two successive 2x2 merges: the vision tower's window merger + the
+/// hierarchical `Merger`) but plain `patch_size` for MiniCPM-o (its
+/// `Resampler` compresses via cross-attention, not size-halving, so no extra
+/// divisibility constraint) — see `minicpmo::preprocess`.
+pub(crate) fn find_best_resize(height: usize, width: usize, scale_resolution: usize, unit: usize, allow_upscale: bool) -> (usize, usize) {
     let (mut h, mut w) = (height as f64, width as f64);
     if h * w > (scale_resolution * scale_resolution) as f64 || allow_upscale {
         let aspect_ratio = w / h;
         h = scale_resolution as f64 / aspect_ratio.sqrt();
         w = h * aspect_ratio;
     }
-    let best_width = ensure_divide(w, patch_size * 4);
-    let best_height = ensure_divide(h, patch_size * 4);
+    let best_width = ensure_divide(w, unit);
+    let best_height = ensure_divide(h, unit);
     (best_height, best_width)
 }
 
 /// Resolution for the "refined" (to-be-sliced) version of the source image,
 /// such that it divides evenly into `grid_h x grid_w` tiles each sized per
-/// [`find_best_resize`]. Direct port of `get_refine_size`.
-fn get_refine_size(height: usize, width: usize, grid_h: usize, grid_w: usize, scale_resolution: usize, patch_size: usize, allow_upscale: bool) -> (usize, usize) {
+/// [`find_best_resize`]. Direct port of `get_refine_size`. `unit`: see
+/// [`find_best_resize`].
+pub(crate) fn get_refine_size(height: usize, width: usize, grid_h: usize, grid_w: usize, scale_resolution: usize, unit: usize, allow_upscale: bool) -> (usize, usize) {
     let refine_width = ensure_divide(width as f64, grid_w);
     let refine_height = ensure_divide(height as f64, grid_h);
     let (best_h, best_w) = find_best_resize(
         (refine_height as f64 / grid_h as f64).round() as usize,
         (refine_width as f64 / grid_w as f64).round() as usize,
         scale_resolution,
-        patch_size,
+        unit,
         allow_upscale,
     );
     (best_h * grid_h, best_w * grid_w)
@@ -105,8 +109,9 @@ fn get_refine_size(height: usize, width: usize, grid_h: usize, grid_w: usize, sc
 /// `num_cols`) are swapped from their visual meaning; this port uses
 /// `grid_h`/`grid_w` (rows/cols) throughout instead, matching how the result
 /// is actually consumed downstream (`get_refine_size`, and the Processor's
-/// `num_rows, num_cols = image_grids[...]`).
-fn get_sliced_grid(height: usize, width: usize, max_slice_nums: usize, scale_resolution: usize) -> Option<(usize, usize)> {
+/// `num_rows, num_cols = image_grids[...]`). Reused as-is by `minicpmo::preprocess`
+/// (the search algorithm doesn't depend on the vision tower's merge strategy).
+pub(crate) fn get_sliced_grid(height: usize, width: usize, max_slice_nums: usize, scale_resolution: usize) -> Option<(usize, usize)> {
     let log_ratio = (width as f64 / height as f64).ln();
     let ratio = (width * height) as f64 / (scale_resolution * scale_resolution) as f64;
     let multiple = (ratio.ceil() as usize).min(max_slice_nums);
@@ -137,7 +142,7 @@ fn get_sliced_grid(height: usize, width: usize, max_slice_nums: usize, scale_res
 
 // ── Image ops ────────────────────────────────────────────────────────────
 
-fn resize_bicubic(image: &DynamicImage, height: usize, width: usize) -> DynamicImage {
+pub(crate) fn resize_bicubic(image: &DynamicImage, height: usize, width: usize) -> DynamicImage {
     let (w, h) = image.dimensions();
     if (h as usize, w as usize) == (height, width) {
         return image.clone();
@@ -149,7 +154,7 @@ fn resize_bicubic(image: &DynamicImage, height: usize, width: usize) -> DynamicI
 
 /// RGB `DynamicImage` -> normalized `[C, H, W]` tensor (`(pixel/255 - mean) /
 /// std`, per-channel).
-fn to_normalized_chw(image: &DynamicImage, mean: &[f32], std: &[f32], device: &Device) -> Result<Tensor> {
+pub(crate) fn to_normalized_chw(image: &DynamicImage, mean: &[f32], std: &[f32], device: &Device) -> Result<Tensor> {
     let rgb = image.to_rgb8();
     let (w, h) = rgb.dimensions();
     let (w, h) = (w as usize, h as usize);
@@ -168,7 +173,7 @@ fn to_normalized_chw(image: &DynamicImage, mean: &[f32], std: &[f32], device: &D
 /// Direct port of `reshape_by_patch` (re-derived via reshape/permute instead
 /// of literally reimplementing `F.unfold`, since candle has no unfold op —
 /// see the module doc for the derivation).
-fn reshape_by_patch(chw: &Tensor, patch_size: usize) -> Result<Tensor> {
+pub(crate) fn reshape_by_patch(chw: &Tensor, patch_size: usize) -> Result<Tensor> {
     let (c, h, w) = chw.dims3()?;
     let (hp, wp) = (h / patch_size, w / patch_size);
     Ok(chw
@@ -202,7 +207,7 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
         None
     };
 
-    let (source_h, source_w) = find_best_resize(height, width, cfg.scale_resolution, cfg.patch_size, grid.is_none());
+    let (source_h, source_w) = find_best_resize(height, width, cfg.scale_resolution, cfg.patch_size * 4, grid.is_none());
     let source_img = resize_bicubic(&rgb, source_h, source_w);
     let source_chw = to_normalized_chw(&source_img, &cfg.image_mean, &cfg.image_std, device)?.to_dtype(dtype)?;
 
@@ -210,7 +215,7 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
     let mut target_sizes = vec![(source_h / cfg.patch_size, source_w / cfg.patch_size)];
 
     if let Some((grid_h, grid_w)) = grid {
-        let (refine_h, refine_w) = get_refine_size(height, width, grid_h, grid_w, cfg.scale_resolution, cfg.patch_size, true);
+        let (refine_h, refine_w) = get_refine_size(height, width, grid_h, grid_w, cfg.scale_resolution, cfg.patch_size * 4, true);
         let refine_img = resize_bicubic(&rgb, refine_h, refine_w);
         let (tile_h, tile_w) = (refine_h / grid_h, refine_w / grid_w);
 
@@ -323,7 +328,7 @@ mod tests {
 
     #[test]
     fn find_best_resize_divisible_by_patch_times_4() {
-        let (h, w) = find_best_resize(1000, 1500, 448, 14, false);
+        let (h, w) = find_best_resize(1000, 1500, 448, 14 * 4, false);
         assert_eq!(h % (14 * 4), 0);
         assert_eq!(w % (14 * 4), 0);
     }

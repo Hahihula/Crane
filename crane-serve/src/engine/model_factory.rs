@@ -29,6 +29,7 @@ pub enum ModelType {
     HunyuanDense,
     Minicpm5,
     MinicpmV46,
+    MiniCpmODuplex,
     Qwen25,
     Qwen3,
     Qwen3_5,
@@ -55,6 +56,7 @@ impl ModelType {
             // only OpenBMB family member Crane supports; re-scope this once
             // MiniCPM-o/MiniCPM-V land as their own `ModelType`s.
             "minicpmv46" | "minicpmv4.6" | "minicpmv4_6" | "minicpm-v4.6" | "minicpm-v-4.6" | "minicpmv" => Self::MinicpmV46,
+            "minicpmo" | "minicpm-o" | "minicpm_o" | "minicpmoduplex" | "minicpm-o-duplex" | "minicpm_o_duplex" => Self::MiniCpmODuplex,
             "minicpm5" | "minicpm-5" | "minicpm_5" | "minicpm" => Self::Minicpm5,
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
             "qwen3" => Self::Qwen3,
@@ -81,6 +83,7 @@ impl ModelType {
             Self::HunyuanDense => "hunyuan",
             Self::Minicpm5 => "minicpm5",
             Self::MinicpmV46 => "minicpmv4_6",
+            Self::MiniCpmODuplex => "minicpmo_duplex",
             Self::Qwen25 => "qwen25",
             Self::Qwen3 => "qwen3",
             Self::Qwen3_5 => "qwen3_5",
@@ -110,6 +113,13 @@ impl ModelType {
     #[must_use]
     pub fn is_asr(&self) -> bool {
         matches!(self, Self::Qwen3ASR)
+    }
+
+    /// Whether this model type is a full-duplex live audio session
+    /// (served over a WebSocket, not a one-shot HTTP request/response).
+    #[must_use]
+    pub fn is_duplex(&self) -> bool {
+        matches!(self, Self::MiniCpmODuplex)
     }
 }
 
@@ -200,6 +210,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                     };
                 }
                 "minicpmv4_6" | "minicpmv4.6" => return ModelType::MinicpmV46,
+                "minicpmo" => return ModelType::MiniCpmODuplex,
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
                 "qwen3_asr" | "qwen3asr" => return ModelType::Qwen3ASR,
                 "style_text_to_speech_2" => return ModelType::Kokoro,
@@ -224,6 +235,12 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 if a.contains("minicpmv4_6") {
                     return ModelType::MinicpmV46;
+                }
+                // Checked before any bare "minicpm" fallback would exist —
+                // "MiniCPMO" is architecturally distinctive (real HF
+                // architectures value on the checkpoint).
+                if a.contains("minicpmo") {
+                    return ModelType::MiniCpmODuplex;
                 }
                 if a.contains("qwen3ttsforconditional") || a.contains("qwen3_tts") {
                     return ModelType::Qwen3TTS;
@@ -289,6 +306,10 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         // contains "minicpm" too, and would otherwise be mis-claimed by the
         // Minicpm5 fallback.
         ModelType::MinicpmV46
+    } else if path_lower.contains("minicpm-o") || path_lower.contains("minicpmo") {
+        // Same reasoning as MiniCPM-V-4.6 above — checked before the bare
+        // "minicpm" fallback.
+        ModelType::MiniCpmODuplex
     } else if path_lower.contains("minicpm") {
         // MiniCPM5's config.json is a plain `LlamaForCausalLM`
         // (model_type/architectures give no distinctive signal), so this
@@ -451,6 +472,9 @@ pub fn create_backend(
         }
         ModelType::Qwen3ASR => {
             anyhow::bail!("Qwen3-ASR is an ASR model — use create_asr() instead of create_backend()")
+        }
+        ModelType::MiniCpmODuplex => {
+            anyhow::bail!("MiniCPM-o is a full-duplex model — use the duplex WebSocket endpoint instead of create_backend()")
         }
         ModelType::Auto => unreachable!(),
     }
@@ -684,6 +708,45 @@ mod tests {
     }
 
     #[test]
+    fn model_type_from_str_minicpmo_variants() {
+        assert_eq!(ModelType::from_str("minicpmo"), ModelType::MiniCpmODuplex);
+        assert_eq!(ModelType::from_str("minicpm-o"), ModelType::MiniCpmODuplex);
+        assert_eq!(ModelType::from_str("minicpm_o_duplex"), ModelType::MiniCpmODuplex);
+        assert_eq!(ModelType::from_str("MINICPMO"), ModelType::MiniCpmODuplex);
+    }
+
+    #[test]
+    fn model_type_is_duplex_includes_minicpmo() {
+        assert!(ModelType::MiniCpmODuplex.is_duplex());
+        assert!(!ModelType::MinicpmV46.is_duplex());
+        assert!(!ModelType::Minicpm5.is_duplex());
+    }
+
+    #[test]
+    fn detect_from_config_json_model_type_minicpmo() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "minicpmo"}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::MiniCpmODuplex);
+    }
+
+    #[test]
+    fn detect_from_config_json_architectures_minicpmo() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"architectures": ["MiniCPMO"]}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::MiniCpmODuplex);
+    }
+
+    #[test]
+    fn detect_path_heuristic_minicpmo_not_claimed_by_minicpm5() {
+        let result = detect_model_type("/models/MiniCPM-o-4_5");
+        assert_eq!(result, ModelType::MiniCpmODuplex);
+    }
+
+    #[test]
     fn model_type_from_str_voxtral_variants() {
         assert_eq!(ModelType::from_str("voxtral_tts"), ModelType::VoxtralTTS);
         assert_eq!(ModelType::from_str("voxtral-tts"), ModelType::VoxtralTTS);
@@ -767,6 +830,7 @@ mod tests {
         assert_eq!(ModelType::HunyuanDense.display_name(), "hunyuan");
         assert_eq!(ModelType::Minicpm5.display_name(), "minicpm5");
         assert_eq!(ModelType::MinicpmV46.display_name(), "minicpmv4_6");
+        assert_eq!(ModelType::MiniCpmODuplex.display_name(), "minicpmo_duplex");
         assert_eq!(ModelType::Qwen25.display_name(), "qwen25");
         assert_eq!(ModelType::Qwen3.display_name(), "qwen3");
         assert_eq!(ModelType::Qwen3ASR.display_name(), "qwen3_asr");
