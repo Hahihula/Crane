@@ -4,11 +4,13 @@
 //! [`minicpm4::MiniCpm4Model`]), `feat_encoder`/`feat_decoder` (non-causal,
 //! same shared stack), and a separate DAC-style `audio_vae` codec — see
 //! `config.rs` for the architecture summary and `model.rs` for the
-//! zero-shot generation loop.
+//! generation loop.
 //!
-//! This pass covers **zero-shot generation only** (no reference-audio
-//! conditioning / voice cloning, no streaming) — see the module docs on
-//! [`model::VoxCpm2Model`].
+//! Covers **zero-shot generation and reference-audio conditioning (voice
+//! cloning) with prompt-cache support** — see [`model::VoxCpm2Conditioning`]
+//! for the four supported modes and [`model::VoxCpm2PromptCache`] for
+//! multi-turn reuse. **Streaming generation is not implemented** — see the
+//! module docs on [`model::VoxCpm2Model`].
 
 pub mod audio_vae;
 pub mod cfm;
@@ -21,4 +23,4 @@ pub mod model;
 pub mod tokenizer;
 
 pub use config::{load_config, VoxCpm2Config};
-pub use model::{VoxCpm2GenerationConfig, VoxCpm2Model};
+pub use model::{VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2PromptCache};

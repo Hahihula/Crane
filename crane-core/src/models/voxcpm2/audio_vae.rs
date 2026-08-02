@@ -303,6 +303,106 @@ impl AudioVaeDecoder {
     }
 }
 
+// ── Encoder block (downsample stage) ────────────────────────────────────
+
+/// Port of `CausalEncoderBlock`: `3x CausalResidualUnit (dilations 1, 3, 9)
+/// -> snake -> causal conv (downsample by `stride`)`. Mirror-image of
+/// `CausalDecoderBlock` (residual units *before* the resample op instead of
+/// after, downsampling conv instead of transpose-conv upsample). The
+/// residual units run on `input_dim` (pre-downsample channel count), the
+/// final conv projects `input_dim -> output_dim`; unlike the decoder's
+/// downsample-mirror, **this conv is always `groups=1`** regardless of
+/// `depthwise` — `CausalEncoderBlock.__init__` never threads `groups` into
+/// its own `WNCausalConv1d` call, confirmed against the real checkpoint's
+/// tensor shapes (`encoder.block.N.block.4.weight_v` has full `input_dim`
+/// in its second axis, not `input_dim/groups`).
+struct CausalEncoderBlock {
+    res_units: [CausalResidualUnit; 3],
+    snake: Snake1d,
+    downsample: CausalConv1d,
+}
+
+impl CausalEncoderBlock {
+    fn load(input_dim: usize, output_dim: usize, stride: usize, depthwise: bool, vb: VarBuilder) -> Result<Self> {
+        let vb = vb.pp("block");
+        let groups = if depthwise { input_dim } else { 1 };
+        let padding = stride.div_ceil(2);
+        let output_padding = stride % 2;
+        let res_units = [
+            CausalResidualUnit::load(input_dim, 1, groups, vb.pp(0))?,
+            CausalResidualUnit::load(input_dim, 3, groups, vb.pp(1))?,
+            CausalResidualUnit::load(input_dim, 9, groups, vb.pp(2))?,
+        ];
+        let snake = Snake1d::load(input_dim, vb.pp(3))?;
+        let downsample =
+            CausalConv1d::load(input_dim, output_dim, 2 * stride, stride, 1, 1, padding, output_padding, vb.pp(4))?;
+        Ok(Self { res_units, snake, downsample })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let mut x = x.clone();
+        for unit in &self.res_units {
+            x = unit.forward(&x)?;
+        }
+        self.downsample.forward(&self.snake.forward(&x)?)
+    }
+}
+
+// ── Top-level encoder ────────────────────────────────────────────────────
+
+/// Port of `CausalEncoder.forward`, `mu` output only — no `logvar`/sampling
+/// at inference (deterministic, matches `AudioVAE.encode()`'s own posture:
+/// `self.encoder(audio_data)["mu"]`, `fc_logvar` is computed but unused
+/// there, so this doesn't even load it). Channel progression for
+/// `encoder_dim=128, encoder_rates=[2,5,8,8]`: `1 -[init conv]-> 128 -> 256
+/// -> 512 -> 1024 -> 2048 -[fc_mu]-> latent_dim(64)`.
+pub struct AudioVaeEncoder {
+    init_conv: CausalConv1d,
+    blocks: Vec<CausalEncoderBlock>,
+    fc_mu: CausalConv1d,
+    /// `prod(encoder_rates)` — total downsample factor; audio must be
+    /// padded to a multiple of this before encoding (`preprocess`).
+    hop_length: usize,
+}
+
+impl AudioVaeEncoder {
+    pub fn new(encoder_dim: usize, latent_dim: usize, encoder_rates: &[usize], vb: VarBuilder) -> Result<Self> {
+        let depthwise = true; // this checkpoint's AudioVAEConfig default, same as the decoder
+        let vb_block = vb.pp("block");
+
+        let init_conv = CausalConv1d::load(1, encoder_dim, 7, 1, 1, 1, 3, 0, vb_block.pp(0))?;
+
+        let mut blocks = Vec::with_capacity(encoder_rates.len());
+        let mut ch = encoder_dim;
+        for (i, &stride) in encoder_rates.iter().enumerate() {
+            let output_dim = ch * 2;
+            // `encoder.block.{1..}` (index 0 is the initial conv above).
+            blocks.push(CausalEncoderBlock::load(ch, output_dim, stride, depthwise, vb_block.pp(1 + i))?);
+            ch = output_dim;
+        }
+
+        let fc_mu = CausalConv1d::load(ch, latent_dim, 3, 1, 1, 1, 1, 0, vb.pp("fc_mu"))?;
+
+        Ok(Self { init_conv, blocks, fc_mu, hop_length: encoder_rates.iter().product() })
+    }
+
+    /// `audio`: `[B, 1, T]` raw waveform at the VAE's native (encoder) sample
+    /// rate. Right-zero-pads `T` to a multiple of `hop_length` (matching
+    /// `AudioVAE.preprocess`), then returns `mu`: `[B, latent_dim, T']`
+    /// where `T' = T_padded / hop_length`.
+    pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
+        let t = audio.dim(2)?;
+        let right_pad = t.div_ceil(self.hop_length) * self.hop_length - t;
+        let x = if right_pad > 0 { audio.pad_with_zeros(2, 0, right_pad)? } else { audio.clone() };
+
+        let mut x = self.init_conv.forward(&x)?;
+        for block in &self.blocks {
+            x = block.forward(&x)?;
+        }
+        self.fc_mu.forward(&x)
+    }
+}
+
 #[cfg(test)]
 mod shape_smoke_test {
     use super::*;
@@ -335,5 +435,105 @@ mod shape_smoke_test {
         let flat: Vec<f32> = wav.flatten_all().unwrap().to_vec1().unwrap();
         assert!(flat.iter().all(|v| v.is_finite()), "non-finite sample in output");
         assert!(flat.iter().all(|v| (-1.0..=1.0).contains(v)), "sample outside tanh range");
+    }
+
+    #[test]
+    #[ignore = "needs the real VoxCPM2 checkpoint (audiovae.safetensors)"]
+    fn encode_real_weights_shape_smoke_test() {
+        let path = "/home/hahihula/mywork/ai/additional_models/VoxCPM2/audiovae.safetensors";
+        let device = Device::Cpu;
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
+
+        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
+
+        // hop_length = 2*5*8*8 = 640. A few multiples of that is enough to
+        // exercise every stride and the right-zero-pad path.
+        let audio = Tensor::randn(0f32, 1f32, (1, 1, 640 * 5 + 37), &device).unwrap();
+        let mu = encoder.encode(&audio).expect("encode");
+        eprintln!("mu shape: {:?}", mu.dims());
+        assert_eq!(mu.dim(0).unwrap(), 1);
+        assert_eq!(mu.dim(1).unwrap(), 64);
+        // Padded length is the next multiple of 640 above 640*5+37, i.e. 640*6.
+        assert_eq!(mu.dim(2).unwrap(), 6);
+
+        let flat: Vec<f32> = mu.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()), "non-finite value in mu output");
+    }
+
+    // Round-trips a real waveform through encode() then decode() and checks
+    // the reconstruction is plausible (not a numeric HF diff — that's a
+    // separate, `#[ignore]`d cross-check against a real Python dump).
+    #[test]
+    #[ignore = "needs the real VoxCPM2 checkpoint (audiovae.safetensors)"]
+    fn encode_decode_roundtrip_shape_smoke_test() {
+        let path = "/home/hahihula/mywork/ai/additional_models/VoxCPM2/audiovae.safetensors";
+        let device = Device::Cpu;
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
+
+        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
+        let decoder = AudioVaeDecoder::new(64, 2048, &[8, 6, 5, 2, 2, 2], vec![20_000, 30_000, 40_000], 48_000, vb.pp("decoder"))
+            .expect("build decoder");
+
+        let audio = Tensor::randn(0f32, 0.1f32, (1, 1, 640 * 8), &device).unwrap();
+        let mu = encoder.encode(&audio).expect("encode");
+        let wav = decoder.decode(&mu).expect("decode");
+        eprintln!("input len: {}, mu shape: {:?}, output len: {}", 640 * 8, mu.dims(), wav.dim(2).unwrap());
+
+        let flat: Vec<f32> = wav.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()), "non-finite sample in round-tripped output");
+        assert!(flat.iter().all(|v| (-1.0..=1.0).contains(v)), "sample outside tanh range");
+    }
+}
+
+#[cfg(test)]
+mod hf_diff {
+    use super::*;
+    use candle_core::{DType, Device};
+    use candle_nn::VarBuilder;
+
+    // Cross-checks `AudioVaeEncoder::encode` against a real
+    // `AudioVAE.encode()` dump (see voxcpm_encode_diff.py in this session's
+    // job tmp dir). `cargo test --release -p crane-core
+    // encode_matches_python -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs the real VoxCPM2 checkpoint + a matching HF dump"]
+    fn encode_matches_python() {
+        let model_path = "/home/hahihula/mywork/ai/additional_models/VoxCPM2";
+        let diff_dir = "/home/hahihula/.claude/jobs/02aa7312/tmp/voxcpm_encode_diff";
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[format!("{model_path}/audiovae.safetensors")], dtype, &device) }.unwrap();
+        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).unwrap();
+
+        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap()).unwrap();
+        let input_len = meta["input_len"].as_u64().unwrap() as usize;
+        let latent_dim = meta["latent_dim"].as_u64().unwrap() as usize;
+        let out_len = meta["out_len"].as_u64().unwrap() as usize;
+
+        let load = |name: &str, shape: (usize, usize, usize)| -> Tensor {
+            let raw = std::fs::read(format!("{diff_dir}/{name}.bin")).unwrap();
+            let floats: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            Tensor::from_vec(floats, shape, &device).unwrap()
+        };
+
+        let input_audio = load("input_audio", (1, 1, input_len));
+        let hf_mu = load("mu", (1, latent_dim, out_len));
+
+        let rust_mu = encoder.encode(&input_audio).unwrap();
+        println!("rust_mu shape: {:?}, hf_mu shape: {:?}", rust_mu.dims(), hf_mu.dims());
+        assert_eq!(rust_mu.dims(), hf_mu.dims());
+
+        let rust_flat: Vec<f32> = rust_mu.flatten_all().unwrap().to_vec1().unwrap();
+        let hf_flat: Vec<f32> = hf_mu.flatten_all().unwrap().to_vec1().unwrap();
+
+        let dot: f64 = rust_flat.iter().zip(&hf_flat).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
+        let norm_a: f64 = rust_flat.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt();
+        let norm_b: f64 = hf_flat.iter().map(|b| f64::from(*b).powi(2)).sum::<f64>().sqrt();
+        let cosine = dot / (norm_a * norm_b);
+        let max_abs_diff = rust_flat.iter().zip(&hf_flat).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        println!("cosine: {cosine}, max_abs_diff: {max_abs_diff}");
+
+        assert!(cosine > 0.999, "encode() diverged from Python: cosine={cosine}");
     }
 }
