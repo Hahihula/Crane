@@ -36,6 +36,7 @@ pub enum ModelType {
     Qwen3TTS,
     VoxtralTTS,
     Kokoro,
+    VoxCpm2,
     PaddleOcrVl,
     Qwen3ASR,
 }
@@ -64,6 +65,7 @@ impl ModelType {
             "qwen3_tts" | "qwen3tts" | "qwen3-tts" | "tts" => Self::Qwen3TTS,
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
             "kokoro" | "kokoro_tts" | "kokoro-tts" | "kokoro-82m" => Self::Kokoro,
+            "voxcpm2" | "voxcpm-2" | "voxcpm_2" | "voxcpm" => Self::VoxCpm2,
             "paddleocr_vl" | "paddleocrv" | "paddleocr" | "paddle_ocr_vl" | "paddleocrvl" => Self::PaddleOcrVl,
             "qwen3_asr" | "qwen3asr" | "qwen3-asr" | "asr" => Self::Qwen3ASR,
             _ => Self::Auto,
@@ -86,6 +88,7 @@ impl ModelType {
             Self::Qwen3TTS => "qwen3_tts",
             Self::VoxtralTTS => "voxtral_tts",
             Self::Kokoro => "kokoro_tts",
+            Self::VoxCpm2 => "voxcpm2",
             Self::PaddleOcrVl => "paddleocr_vl",
             Self::Qwen3ASR => "qwen3_asr",
         }
@@ -100,7 +103,7 @@ impl ModelType {
     /// Whether this model type is a TTS model.
     #[must_use]
     pub fn is_tts(&self) -> bool {
-        matches!(self, Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro)
+        matches!(self, Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro | Self::VoxCpm2)
     }
 
     /// Whether this model type is an ASR model.
@@ -142,6 +145,10 @@ struct HfConfig {
     model_type: Option<String>,
     architectures: Option<Vec<String>>,
     vision_config: Option<serde_json::Value>,
+    /// VoxCPM2's `config.json` uses a **singular** `"architecture"` string
+    /// field (not the plural HF-style `"architectures"` list) — genuinely
+    /// distinctive, checked separately in `detect_model_type`.
+    architecture: Option<String>,
 }
 
 /// Minimal subset of Mistral `params.json` for architecture detection.
@@ -165,6 +172,14 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         && let Ok(data) = std::fs::read(&config_path)
         && let Ok(config) = serde_json::from_slice::<HfConfig>(&data)
     {
+        // 0. Check the singular `architecture` field (VoxCPM2's schema —
+        // no `model_type`, no plural `architectures`, so this must be
+        // checked separately or it's silently invisible to the branches
+        // below).
+        if config.architecture.as_deref().map(str::to_lowercase).as_deref() == Some("voxcpm2") {
+            return ModelType::VoxCpm2;
+        }
+
         // 1. Check `model_type` field
         if let Some(ref mt) = config.model_type {
             match mt.to_lowercase().as_str() {
@@ -261,6 +276,8 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::VoxtralTTS
     } else if path_lower.contains("kokoro") {
         ModelType::Kokoro
+    } else if path_lower.contains("voxcpm") {
+        ModelType::VoxCpm2
     } else if path_lower.contains("paddleocr") {
         ModelType::PaddleOcrVl
     } else if path_lower.contains("gemma4") || path_lower.contains("gemma-4") {
@@ -429,6 +446,9 @@ pub fn create_backend(
         ModelType::Kokoro => {
             anyhow::bail!("Kokoro is a TTS model — use create_tts() instead of create_backend()")
         }
+        ModelType::VoxCpm2 => {
+            anyhow::bail!("VoxCPM2 is a TTS model — use create_tts() instead of create_backend()")
+        }
         ModelType::Qwen3ASR => {
             anyhow::bail!("Qwen3-ASR is an ASR model — use create_asr() instead of create_backend()")
         }
@@ -526,6 +546,10 @@ pub fn create_tts(
         ModelType::Kokoro => create_kokoro_tts(model_path, device, dtype),
         #[cfg(not(feature = "onnx"))]
         ModelType::Kokoro => anyhow::bail!("Kokoro TTS requires the 'onnx' feature"),
+        ModelType::VoxCpm2 => {
+            let model = crane_core::models::voxcpm2::VoxCpm2Model::new(model_path, device, dtype)?;
+            Ok(Box::new(model))
+        }
         other => anyhow::bail!("{other:?} is not a TTS model type"),
     }
 }
@@ -675,6 +699,35 @@ mod tests {
         assert_eq!(ModelType::from_str("kokoro-tts"), ModelType::Kokoro);
         assert_eq!(ModelType::from_str("kokoro-82m"), ModelType::Kokoro);
         assert_eq!(ModelType::from_str("KOKORO"), ModelType::Kokoro);
+    }
+
+    #[test]
+    fn model_type_from_str_voxcpm2_variants() {
+        assert_eq!(ModelType::from_str("voxcpm2"), ModelType::VoxCpm2);
+        assert_eq!(ModelType::from_str("voxcpm-2"), ModelType::VoxCpm2);
+        assert_eq!(ModelType::from_str("voxcpm_2"), ModelType::VoxCpm2);
+        assert_eq!(ModelType::from_str("voxcpm"), ModelType::VoxCpm2);
+        assert_eq!(ModelType::from_str("VOXCPM2"), ModelType::VoxCpm2);
+    }
+
+    #[test]
+    fn model_type_is_tts_includes_voxcpm2() {
+        assert!(ModelType::VoxCpm2.is_tts());
+    }
+
+    #[test]
+    fn detect_from_config_json_singular_architecture_voxcpm2() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"architecture": "voxcpm2"}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::VoxCpm2);
+    }
+
+    #[test]
+    fn detect_path_heuristic_voxcpm2() {
+        let result = detect_model_type("/models/VoxCPM2");
+        assert_eq!(result, ModelType::VoxCpm2);
     }
 
     #[test]

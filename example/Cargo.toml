@@ -72,6 +72,10 @@ name = "hunyuan_simple"
 path = "src/hunyuan_simple.rs"
 
 [[bin]]
+name = "voxcpm2_simple"
+path = "src/voxcpm2_simple.rs"
+
+[[bin]]
 name = "onnx_probe"
 path = "src/onnx_probe.rs"
 

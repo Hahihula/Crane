@@ -20,6 +20,7 @@ pub mod gemma4;
 pub mod hunyuan_dense;
 pub mod minicpm5;
 pub mod minicpm_v;
+pub mod voxcpm2;
 pub mod voxtral_tts;
 
 #[cfg(feature = "onnx")]
