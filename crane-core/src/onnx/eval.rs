@@ -2478,29 +2478,91 @@ fn simple_eval_(
                         .unwrap_or("half_pixel");
                 // Interpolation mode: nearest, linear, or cubic.
                 let mode = get_attr_opt::<str>(node, "mode")?.unwrap_or("nearest");
-                // How to determine the "nearest" pixel in nearest interpolation mode.
-                let nearest_mode =
-                    get_attr_opt::<str>(node, "nearest_mode")?.unwrap_or("round_prefer_floor");
 
-                if mode != "nearest" {
-                    bail!("Unsupported resize mode: {}", mode);
-                }
+                // Crane Added 20260802: mode="linear" half-pixel single-axis
+                // interpolation, e.g. resampling a vocoder's [N, C, L]
+                // waveform along its length. Only a `scales` input with
+                // exactly one non-1.0-scaled axis is supported.
+                let output = if mode == "linear" {
+                    if coordinate_transformation_mode != "half_pixel" {
+                        bail!(
+                            "Unsupported coordinate_transformation_mode for linear resize: {}",
+                            coordinate_transformation_mode
+                        );
+                    }
+                    let Some(scales_tensor) = scales else {
+                        bail!("Resize mode=\"linear\" requires a 'scales' input (not 'sizes')");
+                    };
+                    let scale_values = scales_tensor.to_vec1::<f32>()?;
+                    let mut axis = None;
+                    for (i, &s) in scale_values.iter().enumerate() {
+                        if (s - 1.0).abs() > 1e-6 {
+                            if axis.is_some() {
+                                bail!(
+                                    "Resize mode=\"linear\" only supports a single scaled axis, got scales {scale_values:?}"
+                                );
+                            }
+                            axis = Some(i);
+                        }
+                    }
+                    let Some(axis) = axis else {
+                        bail!("Resize mode=\"linear\": no axis has a non-1.0 scale");
+                    };
 
-                if nearest_mode != "floor" {
-                    bail!("Unsupported nearest_mode for resize: {}", nearest_mode);
-                }
+                    let in_len = input.dim(axis)?;
+                    let out_len = output_dims[axis];
+                    let scale = scale_values[axis];
+                    let max_idx = in_len as i64 - 1;
 
-                if coordinate_transformation_mode != "asymmetric" {
-                    bail!(
-                        "Unsupported coordinate_transformation_mode for resize: {}",
-                        coordinate_transformation_mode
-                    );
-                }
+                    let mut floor_idx = Vec::with_capacity(out_len);
+                    let mut ceil_idx = Vec::with_capacity(out_len);
+                    let mut fracs = Vec::with_capacity(out_len);
+                    for i in 0..out_len {
+                        let coord = (i as f32 + 0.5) / scale - 0.5;
+                        let f = coord.floor();
+                        let f_i64 = f as i64;
+                        floor_idx.push(f_i64.clamp(0, max_idx));
+                        ceil_idx.push((f_i64 + 1).clamp(0, max_idx));
+                        fracs.push(coord - f);
+                    }
 
-                let output = match input.rank() {
-                    3 => input.upsample_nearest1d(output_dims[2])?,
-                    4 => input.upsample_nearest2d(output_dims[2], output_dims[3])?,
-                    rank => bail!("Unsupported rank for nearest resize: {rank}"),
+                    let dev = input.device();
+                    let floor_t = Tensor::new(floor_idx, dev)?;
+                    let ceil_t = Tensor::new(ceil_idx, dev)?;
+
+                    let left = input.index_select(&floor_t, axis)?;
+                    let right = input.index_select(&ceil_t, axis)?;
+
+                    let mut frac_shape = vec![1usize; input.rank()];
+                    frac_shape[axis] = out_len;
+                    let frac_t = Tensor::new(fracs, dev)?.reshape(frac_shape)?;
+
+                    left.broadcast_add(&right.broadcast_sub(&left)?.broadcast_mul(&frac_t)?)?
+                } else {
+                    // How to determine the "nearest" pixel in nearest interpolation mode.
+                    let nearest_mode = get_attr_opt::<str>(node, "nearest_mode")?
+                        .unwrap_or("round_prefer_floor");
+
+                    if mode != "nearest" {
+                        bail!("Unsupported resize mode: {}", mode);
+                    }
+
+                    if nearest_mode != "floor" {
+                        bail!("Unsupported nearest_mode for resize: {}", nearest_mode);
+                    }
+
+                    if coordinate_transformation_mode != "asymmetric" {
+                        bail!(
+                            "Unsupported coordinate_transformation_mode for resize: {}",
+                            coordinate_transformation_mode
+                        );
+                    }
+
+                    match input.rank() {
+                        3 => input.upsample_nearest1d(output_dims[2])?,
+                        4 => input.upsample_nearest2d(output_dims[2], output_dims[3])?,
+                        rank => bail!("Unsupported rank for nearest resize: {rank}"),
+                    }
                 };
 
                 values.insert(node.output[0].clone(), output);
@@ -2812,7 +2874,8 @@ mod tests {
     use candle_core::{Device, Result};
 
     use super::{Value, simple_eval};
-    use crate::onnx::proto::{GraphProto, ModelProto, NodeProto, ValueInfoProto};
+    use crate::onnx::proto::attribute_proto::AttributeType;
+    use crate::onnx::proto::{AttributeProto, GraphProto, ModelProto, NodeProto, ValueInfoProto};
 
     #[test]
     fn round_rounds_half_away_from_zero() -> Result<()> {
@@ -2848,6 +2911,111 @@ mod tests {
             outputs["y"].to_vec1::<f32>()?,
             vec![1.0, 3.0, -1.0, -3.0, 1.0, 2.0]
         );
+        Ok(())
+    }
+
+    fn resize_node(mode: &str, coordinate_transformation_mode: &str) -> NodeProto {
+        NodeProto {
+            op_type: "Resize".to_string(),
+            input: vec!["x".to_string(), String::new(), "scales".to_string()],
+            output: vec!["y".to_string()],
+            attribute: vec![
+                AttributeProto {
+                    name: "mode".to_string(),
+                    r#type: AttributeType::String as i32,
+                    s: mode.as_bytes().to_vec(),
+                    ..Default::default()
+                },
+                AttributeProto {
+                    name: "coordinate_transformation_mode".to_string(),
+                    r#type: AttributeType::String as i32,
+                    s: coordinate_transformation_mode.as_bytes().to_vec(),
+                    ..Default::default()
+                },
+                AttributeProto {
+                    name: "nearest_mode".to_string(),
+                    r#type: AttributeType::String as i32,
+                    s: b"floor".to_vec(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn resize_model(node: NodeProto) -> ModelProto {
+        ModelProto {
+            graph: Some(GraphProto {
+                input: vec![ValueInfoProto {
+                    name: "x".to_string(),
+                    ..Default::default()
+                }],
+                node: vec![node],
+                output: vec![ValueInfoProto {
+                    name: "y".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resize_linear_half_pixel_upsamples_single_axis() -> Result<()> {
+        // Verifies mode="linear" scales the one non-1.0-scaled axis using
+        // half-pixel coordinates: coord(i) = (i + 0.5) / scale - 0.5, so
+        // i=0 -> -0.25 (clamped to index 0, value 0.0) and i=1 -> 0.25 ->
+        // lerp(0, 10, 0.25) = 2.5.
+        let model = resize_model(resize_node("linear", "half_pixel"));
+        let x = Value::new(&[[0f32, 10., 20., 30.]], &Device::Cpu)?;
+        let scales = Value::new(&[1.0f32, 2.0], &Device::Cpu)?;
+
+        let outputs = simple_eval(
+            &model,
+            [("x".to_string(), x), ("scales".to_string(), scales)].into(),
+        )?;
+
+        let got = outputs["y"].to_vec2::<f32>()?[0].clone();
+        let expected = [0.0f32, 2.5, 7.5, 12.5, 17.5, 22.5, 27.5, 30.0];
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-4, "got {got:?}, expected {expected:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resize_linear_half_pixel_downsamples_single_axis() -> Result<()> {
+        // Verifies mode="linear" also handles a scale factor below 1.0
+        // (downsampling), producing floor(input_len * scale) outputs.
+        let model = resize_model(resize_node("linear", "half_pixel"));
+        let x = Value::new(&[[0f32, 10., 20., 30.]], &Device::Cpu)?;
+        let scales = Value::new(&[1.0f32, 0.5], &Device::Cpu)?;
+
+        let outputs = simple_eval(
+            &model,
+            [("x".to_string(), x), ("scales".to_string(), scales)].into(),
+        )?;
+
+        assert_eq!(outputs["y"].dims(), &[1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn resize_nearest_asymmetric_supports_rank3() -> Result<()> {
+        // Verifies mode="nearest" now dispatches rank-3 [N, C, L] inputs to
+        // upsample_nearest1d instead of hard-bailing, alongside the
+        // existing rank-4 upsample_nearest2d path.
+        let model = resize_model(resize_node("nearest", "asymmetric"));
+        let x = Value::new(&[[[0f32, 10.]]], &Device::Cpu)?;
+        let scales = Value::new(&[1.0f32, 1.0, 2.0], &Device::Cpu)?;
+
+        let outputs = simple_eval(
+            &model,
+            [("x".to_string(), x), ("scales".to_string(), scales)].into(),
+        )?;
+
+        assert_eq!(outputs["y"].dims(), &[1, 1, 4]);
         Ok(())
     }
 }
