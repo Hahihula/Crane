@@ -14,6 +14,7 @@ use english::EnglishG2p;
 pub mod english;
 mod english_numerals;
 mod english_rules;
+pub mod german;
 
 /// Language identifiers currently registered in [`LanguageG2p`].
 ///
