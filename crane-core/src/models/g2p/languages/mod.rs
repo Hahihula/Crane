@@ -15,6 +15,7 @@ pub mod english;
 mod english_numerals;
 mod english_rules;
 pub mod german;
+mod german_compound;
 mod german_numerals;
 mod german_rules;
 

@@ -2,11 +2,13 @@
 
 //! German (`de`) grapheme-to-phoneme engine.
 //!
-//! Two tiers: case-cascading lexicon lookup, then hand-written
-//! letter-to-sound rules (see [`german_rules`](super::german_rules)) as the
-//! final fallback for a lookup miss. `GermanG2p` is not yet reachable
-//! through [`LanguageG2p`](super::LanguageG2p) — a `LanguageG2p::German`
-//! variant will be added once compound-word decomposition also lands.
+//! Three tiers: case-cascading lexicon lookup, then compound-word
+//! decomposition (see [`german_compound`](super::german_compound)) for a
+//! whole-word miss, then hand-written letter-to-sound rules (see
+//! [`german_rules`](super::german_rules)) as the final fallback when neither
+//! finds anything. `GermanG2p` is not yet reachable through
+//! [`LanguageG2p`](super::LanguageG2p) — a `LanguageG2p::German` variant
+//! lands in a later step.
 
 use anyhow::Result;
 
@@ -50,11 +52,13 @@ impl GermanG2p {
     /// downstream lookup never sees raw digits. Each resulting word has
     /// attached punctuation trimmed from its edges (case preserved — see
     /// [`trim_edge_punctuation`]) before being resolved via
-    /// [`lookup_cascade`]; a lexicon miss falls through to the
-    /// [`hand_rules_ipa`](super::german_rules::hand_rules_ipa) rule engine.
-    /// A word that normalizes to nothing (all punctuation) or that produces
-    /// no IPA from either tier is skipped entirely, rather than erroring or
-    /// inserting a placeholder.
+    /// [`lookup_cascade`]; a lexicon miss tries
+    /// [`decompose`](super::german_compound::decompose) (compound-word
+    /// splitting), and only falls through to the
+    /// [`hand_rules_ipa`](super::german_rules::hand_rules_ipa) rule engine
+    /// if that also finds nothing. A word that normalizes to nothing (all
+    /// punctuation) or that produces no IPA from any tier is skipped
+    /// entirely, rather than erroring or inserting a placeholder.
     ///
     /// # Errors
     ///
@@ -71,15 +75,18 @@ impl GermanG2p {
             if word.is_empty() {
                 continue;
             }
-            let rules_ipa;
+            let owned_ipa;
             let word_ipa = if let Some(ipa) = lookup_cascade(&self.lexicon, word) {
                 ipa
+            } else if let Some(compound_ipa) = super::german_compound::decompose(&self.lexicon, word) {
+                owned_ipa = compound_ipa;
+                owned_ipa.as_str()
             } else {
-                rules_ipa = super::german_rules::hand_rules_ipa(word);
-                if rules_ipa.is_empty() {
+                owned_ipa = super::german_rules::hand_rules_ipa(word);
+                if owned_ipa.is_empty() {
                     continue;
                 }
-                rules_ipa.as_str()
+                owned_ipa.as_str()
             };
             if !ipa.is_empty() {
                 ipa.push(' ');
@@ -106,7 +113,7 @@ impl GermanG2p {
 /// reproduce a key already tried: title-casing is a no-op when `word`
 /// already starts uppercase, and lowercasing is a no-op when `word` has no
 /// uppercase characters at all.
-fn lookup_cascade<'a>(lexicon: &'a Lexicon, word: &str) -> Option<&'a str> {
+pub(super) fn lookup_cascade<'a>(lexicon: &'a Lexicon, word: &str) -> Option<&'a str> {
     if let Some(ipa) = lexicon.get(word) {
         return Some(ipa);
     }
@@ -200,6 +207,16 @@ mod tests {
         assert_eq!(words.first(), Some(&"haʊ̯s"));
         assert_eq!(words.last(), Some(&"ˈfɛnstɐ"));
         assert!(ipa.contains('ʃ'), "Schublade should produce ʃ from sch: {ipa}");
+    }
+
+    #[test]
+    fn text_to_ipa_miss_word_falls_through_to_compound_decomposition() {
+        // "Handschuhfach" isn't in the lexicon whole, but decomposes into
+        // "Hand" + "Schuhfach", both of which are — so it resolves via
+        // compound decomposition rather than falling all the way through
+        // to hand rules.
+        let engine = GermanG2p::new("Hand\thant\nSchuhfach\tʃuːfax\n").unwrap();
+        assert_eq!(engine.text_to_ipa("Handschuhfach").unwrap(), "hantʃuːfax");
     }
 
     #[test]
