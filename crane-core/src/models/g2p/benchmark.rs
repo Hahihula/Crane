@@ -15,6 +15,14 @@ use std::collections::HashMap;
 /// tiers exist to benchmark against.
 pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 
+/// External reference CER for the held-out `de` test set
+/// (`crane-core/tests/data/g2p/de_test.tsv`), measured from a rule-based
+/// German G2P reference implementation with those words excluded from its
+/// lexicon, forcing every prediction through its rule fallback tier alone.
+/// This is the regression threshold `de` CER must stay at or below once the
+/// lexicon/rules tiers exist to benchmark against.
+pub const REFERENCE_CER_DE: f64 = 0.4390;
+
 /// Per-word benchmark result.
 pub struct WordResult {
     /// The input word.
