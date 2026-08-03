@@ -13,7 +13,10 @@
 use anyhow::Result;
 
 use crate::models::g2p::lexicon::Lexicon;
+use crate::models::g2p::numeral_expand::expand_numerals;
 use crate::models::g2p::text_normalize::{split_text_to_words, trim_edge_punctuation};
+
+use super::german_numerals::GermanNumerals;
 
 /// German grapheme-to-phoneme engine: case-cascading lexicon lookup, then
 /// hand-written rule fallback (rules not yet wired in — see the module
@@ -44,8 +47,11 @@ impl GermanG2p {
 
     /// Converts `text` to a space-joined IPA phoneme string.
     ///
-    /// Each word has attached punctuation trimmed from its edges (case
-    /// preserved — see [`trim_edge_punctuation`]) before being resolved via
+    /// Digit runs are expanded to their German cardinal spelling (see
+    /// [`expand_numerals`]/[`GermanNumerals`]) before word splitting, so
+    /// downstream lookup never sees raw digits. Each resulting word has
+    /// attached punctuation trimmed from its edges (case preserved — see
+    /// [`trim_edge_punctuation`]) before being resolved via
     /// [`lookup_cascade`]. A word that normalizes to nothing (all
     /// punctuation) or that misses every case-cascade tier is skipped
     /// entirely for now, rather than erroring or inserting a placeholder —
@@ -58,6 +64,9 @@ impl GermanG2p {
     /// [`Phonemizer`](crate::models::g2p::Phonemizer) trait contract other
     /// language engines rely on.
     pub fn text_to_ipa(&self, text: &str) -> Result<String> {
+        let text = expand_numerals(text, &GermanNumerals);
+        let text: &str = &text;
+
         let mut ipa = String::with_capacity(text.len());
         for word in split_text_to_words(text) {
             let word = trim_edge_punctuation(word);
@@ -182,6 +191,16 @@ mod tests {
         assert_eq!(
             engine.text_to_ipa("Haus Schublade Fenster").unwrap(),
             "haʊ̯s ˈfɛnstɐ"
+        );
+    }
+
+    #[test]
+    fn text_to_ipa_expands_numerals_before_lexicon_lookup() {
+        let tsv = "Ich\tʔɪç\nhabe\tˈhaːbə\neinundzwanzig\tˈaɪ̯nʔʊntˌt͡svanˌt͡sɪç\nKatzen\tˈkatsn̩\n";
+        let engine = GermanG2p::new(tsv).unwrap();
+        assert_eq!(
+            engine.text_to_ipa("Ich habe 21 Katzen").unwrap(),
+            "ʔɪç ˈhaːbə ˈaɪ̯nʔʊntˌt͡svanˌt͡sɪç ˈkatsn̩"
         );
     }
 
