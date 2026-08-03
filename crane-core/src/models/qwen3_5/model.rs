@@ -367,7 +367,7 @@ impl Qwen3_5TextModel {
         let (_b, seq_len) = input_ids.dims2()?;
         let is_decode_step = seq_len == 1;
 
-        let mut xs = self.embed_tokens.forward(input_ids)?;
+        let xs = self.embed_tokens.forward(input_ids)?;
         self.forward_through_layers(xs, start_pos, attention_mask, is_decode_step, None)
     }
 
