@@ -22,7 +22,7 @@ impl MultimodalClient {
         image_file: P,
         prompt: &str,
     ) -> CraneResult<String> {
-        let device = match &self.config.device {
+        let _device = match &self.config.device {
             DeviceConfig::Cpu => crane_core::models::Device::Cpu,
             DeviceConfig::Cuda(gpu_id) => {
                 crane_core::models::Device::cuda_if_available(*gpu_id as usize)
@@ -43,7 +43,7 @@ impl MultimodalClient {
             }
         };
 
-        let dtype = match self.config.dtype {
+        let _dtype = match self.config.dtype {
             DataType::F16 => crane_core::models::DType::F16,
             DataType::F32 => crane_core::models::DType::F32,
             DataType::BF16 => crane_core::models::DType::BF16,
