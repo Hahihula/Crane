@@ -3,12 +3,10 @@
 //! German (`de`) grapheme-to-phoneme engine.
 //!
 //! Two tiers: case-cascading lexicon lookup, then hand-written
-//! letter-to-sound rules as the final fallback. Only the lexicon-lookup
-//! tier exists so far — a lookup miss currently contributes nothing to the
-//! output, since there is no rule fallback wired in yet. `GermanG2p` is also
-//! not yet reachable through [`LanguageG2p`](super::LanguageG2p) — a
-//! `LanguageG2p::German` variant will be added once the rule fallback tier
-//! lands.
+//! letter-to-sound rules (see [`german_rules`](super::german_rules)) as the
+//! final fallback for a lookup miss. `GermanG2p` is not yet reachable
+//! through [`LanguageG2p`](super::LanguageG2p) — a `LanguageG2p::German`
+//! variant will be added once compound-word decomposition also lands.
 
 use anyhow::Result;
 
@@ -52,11 +50,11 @@ impl GermanG2p {
     /// downstream lookup never sees raw digits. Each resulting word has
     /// attached punctuation trimmed from its edges (case preserved — see
     /// [`trim_edge_punctuation`]) before being resolved via
-    /// [`lookup_cascade`]. A word that normalizes to nothing (all
-    /// punctuation) or that misses every case-cascade tier is skipped
-    /// entirely for now, rather than erroring or inserting a placeholder —
-    /// the hand-written rule fallback that will close the lookup-miss gap
-    /// lands in a later step.
+    /// [`lookup_cascade`]; a lexicon miss falls through to the
+    /// [`hand_rules_ipa`](super::german_rules::hand_rules_ipa) rule engine.
+    /// A word that normalizes to nothing (all punctuation) or that produces
+    /// no IPA from either tier is skipped entirely, rather than erroring or
+    /// inserting a placeholder.
     ///
     /// # Errors
     ///
@@ -73,8 +71,15 @@ impl GermanG2p {
             if word.is_empty() {
                 continue;
             }
-            let Some(word_ipa) = lookup_cascade(&self.lexicon, word) else {
-                continue;
+            let rules_ipa;
+            let word_ipa = if let Some(ipa) = lookup_cascade(&self.lexicon, word) {
+                ipa
+            } else {
+                rules_ipa = super::german_rules::hand_rules_ipa(word);
+                if rules_ipa.is_empty() {
+                    continue;
+                }
+                rules_ipa.as_str()
             };
             if !ipa.is_empty() {
                 ipa.push(' ');
@@ -186,12 +191,15 @@ mod tests {
     }
 
     #[test]
-    fn text_to_ipa_miss_word_is_skipped_without_double_space() {
+    fn text_to_ipa_miss_word_falls_through_to_hand_rules() {
+        // "Schublade" isn't in the lexicon, so it now falls through to the
+        // hand-rule engine instead of being silently skipped.
         let engine = GermanG2p::new("Haus\thaʊ̯s\nFenster\tˈfɛnstɐ\n").unwrap();
-        assert_eq!(
-            engine.text_to_ipa("Haus Schublade Fenster").unwrap(),
-            "haʊ̯s ˈfɛnstɐ"
-        );
+        let ipa = engine.text_to_ipa("Haus Schublade Fenster").unwrap();
+        let words: Vec<&str> = ipa.split(' ').collect();
+        assert_eq!(words.first(), Some(&"haʊ̯s"));
+        assert_eq!(words.last(), Some(&"ˈfɛnstɐ"));
+        assert!(ipa.contains('ʃ'), "Schublade should produce ʃ from sch: {ipa}");
     }
 
     #[test]

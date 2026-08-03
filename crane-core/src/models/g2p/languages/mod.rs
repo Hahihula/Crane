@@ -16,6 +16,7 @@ mod english_numerals;
 mod english_rules;
 pub mod german;
 mod german_numerals;
+mod german_rules;
 
 /// Language identifiers currently registered in [`LanguageG2p`].
 ///
