@@ -12,6 +12,8 @@ Examples:
     ./crane-model-download --model qwen3-asr-0.6b --path ~/models
     ./crane-model-download --model silero-vad --path ~/models
     ./crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0
+    ./crane-model-download --model moonshine-g2p-en-us --path ~/models
+    ./crane-model-download --model kokoro --path ~/models
 
 Run directly (uv picks up the inline metadata above and manages the
 `huggingface_hub` dependency in an ephemeral venv, no setup needed):
@@ -31,6 +33,8 @@ import argparse
 import os
 import shutil
 import sys
+import urllib.error
+import urllib.request
 
 MODELS = {
     "qwen3-tts-base": {
@@ -90,9 +94,31 @@ MODELS = {
         "quant_template": "Qwen3.5-9B-{quant}.gguf",
         "description": "Qwen 3.5 9B, hybrid GDN + attention, GGUF quant (Apache-2.0)",
     },
+    "moonshine-g2p-en-us": {
+        "repo_id": "moonshine-ai/moonshine",
+        "dirname": "moonshine-g2p/en_us",
+        "kind": "g2p",
+        "source": "github",
+        "github_repo": "moonshine-ai/moonshine",
+        "github_ref": "main",
+        "github_base": "core/moonshine-tts/data/en_us",
+        "files": {
+            "dict_filtered_heteronyms.tsv": "dict_filtered_heteronyms.tsv",
+            "g2p-config.json": "g2p-config.json",
+            "oov/model.onnx": "oov/model.onnx",
+            "oov/onnx-config.json": "oov/onnx-config.json",
+        },
+        "description": "Moonshine G2P English lexicon + OOV ONNX model (MIT)",
+    },
+    "kokoro": {
+        "repo_id": "onnx-community/Kokoro-82M-v1.0-ONNX",
+        "dirname": "Kokoro-82M-v1.0-ONNX",
+        "kind": "tts",
+        "description": "Kokoro 82M, ONNX, 55 voices / 10 languages (Apache-2.0)",
+    },
 }
 
-_VALID_KINDS = ("tts", "asr", "vad", "llm")
+_VALID_KINDS = ("tts", "asr", "vad", "llm", "g2p")
 _REQUIRED_KEYS = ("repo_id", "dirname", "kind", "description")
 for _key, _info in MODELS.items():
     _missing = [k for k in _REQUIRED_KEYS if k not in _info]
@@ -113,7 +139,39 @@ def list_models():
         print(f"  {key:<{width}}  [{kind}]  {info['description']}")
 
 
+def download_github_files(info, local_dir):
+    repo = info["github_repo"]
+    ref = info["github_ref"]
+    base = info.get("github_base", "")
+    for repo_path, local_name in info["files"].items():
+        full_repo_path = f"{base}/{repo_path}" if base else repo_path
+        # Git LFS-tracked files (the .tsv and .onnx here) are stored as
+        # pointer text on raw.githubusercontent.com; media.githubusercontent.com
+        # resolves the actual LFS object content for both LFS and non-LFS
+        # files alike.
+        url = f"https://media.githubusercontent.com/media/{repo}/{ref}/{full_repo_path}"
+        target = os.path.join(local_dir, local_name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        print(f"  {url}")
+        try:
+            with urllib.request.urlopen(url) as response, open(target, "wb") as f:
+                shutil.copyfileobj(response, f)
+        except urllib.error.HTTPError as e:
+            print(f"error: download failed for {url}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
 def download_model(model_key, path, token, quant):
+    info = MODELS[model_key]
+    local_dir = os.path.join(os.path.expanduser(path), info["kind"], info["dirname"])
+
+    if info.get("source") == "github":
+        print(f"Downloading {info['repo_id']} (GitHub) to {local_dir} ...")
+        os.makedirs(local_dir, exist_ok=True)
+        download_github_files(info, local_dir)
+        print(f"\nDone. Use with: crane-serve --model-path {local_dir}")
+        return
+
     try:
         from huggingface_hub import hf_hub_download, snapshot_download
         from huggingface_hub.utils import HfHubHTTPError
@@ -125,8 +183,6 @@ def download_model(model_key, path, token, quant):
         )
         sys.exit(1)
 
-    info = MODELS[model_key]
-    local_dir = os.path.join(os.path.expanduser(path), info["kind"], info["dirname"])
     quant_template = info.get("quant_template")
 
     if quant_template:
@@ -188,7 +244,9 @@ def main():
         "  crane-model-download --model qwen3-tts-customvoice-1.7b --path ~/models --token hf_...\n"
         "  crane-model-download --model qwen3-asr-0.6b --path ~/models\n"
         "  crane-model-download --model silero-vad --path ~/models\n"
-        "  crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0\n",
+        "  crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0\n"
+        "  crane-model-download --model moonshine-g2p-en-us --path ~/models\n"
+        "  crane-model-download --model kokoro --path ~/models\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     group = parser.add_mutually_exclusive_group(required=True)

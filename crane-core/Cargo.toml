@@ -11,6 +11,12 @@ authors.workspace = true
 name = "gdn_bench"
 required-features = ["cuda"]
 
+# G2P hot-path performance benchmark (text_to_ipa, IpaNormalizer::normalize).
+[[bench]]
+name = "g2p"
+harness = false
+required-features = ["onnx"]
+
 [dependencies]
 ahash = "0.8"
 anyhow = "1.0.97"
@@ -33,6 +39,10 @@ base64 = "0.22"
 fancy-regex = "0.18"
 tekken-rs = "0.1.1"
 zip = "8"
+fst = { workspace = true }
+lru = { version = "0.12", optional = true }
+aho-corasick = { version = "1", optional = true }
+unicode-normalization = { version = "0.1", optional = true }
 
 
 intel-mkl-src = { version = "0.8.1", optional = true }
@@ -79,9 +89,10 @@ accelerate = [
     "candle-nn/accelerate",
     "candle-transformers/accelerate",
 ]
-onnx = ["dep:prost", "dep:prost-build"]
+onnx = ["dep:prost", "dep:prost-build", "dep:lru", "dep:aho-corasick", "dep:unicode-normalization"]
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [build-dependencies]
 bindgen_cuda = { version = "0.1.6", optional = true }

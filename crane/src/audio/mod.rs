@@ -7,6 +7,8 @@ mod asr_qwen3;
 mod pcm;
 pub mod tts;
 mod tts_client;
+#[cfg(feature = "onnx")]
+mod tts_kokoro;
 mod tts_qwen3;
 mod tts_voxtral;
 
@@ -18,3 +20,5 @@ pub use pcm::{
 };
 pub use tts::{Tts, TtsStream, VoiceInfo};
 pub use tts_client::TtsClient;
+#[cfg(feature = "onnx")]
+pub use tts_kokoro::KokoroTts;

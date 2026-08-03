@@ -1,5 +1,9 @@
 pub mod modules;
 #[cfg(feature = "onnx")]
+pub mod g2p;
+#[cfg(feature = "onnx")]
+pub mod kokoro_tts;
+#[cfg(feature = "onnx")]
 pub mod moonshine_asr;
 pub mod orpheus;
 pub mod paddleocr_vl;
