@@ -1,5 +1,5 @@
 use crate::common::{
-    config::{CommonConfig, DataType, DeviceConfig},
+    config::{CommonConfig, DeviceConfig},
     CraneError, CraneResult,
 };
 use std::path::Path;
