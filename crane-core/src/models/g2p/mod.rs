@@ -15,6 +15,7 @@ pub mod benchmark;
 pub mod ipa_postprocess;
 pub mod languages;
 pub mod lexicon;
+pub mod numeral_expand;
 pub mod oov_onnx;
 pub mod text_normalize;
 
