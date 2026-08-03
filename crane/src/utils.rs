@@ -37,11 +37,6 @@ fn nvml_gpu_memory_info(index: usize) -> Option<GpuMemoryInfo> {
     })
 }
 
-#[cfg(not(feature = "cuda"))]
-fn nvml_gpu_memory_info(_index: usize) -> Option<GpuMemoryInfo> {
-    None
-}
-
 #[cfg(feature = "cuda")]
 fn nvidia_smi_gpu_memory_info(index: usize) -> Option<GpuMemoryInfo> {
     let output = Command::new("nvidia-smi")
@@ -71,7 +66,3 @@ fn nvidia_smi_gpu_memory_info(index: usize) -> Option<GpuMemoryInfo> {
     })
 }
 
-#[cfg(not(feature = "cuda"))]
-fn nvidia_smi_gpu_memory_info(_index: usize) -> Option<GpuMemoryInfo> {
-    None
-}
