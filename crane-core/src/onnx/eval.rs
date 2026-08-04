@@ -2,6 +2,7 @@ use super::ops;
 use super::proto::attribute_proto::AttributeType;
 use super::proto::tensor_proto::DataType;
 use super::proto::{self as onnx, GraphProto};
+use super::utils::{collect_all_captures, count_nested_subgraph_captures, release_names_if_done};
 use crate::ops::fused_ops;
 use candle::{DType, Device, IndexOp, Result, Tensor, bail};
 use candle_core as candle;
@@ -294,7 +295,7 @@ pub fn simple_eval(
     simple_eval_(graph, &mut inputs)
 }
 
-fn simple_eval_(
+pub(crate) fn simple_eval_(
     graph: &onnx::GraphProto,
     values: &mut HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>> {
@@ -379,6 +380,15 @@ fn simple_eval_(
             *remaining_uses.entry(input.as_str()).or_default() += 1;
         }
     }
+    // Crane Added 20260804: also count references a nested subgraph (e.g.
+    // an "If" node's then_branch/else_branch) makes to a name from this
+    // scope. ONNX lets a subgraph reference any name visible in its
+    // enclosing scope without declaring it as an explicit node input, so
+    // the flat scan just above never sees these — without this, a value
+    // could hit a remaining-use count of zero (from its top-level
+    // consumers alone) and be evicted before a later "If" node's
+    // not-yet-evaluated branch gets to use it. See count_nested_subgraph_captures.
+    count_nested_subgraph_captures(graph, &mut remaining_uses);
     // Crane Added 20260804: never evict a value this invocation didn't
     // itself produce. "If" (below) recursively calls simple_eval_ on a
     // branch's subgraph while sharing the same `values` map with the
@@ -1311,12 +1321,12 @@ fn simple_eval_(
             "If" => {
                 // protobuf encodes boolean false as 0 and true as 1
                 let cond = to_scalar_flexible::<u8>(&get(&node.input[0])?.get(0)?)?;
-                let attr_name = if cond != 0 {
-                    "then_branch"
+                let (taken_attr, untaken_attr) = if cond != 0 {
+                    ("then_branch", "else_branch")
                 } else {
-                    "else_branch"
+                    ("else_branch", "then_branch")
                 };
-                let sub_graph = get_attr::<GraphProto>(node, attr_name)?;
+                let sub_graph = get_attr::<GraphProto>(node, taken_attr)?;
                 if sub_graph.output.len() != node.output.len() {
                     bail!(
                         "If node {:?} is malformed: branch outputs ({}) don't match node outputs ({})",
@@ -1330,6 +1340,39 @@ fn simple_eval_(
                     values.insert(
                         out.clone(),
                         branch_out.get(&sub_graph.output[i].name).unwrap().clone(),
+                    );
+                }
+                // Crane Added 20260806: release the taken branch's captured
+                // (outer-scope) references, recursively through any nested
+                // subgraphs it contains (e.g. an inner "If"), now that it
+                // has actually run — matches the up-front over-count in
+                // count_nested_subgraph_captures, which counts both
+                // branches (and nested subgraphs within them) since the
+                // taken one isn't known until here.
+                let mut taken_captures = Vec::new();
+                collect_all_captures(sub_graph, &mut taken_captures);
+                release_names_if_done(
+                    taken_captures,
+                    &mut remaining_uses,
+                    &graph_outputs,
+                    &inherited_values,
+                    values,
+                );
+                // Crane Added 20260806: the untaken branch's captures were
+                // also counted up front (count_nested_subgraph_captures
+                // can't know which branch will be taken) but that branch
+                // never runs, so its counts would otherwise never be
+                // released. The attribute may be absent (an "If" is valid
+                // with only one branch set), hence get_attr_opt.
+                if let Some(untaken_graph) = get_attr_opt::<GraphProto>(node, untaken_attr)? {
+                    let mut untaken_captures = Vec::new();
+                    collect_all_captures(untaken_graph, &mut untaken_captures);
+                    release_names_if_done(
+                        untaken_captures,
+                        &mut remaining_uses,
+                        &graph_outputs,
+                        &inherited_values,
+                        values,
                     );
                 }
             },
@@ -2789,17 +2832,13 @@ fn simple_eval_(
             op_type => bail!("unsupported op_type {op_type} for op {node:?}"),
         }
 
-        for input in node.input.iter().filter(|input| !input.is_empty()) {
-            if let Some(count) = remaining_uses.get_mut(input.as_str()) {
-                *count -= 1;
-                if *count == 0
-                    && !graph_outputs.contains(input.as_str())
-                    && !inherited_values.contains(input.as_str())
-                {
-                    values.remove(input);
-                }
-            }
-        }
+        release_names_if_done(
+            node.input.iter().filter(|input| !input.is_empty()).map(String::as_str),
+            &mut remaining_uses,
+            &graph_outputs,
+            &inherited_values,
+            values,
+        );
     }
     graph
         .output
@@ -2896,9 +2935,11 @@ fn to_vec0_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use candle_core::{Device, Result};
 
-    use super::{Value, simple_eval};
+    use super::{Value, simple_eval, simple_eval_};
     use crate::onnx::proto::attribute_proto::AttributeType;
     use crate::onnx::proto::{AttributeProto, GraphProto, ModelProto, NodeProto, ValueInfoProto};
 
