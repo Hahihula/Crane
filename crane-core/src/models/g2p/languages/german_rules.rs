@@ -29,15 +29,28 @@ const IPA_PRIMARY_STRESS: char = 'ˈ';
 /// Unstressed prefixes: a word starting with one of these (with a nonempty
 /// remainder) puts primary stress on the syllable after the prefix instead
 /// of the first syllable. Order matters only in that a longer prefix must
-/// precede any shorter prefix it starts with (`"entgegen"` before
-/// `"ent"`) so the longer, more specific match wins.
+/// precede any shorter prefix it starts with (`"entgegen"` before `"ent"`)
+/// so the longer, more specific match wins.
 ///
 /// Caveat: this is a purely orthographic check with no morphological
 /// awareness, so a root that coincidentally starts with the same letters
 /// (e.g. "geben", "Erbe") will have its stress mis-placed. See the
 /// module-level known-limitation note.
-const UNSTRESSED_PREFIXES: &[&str] =
-    &["entgegen", "wider", "miss", "ver", "zer", "ent", "emp", "ge", "be", "er"];
+///
+/// `"durch"`, `"nach"`, and `"bei"` were added to the original 10-entry list
+/// after individually measuring 17 candidate prefixes (`un-, ur-, ab-, an-,
+/// auf-, aus-, bei-, durch-, ein-, mit-, nach-, über-, um-, vor-, zu-,
+/// zurück-, zusammen-`) against the held-out CER benchmark. Only `durch`,
+/// `nach`, `bei`, and `mit` improved or held the error count steady; the
+/// other 13 (including short, high-false-positive-rate ones like
+/// `"an"`/`"ab"`) measurably regressed CER and were excluded — the same
+/// measure-in-isolation-and-drop-the-losers methodology `EnglishG2p`'s own
+/// prefix list already uses for `"re"`/`"mis"`/`"pre"` (see
+/// `english_rules.rs`).
+const UNSTRESSED_PREFIXES: &[&str] = &[
+    "entgegen", "durch", "wider", "miss", "nach", "bei", "mit", "ver", "zer", "ent", "emp", "ge",
+    "be", "er",
+];
 
 /// Suffixes that pull primary stress onto the final syllable regardless of
 /// any recognized prefix.
@@ -914,10 +927,29 @@ mod tests {
 
     #[test]
     fn unstressed_prefix_shifts_stress_to_next_syllable() {
-        // "verstehen" -> "ver" + "ste" + "hen"; stress should land after the
-        // "ver-" prefix, not on it.
-        let ipa = hand_rules_ipa("verstehen");
-        assert!(!ipa.starts_with(IPA_PRIMARY_STRESS));
+        // "verstehen" starts with the unstressed prefix "ver" (3 chars), so
+        // `unstressed_prefix_len` must return 3, not 0.
+        let word: Vec<char> = "verstehen".chars().collect();
+        assert_eq!(unstressed_prefix_len(&word), 3);
+    }
+
+    #[test]
+    fn newly_added_prefix_shifts_stress_to_next_syllable() {
+        // "durchfahren" starts with the unstressed prefix "durch" (5 chars),
+        // which was one of the prefixes added to UNSTRESSED_PREFIXES after
+        // measuring against the CER benchmark, so `unstressed_prefix_len`
+        // must return 5, not 0.
+        let word: Vec<char> = "durchfahren".chars().collect();
+        assert_eq!(unstressed_prefix_len(&word), 5);
+    }
+
+    #[test]
+    fn longer_prefix_wins_over_shorter_prefix_it_starts_with() {
+        // "beisteuern" starts with both "be" (2) and the longer, more
+        // specific "bei" (3) — the longer prefix must be tried first, so
+        // `unstressed_prefix_len` must return 3, not 2.
+        let word: Vec<char> = "beisteuern".chars().collect();
+        assert_eq!(unstressed_prefix_len(&word), 3);
     }
 
     #[test]

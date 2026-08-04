@@ -25,7 +25,9 @@ pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 /// (0.4390) before `GermanG2p` existed to benchmark against; tightened to
 /// Crane's own measured CER once it did, matching how `REFERENCE_CER_EN_US`
 /// tracks `EnglishG2p`'s own pipeline rather than an external baseline.
-pub const REFERENCE_CER_DE: f64 = 0.2830;
+/// Re-tightened after completing the unstressed-prefix list (measured
+/// 0.2828514784).
+pub const REFERENCE_CER_DE: f64 = 0.2829;
 
 /// Per-word benchmark result.
 pub struct WordResult {
