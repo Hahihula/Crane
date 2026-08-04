@@ -21,10 +21,15 @@ use super::tts::{Tts, VoiceInfo};
 /// 639-1 code, per Kokoro's documented voice naming convention (e.g.
 /// `af_heart` -> American English, `bf_emma` -> British English).
 ///
+/// `d` -> German is this codebase's own extension: upstream Kokoro/Misaki
+/// never assigned that prefix to a language, so it's free to repurpose for
+/// `df_kerstin`, the German voice routed through `GermanG2p`.
+///
 /// Falls back to `"en"` for an unrecognized or missing prefix.
 fn voice_name_language(name: &str) -> &'static str {
     match name.as_bytes().first() {
         Some(b'a' | b'b') => "en",
+        Some(b'd') => "de",
         Some(b'e') => "es",
         Some(b'f') => "fr",
         Some(b'h') => "hi",
@@ -102,6 +107,7 @@ mod tests {
     fn test_voice_name_language_known_prefixes() {
         assert_eq!(voice_name_language("af_heart"), "en");
         assert_eq!(voice_name_language("bf_emma"), "en");
+        assert_eq!(voice_name_language("df_kerstin"), "de");
         assert_eq!(voice_name_language("ef_dora"), "es");
         assert_eq!(voice_name_language("ff_siwis"), "fr");
         assert_eq!(voice_name_language("hf_alpha"), "hi");
