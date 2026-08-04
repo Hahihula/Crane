@@ -15,13 +15,17 @@ use std::collections::HashMap;
 /// tiers exist to benchmark against.
 pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 
-/// External reference CER for the held-out `de` test set
-/// (`crane-core/tests/data/g2p/de_test.tsv`), measured from a rule-based
-/// German G2P reference implementation with those words excluded from its
-/// lexicon, forcing every prediction through its rule fallback tier alone.
-/// This is the regression threshold `de` CER must stay at or below once the
-/// lexicon/rules tiers exist to benchmark against.
-pub const REFERENCE_CER_DE: f64 = 0.4390;
+/// Regression threshold for the held-out `de` test set
+/// (`g2p/de_de/test.tsv` in the `crane-local-ai/test-data` HuggingFace
+/// dataset): `GermanG2p`'s own measured CER
+/// (lexicon + compound decomposition + hand rules, with those words excluded
+/// from the lexicon so they exercise the fallback tiers) must stay at or
+/// below this value. Originally recorded as the external
+/// moonshine-tts `german-rule-g2p-cli.cpp` reference engine's rule-only CER
+/// (0.4390) before `GermanG2p` existed to benchmark against; tightened to
+/// Crane's own measured CER once it did, matching how `REFERENCE_CER_EN_US`
+/// tracks `EnglishG2p`'s own pipeline rather than an external baseline.
+pub const REFERENCE_CER_DE: f64 = 0.2830;
 
 /// Per-word benchmark result.
 pub struct WordResult {

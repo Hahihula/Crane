@@ -255,4 +255,92 @@ mod tests {
         let engine = GermanG2p::new("Haus\thaʊ̯s\n").unwrap();
         assert_eq!(engine.text_to_ipa("Haus ---").unwrap(), "haʊ̯s");
     }
+
+    // CER benchmark: measures the compound-decomposition and hand-rules
+    // tiers' accuracy against the checked-in `REFERENCE_CER_DE` threshold.
+    // Needs a real lexicon on disk, so this is `#[ignore]`d by default. Run
+    // with:
+    //
+    // ```sh
+    // CRANE_G2P_DE_DIR=/path/to/de \
+    //   cargo test -p crane-core -- \
+    //   models::g2p::languages::german::tests::cer_benchmark --ignored --nocapture
+    // ```
+
+    use crate::models::g2p::benchmark::{G2pBenchmarkResult, REFERENCE_CER_DE, benchmark_g2p};
+
+    fn model_dir() -> std::path::PathBuf {
+        std::env::var("CRANE_G2P_DE_DIR")
+            .expect("set CRANE_G2P_DE_DIR to a German G2P model directory")
+            .into()
+    }
+
+    fn parse_word_ipa_tsv(tsv: &str) -> Vec<(String, String)> {
+        tsv.lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(word, ipa)| (word.to_string(), ipa.to_string()))
+            .collect()
+    }
+
+    /// Builds a `GermanG2p` from the on-disk lexicon with the held-out test
+    /// words removed and runs it over the test set, reporting the resulting
+    /// CER.
+    ///
+    /// Test words are excluded from the lexicon before construction so the
+    /// benchmark measures the compound-decomposition and hand-rules tiers
+    /// rather than trivial lexicon hits — a lexicon hit on a held-out word
+    /// would trivially match and mask any regression in the fallback tiers.
+    fn run_cer_benchmark() -> G2pBenchmarkResult {
+        let test_data_path =
+            crate::test_data::get_test_data_file("g2p/de_de/test.tsv").expect("fetch test.tsv");
+        let test_tsv = std::fs::read_to_string(&test_data_path).expect("read test.tsv");
+        let test_pairs = parse_word_ipa_tsv(&test_tsv);
+        let test_words: std::collections::HashSet<&str> =
+            test_pairs.iter().map(|(word, _)| word.as_str()).collect();
+
+        let dict_path = model_dir().join("dict.tsv");
+        let dict_tsv = std::fs::read_to_string(&dict_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", dict_path.display()));
+        let held_out_dict: String = dict_tsv
+            .lines()
+            .filter(|line| match line.split_once('\t') {
+                Some((word, _)) => !test_words.contains(word),
+                None => true,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let engine = GermanG2p::new(&held_out_dict).expect("build GermanG2p");
+
+        let predictions: Vec<(String, String)> = test_pairs
+            .iter()
+            .map(|(word, _)| (word.clone(), engine.text_to_ipa(word).expect("text_to_ipa")))
+            .collect();
+        let predictions_ref: Vec<(&str, &str)> = predictions
+            .iter()
+            .map(|(word, ipa)| (word.as_str(), ipa.as_str()))
+            .collect();
+        let test_pairs_ref: Vec<(&str, &str)> = test_pairs
+            .iter()
+            .map(|(word, ipa)| (word.as_str(), ipa.as_str()))
+            .collect();
+
+        let result = benchmark_g2p(&predictions_ref, &test_pairs_ref, "de");
+        println!(
+            "de CER: {:.4} ({} errors / {} words)",
+            result.cer, result.total_errors, result.total_words
+        );
+        result
+    }
+
+    #[test]
+    #[ignore = "needs a local G2P lexicon directory (CRANE_G2P_DE_DIR)"]
+    fn cer_benchmark() {
+        let result = run_cer_benchmark();
+        assert!(
+            result.cer <= REFERENCE_CER_DE,
+            "CER {:.4} exceeds reference {REFERENCE_CER_DE:.4}",
+            result.cer
+        );
+    }
 }
