@@ -379,6 +379,15 @@ fn simple_eval_(
             *remaining_uses.entry(input.as_str()).or_default() += 1;
         }
     }
+    // Crane Added 20260804: never evict a value this invocation didn't
+    // itself produce. "If" (below) recursively calls simple_eval_ on a
+    // branch's subgraph while sharing the same `values` map with the
+    // enclosing graph. That recursive call's own last-use bookkeeping is
+    // scoped only to the branch's own node list, so without this guard it
+    // would free an outer-scope value the moment the branch's *local* view
+    // of its uses hits zero — even though the outer graph still needs that
+    // value after the "If" node returns.
+    let inherited_values: HashSet<String> = values.keys().cloned().collect();
 
     // The nodes are topologically sorted so we can just process them in order.
     for node in graph.node.iter() {
@@ -2783,7 +2792,10 @@ fn simple_eval_(
         for input in node.input.iter().filter(|input| !input.is_empty()) {
             if let Some(count) = remaining_uses.get_mut(input.as_str()) {
                 *count -= 1;
-                if *count == 0 && !graph_outputs.contains(input.as_str()) {
+                if *count == 0
+                    && !graph_outputs.contains(input.as_str())
+                    && !inherited_values.contains(input.as_str())
+                {
                     values.remove(input);
                 }
             }
