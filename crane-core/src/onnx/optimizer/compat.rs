@@ -1347,15 +1347,6 @@ mod tests {
         assert!(err.to_string().contains("exclusive"));
     }
 
-    fn string_attribute(name: &str, value: &str) -> AttributeProto {
-        AttributeProto {
-            name: name.to_string(),
-            r#type: AttributeType::String as i32,
-            s: value.as_bytes().to_vec(),
-            ..Default::default()
-        }
-    }
-
     const LSTM_HIDDEN: usize = 2;
     const LSTM_INPUT: usize = 2;
     const LSTM_SEQ_LEN: usize = 3;
