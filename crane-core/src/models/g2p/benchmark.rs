@@ -26,8 +26,11 @@ pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 /// Crane's own measured CER once it did, matching how `REFERENCE_CER_EN_US`
 /// tracks `EnglishG2p`'s own pipeline rather than an external baseline.
 /// Re-tightened after completing the unstressed-prefix list (measured
-/// 0.2828514784).
-pub const REFERENCE_CER_DE: f64 = 0.2829;
+/// 0.2828514784), then again after fixing word-initial `h` (which also
+/// surfaced and fixed a pre-existing bug placing the primary stress mark
+/// before a syllable's vowel instead of before its entire onset consonant
+/// cluster — the bigger contributor to this drop; measured 0.2466089487).
+pub const REFERENCE_CER_DE: f64 = 0.2467;
 
 /// Per-word benchmark result.
 pub struct WordResult {

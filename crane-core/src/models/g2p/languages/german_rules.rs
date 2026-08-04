@@ -11,10 +11,10 @@
 //! primary stress mark is then inserted on the syllable chosen by
 //! prefix/suffix heuristics.
 //!
-//! Known limitation (deliberate, for now): `h` is unconditionally silent in
-//! every position, including word-initial, where standard pronunciation
-//! would produce /h/. A later change will special-case word-initial `h` and
-//! measure its effect on accuracy in isolation.
+//! `h` produces /h/ at the start of a word or of a hyphen-delimited compound
+//! segment, and is silent everywhere else (a post-vocalic `h` is a
+//! Dehnungs-h, a length marker with no sound of its own; other positions are
+//! similarly non-phonemic in standard German).
 //!
 //! Known limitation (deliberate, for now): the unstressed-prefix heuristic
 //! (see [`UNSTRESSED_PREFIXES`]) is purely orthographic — it has no way to
@@ -66,12 +66,6 @@ fn is_german_letter(c: char) -> bool {
 /// umlauts (but not eszett, which is a consonant).
 fn is_vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'ä' | 'ö' | 'ü')
-}
-
-/// Returns `true` if `c` is one of the vowel-sound IPA symbols this module
-/// emits. Used to find where to place the primary stress mark.
-fn is_ipa_vowel(c: char) -> bool {
-    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'ɛ' | 'ɪ' | 'ɔ' | 'ʊ' | 'ə' | 'ø' | 'ʏ' | 'ɐ')
 }
 
 /// Lowercases `word` and drops every character that isn't a recognized
@@ -358,14 +352,27 @@ fn try_context_grapheme(
 }
 
 /// Tries the remaining single-letter consonant rules with fixed or
-/// locally-conditioned mappings: `h` (silenced), `ß`, `tz`/`z`, `ck`,
+/// locally-conditioned mappings: `h` (silenced, except at a morpheme start,
+/// where standard pronunciation produces /h/), `ß`, `tz`/`z`, `ck`,
 /// `c`-before-`e`/`i` vs. plain `c`, `x`, `q`-without-`u`, `j`, `v`, `w`, and
-/// `y`. Pushes onto `out` and returns characters consumed, or `None`.
-fn try_fixed_consonant(syllable: &[char], i: usize, out: &mut String) -> Option<usize> {
+/// `y`. `gi` is this letter's absolute position in the full word, and
+/// `morpheme_starts` (indexed by `gi`) is used to detect morpheme-initial
+/// `h`. Pushes onto `out` and returns characters consumed, or `None`.
+fn try_fixed_consonant(
+    syllable: &[char],
+    i: usize,
+    gi: usize,
+    morpheme_starts: &[bool],
+    out: &mut String,
+) -> Option<usize> {
     let ch = syllable[i];
     if ch == 'h' {
-        // Deliberate baseline behavior: silent in every position, including
-        // word-initial. See the module doc's known limitation note.
+        // Morpheme-initial /h/ (word start or right after a hyphen) is real
+        // in standard pronunciation; every other position (post-vocalic
+        // Dehnungs-h, mid-cluster) stays silent.
+        if morpheme_starts[gi] {
+            out.push('h');
+        }
         return Some(1);
     }
     if ch == 'ß' {
@@ -511,7 +518,7 @@ fn syllable_to_ipa(
             i += consumed;
             continue;
         }
-        if let Some(consumed) = try_fixed_consonant(syllable, i, &mut out) {
+        if let Some(consumed) = try_fixed_consonant(syllable, i, gi, morpheme_starts, &mut out) {
             i += consumed;
             continue;
         }
@@ -558,18 +565,18 @@ fn syllable_to_ipa(
     final_devoice(out)
 }
 
-/// Inserts the primary stress mark into `syllable_ipas[stress_idx]`, right
-/// before its first vowel sound (or at the very start if the syllable
-/// somehow produced no vowel). Does nothing if `stress_idx` is out of range
-/// or the target syllable produced no IPA at all.
+/// Inserts the primary stress mark at the very start of
+/// `syllable_ipas[stress_idx]`, before its entire onset consonant cluster —
+/// standard IPA convention places stress before the syllable, not just
+/// before its vowel nucleus (e.g. "klettern" -> `ˈklɛtɐn`, stress before
+/// the `kl` onset). Does nothing if `stress_idx` is out of range or the
+/// target syllable produced no IPA at all.
 fn insert_primary_stress(syllable_ipas: &mut [String], stress_idx: usize) {
     let Some(target) = syllable_ipas.get_mut(stress_idx) else {
         return;
     };
-    match target.char_indices().find(|&(_, c)| is_ipa_vowel(c)) {
-        Some((pos, _)) => target.insert(pos, IPA_PRIMARY_STRESS),
-        None if !target.is_empty() => target.insert(0, IPA_PRIMARY_STRESS),
-        None => {}
+    if !target.is_empty() {
+        target.insert(0, IPA_PRIMARY_STRESS);
     }
 }
 
@@ -729,13 +736,23 @@ mod tests {
     }
 
     #[test]
-    fn h_is_silent_word_initially() {
-        // Deliberate baseline bug: word-initial /h/ is dropped.
-        assert!(!hand_rules_ipa("haus").starts_with('h'));
+    fn h_produces_h_word_initially() {
+        // Word-initial "h" is a real phoneme in standard German.
+        assert!(hand_rules_ipa("haus").contains('h'));
+    }
+
+    #[test]
+    fn h_produces_h_after_hyphen_boundary() {
+        // The hyphen marks a morpheme boundary, so the "h" in the second
+        // segment of "auto-haus" is morpheme-initial, just like word-initial
+        // "h" in `h_produces_h_word_initially`, and should surface as /h/.
+        assert!(hand_rules_ipa("auto-haus").contains('h'));
     }
 
     #[test]
     fn h_is_silent_between_vowels() {
+        // Post-vocalic "h" here is a Dehnungs-h (length marker), not
+        // morpheme-initial, so it stays silent.
         let ipa = hand_rules_ipa("sehen");
         assert!(!ipa.contains('h'));
     }
@@ -923,6 +940,16 @@ mod tests {
     #[test]
     fn single_syllable_word_is_stressed() {
         assert!(hand_rules_ipa("haus").contains(IPA_PRIMARY_STRESS));
+    }
+
+    #[test]
+    fn stress_precedes_the_whole_onset_consonant_cluster() {
+        // "klettern" starts with the "kl" onset cluster; standard IPA
+        // notation (matching the lexicon's own convention, e.g.
+        // "ˈklɛtɐndəm" for "kletterndem") places the stress mark before the
+        // entire onset, not after it and just before the vowel.
+        let ipa = hand_rules_ipa("klettern");
+        assert!(ipa.starts_with(IPA_PRIMARY_STRESS), "{ipa}");
     }
 
     #[test]
