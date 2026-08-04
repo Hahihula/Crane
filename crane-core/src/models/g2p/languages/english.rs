@@ -14,9 +14,11 @@ use anyhow::Result;
 use lru::LruCache;
 
 use crate::models::g2p::lexicon::Lexicon;
+use crate::models::g2p::numeral_expand::expand_numerals;
 use crate::models::g2p::oov_onnx;
 use crate::models::g2p::text_normalize::normalize_word_for_lookup;
 
+use super::english_numerals::EnglishNumerals;
 use super::english_rules::hand_oov_rules_ipa;
 
 /// Default capacity of the per-engine OOV result cache — see
@@ -87,6 +89,10 @@ impl EnglishG2p {
 
     /// Converts `text` to a space-joined IPA phoneme string.
     ///
+    /// Digit runs are expanded to cardinal number words first (see
+    /// [`expand_numerals`]), so `"21"` phonemizes as "twenty one" rather than
+    /// falling through to hand rules on the literal digit characters.
+    ///
     /// Each word is normalized and looked up in the lexicon. On a miss, the
     /// OOV model (if loaded) is tried next; if it's absent, errors, or
     /// returns empty output, the hand-written rule engine is the final
@@ -121,6 +127,9 @@ impl EnglishG2p {
             Oov(usize),
             HandRules,
         }
+
+        let text = expand_numerals(text, &EnglishNumerals);
+        let text: &str = &text;
 
         let words: Vec<Cow<'_, str>> = text
             .split_ascii_whitespace()
@@ -302,6 +311,26 @@ mod tests {
     #[test]
     fn new_propagates_malformed_lexicon_error() {
         assert!(EnglishG2p::new("no-tab-here\n", None, false).is_err());
+    }
+
+    #[test]
+    fn numeral_in_text_expands_before_lexicon_lookup() {
+        let tsv = "twenty\ttwˈɛnti\none\twˈʌn\n";
+        let engine = EnglishG2p::new(tsv, None, false).unwrap();
+        assert_eq!(engine.text_to_ipa("21").unwrap(), "twˈɛnti wˈʌn");
+    }
+
+    #[test]
+    fn no_numerals_unchanged() {
+        let engine = test_engine();
+        assert_eq!(engine.text_to_ipa("hello world").unwrap(), "həlˈoʊ wˈɜɹld");
+    }
+
+    #[test]
+    fn numeral_mixed_with_words() {
+        let engine = test_engine();
+        let expected = format!("həlˈoʊ {}", hand_oov_rules_ipa("five"));
+        assert_eq!(engine.text_to_ipa("hello 5").unwrap(), expected);
     }
 
     #[test]
