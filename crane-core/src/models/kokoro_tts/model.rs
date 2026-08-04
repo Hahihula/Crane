@@ -901,7 +901,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", dict_path.display()));
         let english = EnglishG2p::new(&dict_tsv, None, false).expect("build EnglishG2p");
         let mut phonemizer = MoonshineG2p::new();
-        phonemizer.add_language(LanguageG2p::English(english));
+        phonemizer.add_language(LanguageG2p::English(Box::new(english)));
 
         let mut model = Model::new(&kokoro_dir, &Device::Cpu, &DType::F32).unwrap();
         let (waveform, sample_rate) = model
@@ -952,7 +952,7 @@ mod tests {
         let dict_tsv = std::fs::read_to_string(&dict_path).unwrap();
         let english = EnglishG2p::new(&dict_tsv, None, false).unwrap();
         let mut phonemizer = MoonshineG2p::new();
-        phonemizer.add_language(LanguageG2p::English(english));
+        phonemizer.add_language(LanguageG2p::English(Box::new(english)));
 
         let mut model = Model::new(&kokoro_dir, &Device::Cpu, &DType::F32).unwrap();
         let (waveform, sample_rate) = model
