@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-//! English Kokoro IPA replacement tables and normalizer construction.
+//! English and German Kokoro IPA replacement tables and normalizer
+//! construction.
 //!
 //! Ported from Moonshine's `apply_diphthong_map()`: multi-codepoint IPA
 //! sequences the G2P engine produces are collapsed into the single-codepoint
@@ -45,15 +46,45 @@ pub const EN_EXTRA_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
     ("ɚ", "əɹ"), // rhotic unstressed vowel (English only)
 ];
 
+/// Extra IPA replacement pairs for German Kokoro normalization.
+///
+/// Appended to [`SHARED_KOKORO_REPLACEMENTS`] when `language == "de"`.
+/// Kokoro's vocab has dedicated single-token ligatures for the `/ts/` and
+/// `/dz/` affricates and for a geminate sibilant, but German's G2P output
+/// produces these as multi-codepoint sequences; the model was trained on
+/// the single-token forms, so leaving them unreplaced renders as separate
+/// English-like phonemes rather than the intended affricate. `ʏ` (near-close
+/// near-front rounded vowel) has no slot in Kokoro's vocab at all — `y` is
+/// the exact substitution the voice's own training data used.
+///
+/// The `ts`/`dz` pairs are listed in both tie-bar (as produced directly by
+/// the lexicon) and plain (as produced by the hand-rule fallback) forms,
+/// since either could reach the normalizer depending on which G2P tier
+/// produced the word. **Must stay German-only, never shared**: English's
+/// `ts` (e.g. "cats") is a genuine two-phoneme /t/+/s/ sequence, not an
+/// affricate — the opposite of German's `/ts/`.
+///
+/// All entries are NFC-normalized (verified by the debug assertion in
+/// [`IpaNormalizer::new`]).
+pub const DE_EXTRA_KOKORO_REPLACEMENTS: &[(&str, &str)] = &[
+    ("t\u{0361}s", "ʦ"), // voiceless alveolar affricate, tie-bar form
+    ("d\u{0361}z", "ʣ"), // voiced alveolar affricate, tie-bar form
+    ("ts", "ʦ"),         // voiceless alveolar affricate, plain form
+    ("dz", "ʣ"),         // voiced alveolar affricate, plain form
+    ("ss", "S"),         // geminate sibilant
+    ("ʏ", "y"),          // near-close near-front rounded vowel, not in Kokoro's vocab
+];
+
 /// Builds an [`IpaNormalizer`] for the Kokoro vocoder in the given language.
 ///
 /// Any language tag starting with `en` (`en_us`, `en_gb`, ...) additionally
-/// gets [`EN_EXTRA_KOKORO_REPLACEMENTS`]'s rhotic vowel expansions on top of
-/// [`SHARED_KOKORO_REPLACEMENTS`]; every other language uses
-/// [`SHARED_KOKORO_REPLACEMENTS`] alone. `vocab` is Kokoro's phoneme
-/// vocabulary (from `tokenizer.json`) — its keys become the accepted
-/// codepoint set, and any codepoint outside it is dropped rather than
-/// coerced (Kokoro uses an empty coercion pool).
+/// gets [`EN_EXTRA_KOKORO_REPLACEMENTS`]'s rhotic vowel expansions, and
+/// `"de"` gets [`DE_EXTRA_KOKORO_REPLACEMENTS`]'s affricate/geminate
+/// ligatures and `ʏ` mapping, on top of [`SHARED_KOKORO_REPLACEMENTS`];
+/// every other language uses [`SHARED_KOKORO_REPLACEMENTS`] alone. `vocab`
+/// is Kokoro's phoneme vocabulary (from `tokenizer.json`) — its keys become
+/// the accepted codepoint set, and any codepoint outside it is dropped
+/// rather than coerced (Kokoro uses an empty coercion pool).
 ///
 /// # Errors
 ///
@@ -67,6 +98,8 @@ pub fn build_kokoro_normalizer(
     let mut replacements = SHARED_KOKORO_REPLACEMENTS.to_vec();
     if language.starts_with("en") {
         replacements.extend_from_slice(EN_EXTRA_KOKORO_REPLACEMENTS);
+    } else if language == "de" {
+        replacements.extend_from_slice(DE_EXTRA_KOKORO_REPLACEMENTS);
     }
     let vocab_chars: Vec<char> = vocab.keys().copied().collect();
     IpaNormalizer::new(&replacements, vocab_chars, Vec::new())
@@ -149,7 +182,11 @@ mod tests {
 
     #[test]
     fn kokoro_replacements_are_nfc() {
-        for (from, to) in SHARED_KOKORO_REPLACEMENTS.iter().chain(EN_EXTRA_KOKORO_REPLACEMENTS) {
+        for (from, to) in SHARED_KOKORO_REPLACEMENTS
+            .iter()
+            .chain(EN_EXTRA_KOKORO_REPLACEMENTS)
+            .chain(DE_EXTRA_KOKORO_REPLACEMENTS)
+        {
             assert!(is_nfc(from), "from pattern {from:?} is not NFC");
             assert!(is_nfc(to), "replacement {to:?} is not NFC");
         }
@@ -158,7 +195,11 @@ mod tests {
     #[test]
     fn kokoro_replacements_no_duplicates() {
         let mut seen = HashSet::new();
-        for (from, _) in SHARED_KOKORO_REPLACEMENTS.iter().chain(EN_EXTRA_KOKORO_REPLACEMENTS) {
+        for (from, _) in SHARED_KOKORO_REPLACEMENTS
+            .iter()
+            .chain(EN_EXTRA_KOKORO_REPLACEMENTS)
+            .chain(DE_EXTRA_KOKORO_REPLACEMENTS)
+        {
             assert!(seen.insert(*from), "duplicate from pattern: {from:?}");
         }
     }
@@ -226,6 +267,67 @@ mod tests {
         assert_eq!(norm.normalize("tˈiːtʃɚ"), "tˈiːʧəɹ");
     }
 
+    /// Minimal vocab sufficient to exercise
+    /// [`DE_EXTRA_KOKORO_REPLACEMENTS`]'s targeted unit tests below.
+    fn de_test_vocab() -> HashMap<char, i64> {
+        [
+            ('a', 43),
+            ('y', 67),
+            ('\u{0053}', 35),  // S
+            ('\u{02a3}', 18),  // ʣ
+            ('\u{02a6}', 20),  // ʦ
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn de_kokoro_replaces_tie_bar_ts_affricate() {
+        let vocab = de_test_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+        assert_eq!(norm.normalize("t\u{0361}s"), "ʦ");
+    }
+
+    #[test]
+    fn de_kokoro_replaces_plain_ts_affricate() {
+        let vocab = de_test_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+        assert_eq!(norm.normalize("ts"), "ʦ");
+    }
+
+    #[test]
+    fn de_kokoro_replaces_dz_affricate() {
+        let vocab = de_test_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+        assert_eq!(norm.normalize("d\u{0361}z"), "ʣ");
+        assert_eq!(norm.normalize("dz"), "ʣ");
+    }
+
+    #[test]
+    fn de_kokoro_replaces_geminate_ss() {
+        let vocab = de_test_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+        assert_eq!(norm.normalize("ss"), "S");
+    }
+
+    #[test]
+    fn de_kokoro_maps_near_close_rounded_vowel() {
+        let vocab = de_test_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+        assert_eq!(norm.normalize("ʏ"), "y");
+    }
+
+    #[test]
+    fn de_kokoro_skips_english_rhotic_pairs() {
+        let vocab = en_test_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+        // ɝ is not in DE_EXTRA_KOKORO_REPLACEMENTS and not in the vocab, so
+        // with an empty coerce pool it gets dropped.
+        assert_eq!(norm.normalize("ɝ"), "");
+        // Shared diphthong replacements still apply.
+        assert_eq!(norm.normalize("eɪ"), "A");
+    }
+
     /// Maps each character of normalized IPA to its Kokoro phoneme ID,
     /// mirroring Moonshine's `phoneme_str_to_input_ids()`: a `0` (pad/BOS)
     /// is prepended and appended, and characters missing from `vocab` are
@@ -287,5 +389,48 @@ mod tests {
         }
 
         assert_eq!(checked, 71, "expected exactly 71 corpus entries, found {checked}");
+    }
+
+    /// Correctness benchmark: the (`de`, Kokoro) [`IpaNormalizer`] must
+    /// collapse German-specific affricate/geminate sequences and the `ʏ`
+    /// gap correctly, on a corpus of realistic G2P output (drawn from
+    /// `g2p/de_de/test.tsv` lexicon entries) plus hand-crafted edge cases. See
+    /// the `crane-local-ai/test-data` dataset's `g2p/README.md` for the
+    /// corpus's provenance — expected output was hand-derived from
+    /// [`DE_EXTRA_KOKORO_REPLACEMENTS`] and [`SHARED_KOKORO_REPLACEMENTS`]
+    /// plus the vocab-filter algorithm, not by running `normalize()` itself.
+    #[test]
+    #[ignore = "needs crane-local-ai/test-data (CRANE_TEST_DATA_DIR or network)"]
+    fn de_kokoro_normalizer_matches_reference_corpus() {
+        let vocab = full_en_kokoro_vocab();
+        let norm = build_kokoro_normalizer("de", &vocab).unwrap();
+
+        let path =
+            crate::test_data::get_test_data_file("g2p/de_de/kokoro_normalizer_ref.tsv").unwrap();
+        let tsv = std::fs::read_to_string(&path).unwrap();
+        let mut checked = 0;
+        for line in tsv.lines() {
+            let mut fields = line.splitn(3, '\t');
+            let raw_ipa = fields.next().expect("missing raw_ipa field");
+            let expected_normalized = fields.next().expect("missing expected_normalized field");
+            let expected_ids_field = fields.next().expect("missing expected_ids field");
+            let expected_ids: Vec<i64> = expected_ids_field
+                .split(',')
+                .map(|s| s.parse().expect("phoneme id must be a valid i64"))
+                .collect();
+
+            let normalized = norm.normalize(raw_ipa);
+            assert_eq!(
+                normalized, expected_normalized,
+                "normalize() mismatch for raw IPA {raw_ipa:?}"
+            );
+
+            let ids = phoneme_str_to_input_ids(&normalized, &vocab);
+            assert_eq!(ids, expected_ids, "phoneme ID mismatch for raw IPA {raw_ipa:?}");
+
+            checked += 1;
+        }
+
+        assert_eq!(checked, 32, "expected exactly 32 corpus entries, found {checked}");
     }
 }
