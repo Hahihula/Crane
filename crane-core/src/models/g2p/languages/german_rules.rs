@@ -426,12 +426,64 @@ fn try_fixed_consonant(
     None
 }
 
+/// Maps a single vowel letter to its long IPA form, for the Dehnungs-h and
+/// open-syllable lengthening rules in [`try_vowel`]. Panics if `ch` is not
+/// one of the letters [`is_vowel`] recognizes.
+fn long_vowel_ipa(ch: char) -> &'static str {
+    match ch {
+        'a' => "aː",
+        'e' => "eː",
+        'i' => "iː",
+        'o' => "oː",
+        'u' => "uː",
+        'ä' => "ɛː",
+        'ö' => "øː",
+        'ü' | 'y' => "yː",
+        _ => unreachable!("caller guarantees ch is a recognized vowel letter"),
+    }
+}
+
+/// Counts the consonant letters in `full_word` starting at `from`, up to
+/// (but not including) the next vowel, morpheme boundary, or the word's
+/// end. Used by the open-syllable lengthening rule in [`try_vowel`]: this
+/// module's syllabifier always attaches a syllable's trailing consonants to
+/// the *following* syllable (see `syllabify_segment`'s doc), so a vowel
+/// sitting at the end of its syllable slice isn't necessarily in a true
+/// open syllable — standard German orthography marks a short vowel with a
+/// doubled consonant or consonant cluster after it (e.g. "kommen",
+/// "müssen") and a long vowel with at most one (e.g. "Name", "Blume"), so
+/// this count is what actually decides length, not the syllable-slice
+/// boundary alone. Stopping at a morpheme boundary keeps a compound's
+/// second segment (e.g. `"auto-stopp"`'s "stopp") from affecting the vowel
+/// length of the segment before the hyphen.
+fn following_consonant_run_len(full_word: &[char], from: usize, morpheme_starts: &[bool]) -> usize {
+    full_word[from..]
+        .iter()
+        .enumerate()
+        .take_while(|&(offset, &c)| !is_vowel(c) && !morpheme_starts[from + offset])
+        .count()
+}
+
 /// Tries diphthongs (`au`, `ei`/`ai`/`ey`, `oi`, `eu`/`äu`), `ie` not before
-/// another vowel, doubled vowels, syllable-final `-er` vocalizing to `[ɐ]`,
-/// and single vowel letters (with `e` softening to schwa syllable-finally or
-/// before a single sonorant coda) at position `i`. Pushes onto `out` and
-/// returns characters consumed, or `None`.
-fn try_vowel(syllable: &[char], i: usize, out: &mut String) -> Option<usize> {
+/// another vowel, doubled vowels, a vowel+`h` (Dehnungs-h, German's
+/// explicit vowel-length marker), syllable-final `-er` vocalizing to `[ɐ]`,
+/// a syllable-final single vowel followed by at most one consonant
+/// elsewhere in the word (open-syllable lengthening, e.g. "Na-me"'s first
+/// "a"; `e` is excluded — it stays schwa, see below), and single vowel
+/// letters elsewhere (with `e` softening to schwa syllable-finally or
+/// before a single sonorant coda) at position `i`. `full_word`/`gi` give
+/// this letter's absolute position, needed to look past the syllable
+/// boundary for the open-syllable consonant count; `morpheme_starts` bounds
+/// that lookup to the current morpheme (see [`following_consonant_run_len`]).
+/// Pushes onto `out` and returns characters consumed, or `None`.
+fn try_vowel(
+    syllable: &[char],
+    i: usize,
+    full_word: &[char],
+    gi: usize,
+    morpheme_starts: &[bool],
+    out: &mut String,
+) -> Option<usize> {
     let n = syllable.len();
     let ch = syllable[i];
     if slice_eq_str(syllable, i, "au") {
@@ -455,14 +507,17 @@ fn try_vowel(syllable: &[char], i: usize, out: &mut String) -> Option<usize> {
         return Some(2);
     }
     if i + 1 < n && is_vowel(ch) && syllable[i + 1] == ch && matches!(ch, 'a' | 'o' | 'e' | 'i' | 'u') {
-        out.push_str(match ch {
-            'a' => "aː",
-            'e' => "eː",
-            'i' => "iː",
-            'o' => "oː",
-            'u' => "uː",
-            _ => unreachable!("guarded by the matches! above"),
-        });
+        out.push_str(long_vowel_ipa(ch));
+        return Some(2);
+    }
+    // Dehnungs-h: an "h" right after a vowel is a silent length marker (the
+    // "h" itself produces no sound in this position — see
+    // `try_fixed_consonant`) regardless of what follows it in the same
+    // syllable (e.g. "Ruhm"'s "uh" is followed by a coda "m"), so the
+    // vowel lengthens here even for "e", overriding its usual
+    // syllable-final schwa reduction below.
+    if is_vowel(ch) && i + 1 < n && syllable[i + 1] == 'h' {
+        out.push_str(long_vowel_ipa(ch));
         return Some(2);
     }
     // Syllable-final "-er" vocalizes to [ɐ] in standard German, so it is
@@ -471,6 +526,21 @@ fn try_vowel(syllable: &[char], i: usize, out: &mut String) -> Option<usize> {
     if ch == 'e' && i + 1 < n && syllable[i + 1] == 'r' && i + 2 == n {
         out.push('ɐ');
         return Some(2);
+    }
+    // Open-syllable lengthening: a single vowel that's the last letter of
+    // its syllable lengthens, but only if at most one consonant follows it
+    // before the next vowel/morpheme-boundary/word-end elsewhere in the
+    // full word (e.g. "Na-me" -> first syllable's "a" is long, but
+    // "kom-men" -> "o" stays short before the doubled "mm"). "e" is
+    // excluded — it stays schwa at syllable end, per the schwa handling
+    // below.
+    if i + 1 == n
+        && is_vowel(ch)
+        && ch != 'e'
+        && following_consonant_run_len(full_word, gi + 1, morpheme_starts) <= 1
+    {
+        out.push_str(long_vowel_ipa(ch));
+        return Some(1);
     }
     if is_vowel(ch) {
         match ch {
@@ -522,7 +592,7 @@ fn syllable_to_ipa(
             i += consumed;
             continue;
         }
-        if let Some(consumed) = try_vowel(syllable, i, &mut out) {
+        if let Some(consumed) = try_vowel(syllable, i, full_word, gi, morpheme_starts, &mut out) {
             i += consumed;
             continue;
         }
@@ -825,6 +895,47 @@ mod tests {
     }
 
     #[test]
+    fn open_syllable_single_vowel_lengthens() {
+        // "Name" syllabifies as "na"+"me"; the first syllable's "a" is
+        // followed by only one consonant ("m") before the next vowel, so
+        // it's a true open syllable and lengthens.
+        let ipa = hand_rules_ipa("name");
+        assert!(ipa.contains("aː"), "{ipa}");
+    }
+
+    #[test]
+    fn doubled_consonant_keeps_preceding_vowel_short() {
+        // "kommen" syllabifies as "ko"+"mmen": the "o" sits at the end of
+        // its syllable slice, but a doubled consonant ("mm") follows it
+        // before the next vowel, which is German orthography's own marker
+        // for a short, not long, vowel.
+        let ipa = hand_rules_ipa("kommen");
+        assert!(!ipa.contains("oː"), "{ipa}");
+        assert!(ipa.contains('ɔ'), "{ipa}");
+    }
+
+    #[test]
+    fn dehnungs_h_lengthens_vowel_even_with_a_following_coda() {
+        // "Ruhm" is one syllable ("ruhm"): the "h" right after "u" is a
+        // silent Dehnungs-h that lengthens the vowel even though a coda
+        // consonant ("m") follows it in the same syllable.
+        let ipa = hand_rules_ipa("ruhm");
+        assert!(ipa.contains("uː"), "{ipa}");
+        assert!(!ipa.contains('h'), "{ipa}");
+    }
+
+    #[test]
+    fn open_syllable_lengthening_does_not_cross_a_hyphen_boundary() {
+        // "auto-stopp"'s first segment is "auto" on its own, whose "o" is
+        // syllable-final with nothing following it in that segment, so it
+        // must lengthen exactly like standalone "auto" does — the "s"/"t"
+        // consonants starting the "stopp" segment across the hyphen must
+        // not count against it.
+        let ipa = hand_rules_ipa("auto-stopp");
+        assert!(ipa.contains("toː"), "{ipa}");
+    }
+
+    #[test]
     fn word_final_e_is_schwa() {
         let ipa = hand_rules_ipa("name");
         assert!(ipa.ends_with('ə'));
@@ -867,7 +978,10 @@ mod tests {
     fn umlauts_map_to_front_rounded_vowels() {
         assert!(hand_rules_ipa("mächtig").contains('ɛ'));
         assert!(hand_rules_ipa("können").contains('ø'));
-        assert!(hand_rules_ipa("müde").contains('ʏ'));
+        // "müll" is a single syllable (one vowel nucleus), so its "ü" isn't
+        // syllable-final and stays short; "müde" would now correctly come
+        // out long ("yː") since its open first syllable lengthens.
+        assert!(hand_rules_ipa("müll").contains('ʏ'));
     }
 
     #[test]

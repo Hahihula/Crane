@@ -29,8 +29,10 @@ pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 /// 0.2828514784), then again after fixing word-initial `h` (which also
 /// surfaced and fixed a pre-existing bug placing the primary stress mark
 /// before a syllable's vowel instead of before its entire onset consonant
-/// cluster — the bigger contributor to this drop; measured 0.2466089487).
-pub const REFERENCE_CER_DE: f64 = 0.2467;
+/// cluster — the bigger contributor to this drop; measured 0.2466089487),
+/// then again after adding open-syllable vowel-length rules gated on a
+/// following-consonant-run count (measured 0.2316612229).
+pub const REFERENCE_CER_DE: f64 = 0.2317;
 
 /// Per-word benchmark result.
 pub struct WordResult {
