@@ -105,6 +105,108 @@ pub fn build_kokoro_normalizer(
     IpaNormalizer::new(&replacements, vocab_chars, Vec::new())
 }
 
+/// German IPA vowel characters `reposition_stress_before_vowel` scans for.
+///
+/// Taken from the actual character inventory of `g2p/de_de/test.tsv` in the
+/// `crane-local-ai/test-data` HuggingFace dataset (the Duden/CELEX-style
+/// reference corpus `dict.tsv` is drawn from), plus the orthographic
+/// umlauts `ä ö ü` defensively (Crane's own G2P rules convert these to
+/// their IPA equivalents before this function ever sees them, but there's
+/// no harm in recognizing them too).
+fn is_stress_target_vowel(c: char) -> bool {
+    matches!(
+        c,
+        'a' | 'e'
+            | 'i'
+            | 'o'
+            | 'u'
+            | 'y'
+            | 'ä'
+            | 'ö'
+            | 'ü'
+            | 'ø'
+            | 'œ'
+            | 'ɐ'
+            | 'ɑ'
+            | 'ɒ'
+            | 'ɔ'
+            | 'ə'
+            | 'ɛ'
+            | 'ɨ'
+            | 'ɪ'
+            | 'ʊ'
+            | 'ʏ'
+    )
+}
+
+/// Repositions every primary (`ˈ`, U+02C8) and secondary (`ˌ`, U+02CC)
+/// stress mark in `ipa` from immediately before its syllable's entire onset
+/// consonant cluster to immediately before that syllable's vowel.
+///
+/// German-specific, called only for `language == "de"`: German's G2P
+/// dictionary (`dict.tsv`, sourced from Moonshine-TTS, see `MOONSHINE_DE.md`
+/// at the repo root for the upstream bug report) and its
+/// `de_test.tsv`-benchmarked hand-rule fallback both place stress before the
+/// onset cluster (e.g. `"klettern"` -> `"ˈklɛtɐn"`), a legitimate
+/// dictionary convention in its own right but not the one the actual
+/// fine-tuned Kokoro German checkpoint was trained on — Crane's own English
+/// dictionary already stresses immediately before the vowel instead (e.g.
+/// `"teacher"` -> `"tˈitʃɚ"`, never `"ˈtitʃɚ"`), matching standard
+/// espeak-ng-derived phonemization. For an *internal* syllable this is only
+/// a few characters' difference, but when the stressed syllable is
+/// word-initial (very common in German), the onset-cluster convention
+/// leaves a bare stress mark as the literal first phoneme of the word,
+/// immediately adjacent to the preceding space/silence with no consonant in
+/// between — a pattern the model most likely never saw in training,
+/// producing an audible artifact right at that word's boundary.
+///
+/// Implemented as a dedicated scanning function rather than an
+/// [`IpaNormalizer`] replacement-table entry: that normalizer only does
+/// fixed-pattern substitution (see its doc comment in
+/// `crate::models::g2p::ipa_postprocess`), but "move this mark to just
+/// before the next vowel" is inherently context-scanning, not a fixed
+/// find/replace pair.
+///
+/// Idempotent on already-correct input: if a stress mark is already
+/// immediately followed by a vowel (zero-consonant onset), the scan finds
+/// that vowel at the very next position and re-emits the mark and vowel in
+/// the same order, unchanged — so this keeps working with no double-effect
+/// if `dict.tsv` is ever corrected upstream to this same convention.
+pub(crate) fn reposition_stress_before_vowel(ipa: &str) -> String {
+    let chars: Vec<char> = ipa.chars().collect();
+    let mut out = String::with_capacity(ipa.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == 'ˈ' || c == 'ˌ' {
+            // Scan forward for this syllable's vowel, but never past a word
+            // boundary or another stress mark — those mean this syllable's
+            // onset produced no recognized vowel at all, so the mark is
+            // left where it is rather than swallowing a following word or
+            // syllable's phonemes.
+            let mut j = i + 1;
+            while j < chars.len()
+                && !is_stress_target_vowel(chars[j])
+                && chars[j] != ' '
+                && chars[j] != 'ˈ'
+                && chars[j] != 'ˌ'
+            {
+                j += 1;
+            }
+            if j < chars.len() && is_stress_target_vowel(chars[j]) {
+                out.extend(&chars[i + 1..j]); // onset consonant(s), unchanged
+                out.push(c); // stress mark, now after the onset
+                out.push(chars[j]); // the vowel
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -432,5 +534,75 @@ mod tests {
         }
 
         assert_eq!(checked, 32, "expected exactly 32 corpus entries, found {checked}");
+    }
+
+    #[test]
+    fn reposition_stress_moves_mark_past_single_onset_consonant() {
+        // The exact "wäre" case from the reported bug: a bare word-initial
+        // stress mark before a single-consonant onset must move to sit
+        // right before the vowel.
+        assert_eq!(reposition_stress_before_vowel("ˈvɛːʁə"), "vˈɛːʁə");
+    }
+
+    #[test]
+    fn reposition_stress_moves_mark_past_single_consonant_onset_servus() {
+        // The exact "Servus" case: also exercises a vowel immediately
+        // followed by a combining diacritic (the non-syllabic offglide
+        // marker U+032F on "ɐ̯"), which must survive untouched after the
+        // vowel it modifies.
+        assert_eq!(reposition_stress_before_vowel("ˈseɐ̯vus"), "sˈeɐ̯vus");
+    }
+
+    #[test]
+    fn reposition_stress_moves_mark_past_multi_consonant_onset() {
+        // Multi-consonant onset, the case cited in the commit that
+        // introduced the current before-onset convention ("klettern" ->
+        // "ˈklɛtɐn").
+        assert_eq!(reposition_stress_before_vowel("ˈklɛtɐn"), "klˈɛtɐn");
+    }
+
+    #[test]
+    fn reposition_stress_is_noop_for_vowel_initial_syllable() {
+        // An empty onset (the stressed syllable is vowel-initial) means
+        // "before the onset" and "before the vowel" are the same position —
+        // nothing to move.
+        assert_eq!(reposition_stress_before_vowel("ˈapfl̩"), "ˈapfl̩");
+    }
+
+    #[test]
+    fn reposition_stress_handles_secondary_stress() {
+        // Both primary and secondary marks are repositioned independently.
+        // From the real de_test.tsv entry for "3-wöchigen".
+        assert_eq!(
+            reposition_stress_before_vowel("ˈdʁaɪ̯ˌvœçɪɡn̩"),
+            "dʁˈaɪ̯vˌœçɪɡn̩"
+        );
+    }
+
+    #[test]
+    fn reposition_stress_does_not_cross_word_boundary() {
+        // A word with no stress mark ("wie") must pass through unchanged,
+        // and a following word needing repositioning ("wäre") must still
+        // get it — the scan must restart cleanly after the space rather
+        // than reading ahead into or across it.
+        assert_eq!(reposition_stress_before_vowel("viː ˈvɛːʁə"), "viː vˈɛːʁə");
+    }
+
+    #[test]
+    fn reposition_stress_leaves_dangling_mark_unmoved_if_no_vowel_found() {
+        // Defensive fallback: a stress mark followed only by consonants
+        // until end-of-string should never happen in real G2P output, but
+        // must not panic or corrupt the string either way.
+        assert_eq!(reposition_stress_before_vowel("ˈkt"), "ˈkt");
+    }
+
+    #[test]
+    fn reposition_stress_is_idempotent_on_already_correct_input() {
+        // Forward-compatibility guarantee: if dict.tsv is ever corrected
+        // upstream to already place stress immediately before the vowel
+        // (zero consonants between mark and vowel), this function must
+        // leave it unchanged rather than double-applying anything.
+        assert_eq!(reposition_stress_before_vowel("sˈeɐ̯vus"), "sˈeɐ̯vus");
+        assert_eq!(reposition_stress_before_vowel("vˈɛːʁə"), "vˈɛːʁə");
     }
 }

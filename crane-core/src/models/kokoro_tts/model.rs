@@ -21,7 +21,7 @@ use crate::generation::SpeechOptions;
 use crate::models::g2p::Phonemizer;
 use crate::models::g2p::ipa_postprocess::IpaNormalizer;
 
-use super::ipa::build_kokoro_normalizer;
+use super::ipa::{build_kokoro_normalizer, reposition_stress_before_vowel};
 
 /// Kokoro always outputs mono PCM at 24 kHz.
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -525,6 +525,12 @@ impl Model {
 
         let language = resolve_language(language);
         let ipa = phonemizer.text_to_ipa(text, language)?;
+        // German's G2P dictionary places stress before a syllable's whole
+        // onset cluster (e.g. "wäre" -> "ˈvɛːʁə"), not before the vowel like
+        // Kokoro's training data expects (see `reposition_stress_before_vowel`'s
+        // doc comment and `MOONSHINE_DE.md` at the repo root) — reposition it
+        // before handing the phoneme string to Kokoro's vocab normalizer.
+        let ipa = if language == "de" { reposition_stress_before_vowel(&ipa) } else { ipa };
         let normalizer = self.normalizer_for(language)?;
         let phonemes = normalizer.normalize(&ipa);
 
