@@ -105,7 +105,9 @@ pub fn build_kokoro_normalizer(
     IpaNormalizer::new(&replacements, vocab_chars, Vec::new())
 }
 
-/// German IPA vowel characters `reposition_stress_before_vowel` scans for.
+/// German IPA vowel characters. Shared by `reposition_stress_before_vowel`
+/// (to find a syllable's vowel) and `fix_post_vocalic_rhotic` (to classify
+/// whether a vowel sits next to `ʁ`) — changing this set affects both.
 ///
 /// Taken from the actual character inventory of `g2p/de_de/test.tsv` in the
 /// `crane-local-ai/test-data` HuggingFace dataset (the Duden/CELEX-style
@@ -198,6 +200,93 @@ pub(crate) fn reposition_stress_before_vowel(ipa: &str) -> String {
                 out.push(c); // stress mark, now after the onset
                 out.push(chars[j]); // the vowel
                 i = j + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Replaces the uvular fricative `ʁ` (U+0281) with the position-appropriate
+/// German rhotic allophone wherever a vowel, length mark (`ː`, U+02D0),
+/// non-syllabic diphthong offglide (`̯`, U+032F), or nasalization diacritic
+/// (combining tilde, U+0303) immediately precedes it in `ipa`, modulo any
+/// intervening stress marks (see "Commutes" below).
+///
+/// German-specific, called only for `language == "de"` — see
+/// `MOONSHINE_DE_RHOTIC.md` at the repo root for the upstream bug report and
+/// `G2P_FIX.md` for the full investigation. Crane's German dictionary
+/// (`dict.tsv`) unconditionally uses `ʁ` for every orthographic `r`, but the
+/// fine-tuned Kokoro German checkpoint (`df_kerstin`) was trained on real
+/// `espeak-ng` output, which never uses `ʁ` in these positions: it uses
+/// plain `r` in onset position (word-initial, or intervocalically — German
+/// syllabification puts a single consonant between two vowels at the start
+/// of the *following* syllable, so this counts as onset too even though a
+/// vowel sits immediately to its left in the string) or a tap `ɾ` in coda
+/// position (immediately before another consonant, or at the end of a
+/// word). This symbol mismatch produces an audible `ç`/"ch"-like artifact,
+/// confirmed by ear against `df_kerstin`, on roughly a quarter of German
+/// words.
+///
+/// The rule, classified by the nearest non-stress-mark neighbor on each
+/// side (stress marks (`ˈ`/`ˌ`) carry no phonetic content, so they're
+/// skipped when looking for the true preceding/following sound — e.g.
+/// "Gardinen" `ɡaʁˈdiːnən` classifies `ʁ` by what's after the mark, `d`,
+/// not by the mark itself):
+/// - Nothing, or a consonant, precedes `ʁ` (true onset, including
+///   consonant-cluster onsets like `kʁ`/`fʁ`/`bʁ`/`dʁ`) — left unchanged.
+/// - A vowel/`ː`/`̯`/`̃` precedes it and a vowel follows — replaced with
+///   plain `r`.
+/// - A vowel/`ː`/`̯`/`̃` precedes it and anything else follows (a
+///   consonant, or nothing at the end of the string) — replaced with tap
+///   `ɾ` (U+027E).
+///
+/// Idempotent on already-correct input: strings containing no `ʁ` pass
+/// through unchanged, and `dict.tsv`'s existing `ɐ`/`ɐ̯` "-er"-suffix
+/// vocalizations never contain `ʁ`, so they're left alone automatically.
+///
+/// Commutes with [`reposition_stress_before_vowel`]: because the neighbor
+/// checks here skip over stress marks to find the true preceding/following
+/// sound, moving a stress mark relative to `ʁ` never changes the
+/// classification — so it doesn't matter which of the two functions runs
+/// first when both are applied.
+///
+/// Implemented as a dedicated scanning function rather than an
+/// [`IpaNormalizer`] replacement-table entry, for the same reason as
+/// [`reposition_stress_before_vowel`]: the replacement depends on
+/// neighboring-character context, not a fixed find/replace pair.
+#[allow(dead_code)] // Not yet wired into `Model::generate_speech`; see G2P_FIX.md step 2.
+pub(crate) fn fix_post_vocalic_rhotic(ipa: &str) -> String {
+    let chars: Vec<char> = ipa.chars().collect();
+    let mut out = String::with_capacity(ipa.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == 'ʁ' {
+            // Skip backwards over stress marks to find the true preceding sound.
+            let mut prev_idx = i;
+            while prev_idx > 0 && matches!(chars[prev_idx - 1], 'ˈ' | 'ˌ') {
+                prev_idx -= 1;
+            }
+            // ː, ̯, and ̃ aren't vowels themselves, but only ever attach to
+            // one, so their presence means the vocalic nucleus extends up
+            // to ʁ.
+            let prev = (prev_idx > 0).then(|| chars[prev_idx - 1]);
+            if matches!(prev, Some(p) if is_stress_target_vowel(p) || p == 'ː' || p == '\u{032F}' || p == '\u{0303}')
+            {
+                // Skip forwards over stress marks to find the true following sound.
+                let mut next_idx = i + 1;
+                while next_idx < chars.len() && matches!(chars[next_idx], 'ˈ' | 'ˌ') {
+                    next_idx += 1;
+                }
+                if next_idx < chars.len() && is_stress_target_vowel(chars[next_idx]) {
+                    out.push('r');
+                } else {
+                    out.push('ɾ'); // U+027E, tap
+                }
+                i += 1;
                 continue;
             }
         }
@@ -604,5 +693,158 @@ mod tests {
         // leave it unchanged rather than double-applying anything.
         assert_eq!(reposition_stress_before_vowel("sˈeɐ̯vus"), "sˈeɐ̯vus");
         assert_eq!(reposition_stress_before_vowel("vˈɛːʁə"), "vˈɛːʁə");
+    }
+
+    #[test]
+    fn fix_rhotic_leaves_word_initial_onset_unchanged() {
+        // Word-initial ʁ (true onset, nothing precedes) must stay as-is.
+        // The confirmed-fine "Regina" case from G2P_FIX.md.
+        assert_eq!(fix_post_vocalic_rhotic("ʁeˈɡiːna"), "ʁeˈɡiːna");
+    }
+
+    #[test]
+    fn fix_rhotic_leaves_consonant_cluster_onsets_unchanged() {
+        // Onset ʁ in consonant clusters (kʁ, fʁ, dʁ, bʁ) is preceded by a
+        // consonant, not a vowel — must stay as-is. Representative IPA for
+        // the confirmed-fine "Kraft"/"Frau"/"Drache"/"Bringen" from
+        // G2P_FIX.md.
+        assert_eq!(fix_post_vocalic_rhotic("kʁˈaft"), "kʁˈaft");
+        assert_eq!(fix_post_vocalic_rhotic("fʁˈaʊ̯"), "fʁˈaʊ̯");
+        assert_eq!(fix_post_vocalic_rhotic("dʁˈaxə"), "dʁˈaxə");
+        assert_eq!(fix_post_vocalic_rhotic("bʁˈɪŋən"), "bʁˈɪŋən");
+    }
+
+    #[test]
+    fn fix_rhotic_intervocalic_after_length_mark_becomes_r() {
+        // Post-vocalic ʁ preceded by ː and followed by a vowel becomes
+        // plain r. The confirmed-broken "wäre" case from G2P_FIX.md.
+        assert_eq!(fix_post_vocalic_rhotic("ˈvɛːʁə"), "ˈvɛːrə");
+    }
+
+    #[test]
+    fn fix_rhotic_intervocalic_becomes_r() {
+        // Post-vocalic ʁ between two vowels becomes plain r.
+        // Confirmed-broken words from G2P_FIX.md's listening tests.
+        assert_eq!(fix_post_vocalic_rhotic("ˈhaːʁə"), "ˈhaːrə"); // Haare
+        assert_eq!(fix_post_vocalic_rhotic("ˈɡoːʁən"), "ˈɡoːrən"); // goren
+        assert_eq!(fix_post_vocalic_rhotic("ˈfloːʁɪs"), "ˈfloːrɪs"); // Floris
+        assert_eq!(fix_post_vocalic_rhotic("ˈandəʁəm"), "ˈandərəm"); // anderem
+    }
+
+    #[test]
+    fn fix_rhotic_heroine_intervocalic_after_plain_vowel() {
+        // "Heroine": ʁ sits between the vowels e and o, a true
+        // phonological onset by German syllabification, yet preceded by a
+        // vowel in the string — must become r. Confirmed broken by ear.
+        assert_eq!(fix_post_vocalic_rhotic("heʁoˈiːnə"), "heroˈiːnə");
+    }
+
+    #[test]
+    fn fix_rhotic_pre_consonant_becomes_tap() {
+        // Post-vocalic ʁ followed by a consonant becomes tap ɾ.
+        // Confirmed-broken words from G2P_FIX.md's listening tests.
+        assert_eq!(fix_post_vocalic_rhotic("ˈt͡svɛʁɡə"), "ˈt͡svɛɾɡə"); // Zwerge
+        assert_eq!(fix_post_vocalic_rhotic("ˈbɛʁmə"), "ˈbɛɾmə"); // Bärme
+        assert_eq!(fix_post_vocalic_rhotic("ˈɛʁml̩"), "ˈɛɾml̩"); // Ärmel
+        assert_eq!(fix_post_vocalic_rhotic("ˈɡɛʁtn̩"), "ˈɡɛɾtn̩"); // Gärten
+        assert_eq!(fix_post_vocalic_rhotic("vʊʁf"), "vʊɾf"); // Wurf
+    }
+
+    #[test]
+    fn fix_rhotic_pre_consonant_unstressed_becomes_tap() {
+        // Unstressed post-vocalic ʁ before a consonant also becomes tap ɾ —
+        // stress does not affect the rule. These words sounded fine or
+        // near-fine with ʁ by ear, but espeak-ng uses ɾ there too.
+        assert_eq!(fix_post_vocalic_rhotic("ˈaʊ̯ksbʊʁk"), "ˈaʊ̯ksbʊɾk"); // Augsburg
+        assert_eq!(fix_post_vocalic_rhotic("ˈvɪsmaʁs"), "ˈvɪsmaɾs"); // Wismars
+    }
+
+    #[test]
+    fn fix_rhotic_norberts_two_coda_taps() {
+        // "Norberts" has two post-vocalic ʁ, both before consonants — both
+        // must become ɾ independently in a single pass.
+        assert_eq!(fix_post_vocalic_rhotic("ˈnɔʁbɛʁt͡s"), "ˈnɔɾbɛɾt͡s");
+    }
+
+    #[test]
+    fn fix_rhotic_marmore_mixed_tap_and_r() {
+        // "Marmore" has two post-vocalic ʁ in different environments: the
+        // first (after a, before consonant m) becomes ɾ, the second (after
+        // ː, before vowel ə) becomes r. Exercises both branches in one
+        // string.
+        assert_eq!(fix_post_vocalic_rhotic("ˈmaʁmoːʁə"), "ˈmaɾmoːrə");
+    }
+
+    #[test]
+    fn fix_rhotic_word_final_becomes_tap() {
+        // Post-vocalic ʁ at the absolute end of the string (nothing
+        // follows) becomes tap ɾ. Synthetic case — espeak-ng produces ɾ
+        // word-finally (e.g. "Bär" -> "bˈɛːɾ").
+        assert_eq!(fix_post_vocalic_rhotic("bɛːʁ"), "bɛːɾ");
+    }
+
+    #[test]
+    fn fix_rhotic_noop_on_no_uvular() {
+        // Strings with no ʁ pass through unchanged.
+        assert_eq!(fix_post_vocalic_rhotic("ˈapfl̩"), "ˈapfl̩");
+        assert_eq!(fix_post_vocalic_rhotic(""), "");
+    }
+
+    #[test]
+    fn fix_rhotic_noop_on_vocalized_forms() {
+        // dict.tsv's existing ɐ/ɐ̯ vocalizations contain no ʁ and must pass
+        // through unchanged.
+        assert_eq!(fix_post_vocalic_rhotic("ˈseɐ̯vus"), "ˈseɐ̯vus");
+    }
+
+    #[test]
+    fn fix_rhotic_offglide_diacritic_triggers_replacement() {
+        // The non-syllabic offglide ̯ (U+032F) directly before ʁ must
+        // trigger the replacement rule, since ̯ only ever modifies a
+        // preceding vowel. Real de_de/test.tsv entry ("Dinosaurus"): ʁ
+        // follows ̯ (modifying ʊ) and precedes the vowel ʊ — becomes r.
+        assert_eq!(fix_post_vocalic_rhotic("dinoˈzaʊ̯ʁʊs"), "dinoˈzaʊ̯rʊs");
+    }
+
+    #[test]
+    fn fix_rhotic_stress_mark_after_rhotic_before_vowel_becomes_r() {
+        // "berühmt"-shaped: dict.tsv places the stress mark right after ʁ,
+        // before the vowel (ʁ is the syllable's whole onset). The mark must
+        // be skipped when looking for the following sound, so this is
+        // still classified as intervocalic and becomes r, not the tap a
+        // naive literal-neighbor check would produce.
+        assert_eq!(fix_post_vocalic_rhotic("bəʁˈyːmt"), "bərˈyːmt");
+    }
+
+    #[test]
+    fn fix_rhotic_stress_mark_before_rhotic_after_vowel_becomes_r() {
+        // Mirror case: stress mark sits directly before ʁ, after a vowel
+        // (e.g. after `reposition_stress_before_vowel` has already run and
+        // moved the mark up to the vowel it precedes, which happens to be
+        // the ʁ's own onset position... exercised here in isolation). The
+        // mark must be skipped when looking for the preceding sound, so
+        // this is still classified as post-vocalic and becomes r.
+        assert_eq!(fix_post_vocalic_rhotic("aˈʁiː"), "aˈriː");
+    }
+
+    #[test]
+    fn fix_rhotic_gardinen_stress_mark_after_rhotic_before_consonant_becomes_tap() {
+        // "Gardinen" (G2P_FIX.md's own example of a mark sitting between ʁ
+        // and the next consonant): ʁ is preceded by the vowel a and
+        // followed by ˈ then the consonant d — the true following sound is
+        // a consonant, so this must become tap ɾ, matching espeak-ng.
+        assert_eq!(fix_post_vocalic_rhotic("ɡaʁˈdiːnən"), "ɡaɾˈdiːnən");
+    }
+
+    #[test]
+    fn fix_rhotic_nasalized_vowel_before_rhotic_becomes_r() {
+        // Combining tilde ̃ (U+0303, nasalization) directly before ʁ must
+        // trigger the replacement rule, since it only ever modifies a
+        // preceding vowel — same reasoning as the ː/̯ cases. Synthetic
+        // case modeled on de_de/test.tsv's French-loanword entries (e.g.
+        // "changiere" ʃɑ̃ˈʒiːʁə), which nasalize a vowel elsewhere in the
+        // word but never immediately before ʁ today — this locks in
+        // correct behavior if that ever changes.
+        assert_eq!(fix_post_vocalic_rhotic("ʃɑ̃ʁə"), "ʃɑ̃rə");
     }
 }
