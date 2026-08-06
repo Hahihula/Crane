@@ -21,7 +21,7 @@ use crate::generation::SpeechOptions;
 use crate::models::g2p::Phonemizer;
 use crate::models::g2p::ipa_postprocess::IpaNormalizer;
 
-use super::ipa::{build_kokoro_normalizer, reposition_stress_before_vowel};
+use super::ipa::{build_kokoro_normalizer, fix_post_vocalic_rhotic, reposition_stress_before_vowel};
 
 /// Kokoro always outputs mono PCM at 24 kHz.
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -530,7 +530,16 @@ impl Model {
         // Kokoro's training data expects (see `reposition_stress_before_vowel`'s
         // doc comment and `MOONSHINE_DE.md` at the repo root) — reposition it
         // before handing the phoneme string to Kokoro's vocab normalizer.
-        let ipa = if language == "de" { reposition_stress_before_vowel(&ipa) } else { ipa };
+        // It also uses the uvular fricative `ʁ` unconditionally for every
+        // orthographic "r", where Kokoro's training data (espeak-ng) uses
+        // context-dependent allophones instead (see `fix_post_vocalic_rhotic`'s
+        // doc comment and `G2P_FIX.md`) — fix that up too.
+        let ipa = if language == "de" {
+            let ipa = reposition_stress_before_vowel(&ipa);
+            fix_post_vocalic_rhotic(&ipa)
+        } else {
+            ipa
+        };
         let normalizer = self.normalizer_for(language)?;
         let phonemes = normalizer.normalize(&ipa);
 

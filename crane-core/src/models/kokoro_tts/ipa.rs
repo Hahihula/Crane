@@ -257,7 +257,6 @@ pub(crate) fn reposition_stress_before_vowel(ipa: &str) -> String {
 /// [`IpaNormalizer`] replacement-table entry, for the same reason as
 /// [`reposition_stress_before_vowel`]: the replacement depends on
 /// neighboring-character context, not a fixed find/replace pair.
-#[allow(dead_code)] // Not yet wired into `Model::generate_speech`; see G2P_FIX.md step 2.
 pub(crate) fn fix_post_vocalic_rhotic(ipa: &str) -> String {
     let chars: Vec<char> = ipa.chars().collect();
     let mut out = String::with_capacity(ipa.len());
