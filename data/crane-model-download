@@ -110,6 +110,19 @@ MODELS = {
         },
         "description": "Moonshine G2P English lexicon + OOV ONNX model (MIT)",
     },
+    "moonshine-g2p-de": {
+        "repo_id": "moonshine-ai/moonshine",
+        "dirname": "moonshine-g2p/de",
+        "kind": "g2p",
+        "source": "github",
+        "github_repo": "moonshine-ai/moonshine",
+        "github_ref": "main",
+        "github_base": "core/moonshine-tts/data/de",
+        "files": {
+            "dict.tsv": "dict.tsv",
+        },
+        "description": "Moonshine G2P German lexicon, no OOV model (MIT)",
+    },
     "kokoro": {
         "repo_id": "onnx-community/Kokoro-82M-v1.0-ONNX",
         "dirname": "Kokoro-82M-v1.0-ONNX",

@@ -15,6 +15,25 @@ use std::collections::HashMap;
 /// tiers exist to benchmark against.
 pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 
+/// Regression threshold for the held-out `de` test set
+/// (`g2p/de_de/test.tsv` in the `crane-local-ai/test-data` HuggingFace
+/// dataset): `GermanG2p`'s own measured CER
+/// (lexicon + compound decomposition + hand rules, with those words excluded
+/// from the lexicon so they exercise the fallback tiers) must stay at or
+/// below this value. Originally recorded as the external
+/// moonshine-tts `german-rule-g2p-cli.cpp` reference engine's rule-only CER
+/// (0.4390) before `GermanG2p` existed to benchmark against; tightened to
+/// Crane's own measured CER once it did, matching how `REFERENCE_CER_EN_US`
+/// tracks `EnglishG2p`'s own pipeline rather than an external baseline.
+/// Re-tightened after completing the unstressed-prefix list (measured
+/// 0.2828514784), then again after fixing word-initial `h` (which also
+/// surfaced and fixed a pre-existing bug placing the primary stress mark
+/// before a syllable's vowel instead of before its entire onset consonant
+/// cluster — the bigger contributor to this drop; measured 0.2466089487),
+/// then again after adding open-syllable vowel-length rules gated on a
+/// following-consonant-run count (measured 0.2316612229).
+pub const REFERENCE_CER_DE: f64 = 0.2317;
+
 /// Per-word benchmark result.
 pub struct WordResult {
     /// The input word.

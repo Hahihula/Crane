@@ -27,27 +27,23 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || !c.is_ascii()
 }
 
-/// Normalizes a word token for lexicon lookup.
+/// Trims non-word characters from both edges of `token`, preserving case.
 ///
-/// ASCII bytes are lowercased (non-ASCII bytes are left as-is — no Unicode
-/// case folding); then non-word characters are trimmed from both edges.
 /// Multi-byte UTF-8 codepoints (accents, IPA symbols, etc.) always count as
 /// word characters and are never trimmed. Interior characters are never
-/// trimmed, only the leading/trailing run of non-word characters.
+/// trimmed, only the leading/trailing run of non-word characters (see
+/// [`is_word_char`]).
 ///
 /// Returns an empty string if the token has no word characters at all.
-///
-/// Returns a borrowed slice when `token` is already trimmed and contains no
-/// uppercase ASCII bytes, avoiding an allocation on the common case.
 ///
 /// # Panics
 ///
 /// Never panics: if a leading word character is found, a trailing one is
 /// guaranteed to exist too (the same character, at minimum).
 #[must_use]
-pub fn normalize_word_for_lookup(token: &str) -> Cow<'_, str> {
+pub fn trim_edge_punctuation(token: &str) -> &str {
     let Some((start, _)) = token.char_indices().find(|&(_, c)| is_word_char(c)) else {
-        return Cow::Borrowed("");
+        return "";
     };
     let (end, last_char) = token
         .char_indices()
@@ -55,7 +51,22 @@ pub fn normalize_word_for_lookup(token: &str) -> Cow<'_, str> {
         .find(|&(_, c)| is_word_char(c))
         .expect("start match implies a matching char exists from the end too");
 
-    let trimmed = &token[start..end + last_char.len_utf8()];
+    &token[start..end + last_char.len_utf8()]
+}
+
+/// Normalizes a word token for lexicon lookup.
+///
+/// ASCII bytes are lowercased (non-ASCII bytes are left as-is — no Unicode
+/// case folding); then non-word characters are trimmed from both edges via
+/// [`trim_edge_punctuation`].
+///
+/// Returns an empty string if the token has no word characters at all.
+///
+/// Returns a borrowed slice when `token` is already trimmed and contains no
+/// uppercase ASCII bytes, avoiding an allocation on the common case.
+#[must_use]
+pub fn normalize_word_for_lookup(token: &str) -> Cow<'_, str> {
+    let trimmed = trim_edge_punctuation(token);
     if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(trimmed.to_ascii_lowercase())
     } else {
@@ -124,6 +135,26 @@ mod tests {
             split_text_to_words("café résumé"),
             vec!["café", "résumé"]
         );
+    }
+
+    #[test]
+    fn trim_edge_punctuation_preserves_case() {
+        assert_eq!(trim_edge_punctuation("Haus."), "Haus");
+    }
+
+    #[test]
+    fn trim_edge_punctuation_trims_both_edges_keeps_interior() {
+        assert_eq!(trim_edge_punctuation("--don't--"), "don't");
+    }
+
+    #[test]
+    fn trim_edge_punctuation_all_punctuation_is_empty() {
+        assert_eq!(trim_edge_punctuation("---"), "");
+    }
+
+    #[test]
+    fn trim_edge_punctuation_empty_string_is_empty() {
+        assert_eq!(trim_edge_punctuation(""), "");
     }
 
     #[test]
