@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 
 use super::super::proto::{GraphProto, NodeProto};
+use super::collect_producers;
 
 /// Fuses every decomposed `atan2` pattern in `graph` into a single `Atan2`
 /// node, returning the number of fusions performed.
@@ -39,21 +40,6 @@ pub(crate) fn fuse_atan2_decomposition(graph: &mut GraphProto) -> usize {
     }
 
     fused
-}
-
-/// Maps each node output name to a reference-counted copy of its producing
-/// node, so [`try_fuse_where`] can walk backward from a `Where` node
-/// through the chain without a second pass.
-fn collect_producers(nodes: &[NodeProto]) -> HashMap<String, NodeProto> {
-    let mut producers = HashMap::with_capacity(nodes.len());
-    for node in nodes {
-        for output in &node.output {
-            if !output.is_empty() {
-                producers.insert(output.clone(), node.clone());
-            }
-        }
-    }
-    producers
 }
 
 /// Attempts to match `node` (a `Where`) against the `atan2` quadrant-
