@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 /// External reference CER for the held-out `en_us` test set
-/// (`crane-core/tests/data/g2p/en_us_test.tsv`).
+/// (`g2p/en_us/test.tsv` in the `crane-local-ai/test-data` HuggingFace dataset).
 /// This is the regression threshold `en_us` CER must stay at or below once the lexicon/OOV/rules
 /// tiers exist to benchmark against.
 pub const REFERENCE_CER_EN_US: f64 = 0.2558;

@@ -12,7 +12,10 @@
 //! `CRANE_G2P_EN_US_DIR` for a production-representative comparison
 //! point; it silently skips (no benchmark registered, non-error exit) when
 //! that variable isn't set, so it's opt-in and doesn't affect the default
-//! `cargo bench` run.
+//! `cargo bench` run. `ipa_normalize` and `text_to_ipa_full_lexicon_corpus`
+//! load fixtures from the `crane-local-ai/test-data` HuggingFace dataset
+//! (see [`crane_core::test_data`]) and skip the same way when that dataset
+//! isn't reachable (no `CRANE_TEST_DATA_DIR` and no network).
 
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -42,19 +45,12 @@ lazy\tlˈeɪzi
 dog\tdˈɔɡ
 ";
 
-/// Parses the real 114-entry Kokoro phoneme vocabulary shipped as a test
-/// fixture, for building a realistic `IpaNormalizer` in the benchmarks below.
-fn kokoro_vocab() -> HashMap<char, i64> {
-    let json = include_str!("../tests/data/g2p/kokoro_vocab.json");
-    let raw: HashMap<String, i64> = serde_json::from_str(json).unwrap();
-    raw.into_iter()
-        .map(|(k, v)| {
-            let mut chars = k.chars();
-            let c = chars.next().expect("vocab key must not be empty");
-            assert!(chars.next().is_none(), "vocab key {k:?} is not a single codepoint");
-            (c, v)
-        })
-        .collect()
+/// Parses the real 114-entry Kokoro phoneme vocabulary from the
+/// `crane-local-ai/test-data` dataset, for building a realistic
+/// `IpaNormalizer` in the benchmarks below. Returns `None` if the dataset
+/// isn't reachable (no `CRANE_TEST_DATA_DIR` and no network).
+fn kokoro_vocab() -> Option<HashMap<char, i64>> {
+    crane_core::test_data::load_kokoro_vocab().ok()
 }
 
 fn bench_text_to_ipa(c: &mut Criterion) {
@@ -109,11 +105,15 @@ fn bench_text_to_ipa_full_lexicon(c: &mut Criterion) {
         oov_onnx::Model::load(&model_dir.join("oov")).expect("load OOV model");
     let engine = EnglishG2p::new(&dict_tsv, Some(oov_model), false).expect("build EnglishG2p");
 
-    let corpus: Vec<&str> = include_str!("../tests/data/g2p/en_us_test.tsv")
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(word, _)| word)
-        .collect();
+    let corpus: Option<Vec<String>> = crane_core::test_data::get_test_data_file("g2p/en_us/test.tsv")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|tsv| {
+            tsv.lines()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(word, _)| word.to_string())
+                .collect()
+        });
 
     let mut group = c.benchmark_group("text_to_ipa_full_lexicon");
     group.throughput(Throughput::Elements(1));
@@ -162,12 +162,20 @@ fn bench_text_to_ipa_full_lexicon(c: &mut Criterion) {
 
     group.finish();
 
+    let Some(corpus) = corpus else {
+        eprintln!(
+            "skipping text_to_ipa_full_lexicon_corpus: crane-local-ai/test-data unavailable \
+             (set CRANE_TEST_DATA_DIR or ensure network access)"
+        );
+        return;
+    };
+
     let mut corpus_group = c.benchmark_group("text_to_ipa_full_lexicon_corpus");
     corpus_group.throughput(Throughput::Elements(corpus.len() as u64));
     corpus_group.bench_function("corpus_5000_words", |b| {
         b.iter(|| {
             for word in &corpus {
-                engine.text_to_ipa(black_box(word)).unwrap();
+                engine.text_to_ipa(black_box(word.as_str())).unwrap();
             }
         });
     });
@@ -212,7 +220,13 @@ fn bench_oov_decode_strategy(c: &mut Criterion) {
 }
 
 fn bench_ipa_normalize(c: &mut Criterion) {
-    let vocab = kokoro_vocab();
+    let Some(vocab) = kokoro_vocab() else {
+        eprintln!(
+            "skipping ipa_normalize: crane-local-ai/test-data unavailable \
+             (set CRANE_TEST_DATA_DIR or ensure network access)"
+        );
+        return;
+    };
     let normalizer = build_kokoro_normalizer("en_us", &vocab).unwrap();
     let mut group = c.benchmark_group("ipa_normalize");
     group.throughput(Throughput::Elements(1));

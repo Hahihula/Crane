@@ -510,8 +510,10 @@ mod tests {
     /// hits — a lexicon hit on a held-out word would trivially match and
     /// mask any regression in the fallback tiers.
     fn run_cer_benchmark(oov_model: Option<oov_onnx::Model>, label: &str) -> G2pBenchmarkResult {
-        let test_pairs =
-            parse_word_ipa_tsv(include_str!("../../../../tests/data/g2p/en_us_test.tsv"));
+        let test_data_path =
+            crate::test_data::get_test_data_file("g2p/en_us/test.tsv").expect("fetch test.tsv");
+        let test_tsv = std::fs::read_to_string(&test_data_path).expect("read test.tsv");
+        let test_pairs = parse_word_ipa_tsv(&test_tsv);
         let test_words: std::collections::HashSet<&str> =
             test_pairs.iter().map(|(word, _)| word.as_str()).collect();
 
