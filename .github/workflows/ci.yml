@@ -30,6 +30,25 @@ jobs:
         run: cargo build --release --features onnx
       - name: Test
         run: cargo test --workspace --features onnx
+      - name: Download test data
+        run: |
+          pip install -U "huggingface_hub[cli]"
+          hf download crane-local-ai/test-data --repo-type dataset --local-dir /tmp/crane-test-data
+      - name: Test G2P fixtures from crane-local-ai/test-data
+        run: |
+          cargo test -p crane-core --features onnx --lib -- --ignored \
+            models::g2p::lexicon::tests::test_tsv_fixture_lookups \
+            models::kokoro_tts::ipa::tests::en_kokoro_normalizer_matches_reference_corpus
+        env:
+          CRANE_TEST_DATA_DIR: /tmp/crane-test-data
+      - name: Download G2P dictionary (moonshine-g2p-en-us)
+        run: python3 data/crane-model-download --model moonshine-g2p-en-us --path /tmp/crane-models
+      - name: CER benchmark (no-OOV, rules tier only)
+        run: |
+          cargo test -p crane-core --features onnx --lib -- --ignored --nocapture \
+            models::g2p::languages::english::tests::cer_benchmark_without_oov
+        env:
+          CRANE_G2P_EN_US_DIR: /tmp/crane-models/g2p/moonshine-g2p/en_us
 
   build-metal:
     runs-on: macos-latest
