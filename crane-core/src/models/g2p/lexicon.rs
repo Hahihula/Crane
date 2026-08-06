@@ -275,9 +275,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs crane-local-ai/test-data (CRANE_TEST_DATA_DIR or network)"]
     fn test_tsv_fixture_lookups() {
-        let tsv = include_str!("../../../tests/data/g2p/en_us_test.tsv");
-        let lexicon = Lexicon::from_tsv(tsv).unwrap();
+        let path = crate::test_data::get_test_data_file("g2p/en_us/test.tsv").unwrap();
+        let tsv = std::fs::read_to_string(&path).unwrap();
+        let lexicon = Lexicon::from_tsv(&tsv).unwrap();
         // 5000 lines, but a handful of words (e.g. "read"-style heteronyms)
         // appear twice with different IPA, so unique word entries are fewer
         // — each still keeps both alternatives, see below.
