@@ -37,3 +37,6 @@ pub mod onnx;
 pub mod autotokenizer;
 pub mod bins;
 pub mod chat;
+
+#[doc(hidden)]
+pub mod test_data;
