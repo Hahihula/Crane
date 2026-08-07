@@ -1,6 +1,6 @@
 //! CUDA implementations of fused ops using custom PTX kernels.
 //!
-//! The PTX is compiled from `kernels/fused_ops.cu` at build time via
+//! The PTX is compiled from `kernels/cuda/fused_ops.cu` at build time via
 //! bindgen_cuda and embedded as a const string.
 
 use candle_core::backend::BackendStorage;
@@ -8,7 +8,7 @@ use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
 use candle_core::{CudaDevice, DType, Device, Layout, Result, Shape, Tensor, WithDType};
 
-// PTX compiled from kernels/fused_ops.cu — embedded at build time.
+// PTX compiled from kernels/cuda/fused_ops.cu — embedded at build time.
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/crane_kernels_ptx.rs"));
 }
@@ -371,7 +371,7 @@ struct TopkTmpBufs {
 /// GPU top-k indices for 1D f32 tensors (k ≤ 64).
 ///
 /// Two-stage block reduction using custom CUDA kernels compiled from
-/// `crane-core/kernels/fused_ops.cu`.
+/// `crane-core/kernels/cuda/fused_ops.cu`.
 ///
 /// Returns a `[k]` U32 tensor of the indices of the k largest values,
 /// sorted in descending order of value.

@@ -1,7 +1,7 @@
 //! CUDA launcher for the fused Gated Delta Net recurrence kernel.
 //!
 //! Collapses the per-timestep Candle op graph into a single kernel launch
-//! (`kernels/gdn.cu`). Inputs must be contiguous f32 CUDA tensors in the
+//! (`kernels/cuda/gdn.cu`). Inputs must be contiguous f32 CUDA tensors in the
 //! layouts documented on [`gdn_recurrence_cuda`]; `q` is expected pre-scaled
 //! by `1/sqrt(K)` (the caller does this, matching the CPU reference).
 
@@ -10,7 +10,7 @@ use candle_core::cuda_backend::WrapErr;
 use candle_core::op::BackpropOp;
 use candle_core::{CudaStorage, Result, Storage, Tensor};
 
-// PTX compiled from kernels/gdn.cu — embedded at build time.
+// PTX compiled from kernels/cuda/gdn.cu — embedded at build time.
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/crane_kernels_ptx.rs"));
 }

@@ -1,5 +1,5 @@
 fn main() {
-    println!("cargo::rerun-if-changed=kernels/");
+    println!("cargo::rerun-if-changed=kernels/cuda/");
     println!("cargo::rerun-if-changed=build.rs");
 
     #[cfg(feature = "onnx")]
@@ -18,7 +18,7 @@ fn main() {
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
         let builder = bindgen_cuda::Builder::default()
-            .kernel_paths_glob("kernels/**/*.cu")
+            .kernel_paths_glob("kernels/cuda/**/*.cu")
             .arg("--expt-relaxed-constexpr")
             .arg("-std=c++17")
             .arg("-O3");
