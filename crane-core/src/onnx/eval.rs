@@ -2832,6 +2832,33 @@ pub(crate) fn simple_eval_(
             op_type => bail!("unsupported op_type {op_type} for op {node:?}"),
         }
 
+        // Crane Added 20260807: detach every output this node just produced
+        // from its computation graph. `simple_eval_` is a forward-only
+        // evaluator that never calls `Tensor::backward()`, but candle's
+        // `Tensor::track_op()` is `is_variable || op.is_some()` and
+        // `BackpropOp::new1/2/3` check it transitively on their operands —
+        // so once any tensor anywhere upstream is a `Var` (the "LSTM" op
+        // above wraps its weights in one, since `candle_nn::rnn::lstm()`
+        // requires a `VarBuilder`), the taint propagates forward forever:
+        // every tensor computed from it, and everything computed from
+        // those, keeps retaining full backward-provenance for the rest of
+        // the graph. On a model whose LSTM feeds into a large downstream
+        // network (e.g. a TTS vocoder), that produces a real, deep
+        // computation graph, and dropping the final output recurses through
+        // the whole thing in one native call-stack frame per node —
+        // confirmed via gdb backtrace to overflow the stack on Kokoro
+        // synthesis. Detaching per node keeps every tensor's `Drop` O(1)
+        // regardless of what fed into it, and as a side effect lets
+        // `release_names_if_done` below actually free memory — previously
+        // an evicted name's storage could still be kept alive by a later
+        // tensor's retained op chain even after its `values` entry was
+        // removed.
+        for output_name in node.output.iter().filter(|name| !name.is_empty()) {
+            if let Some(value) = values.get_mut(output_name.as_str()) {
+                *value = value.detach();
+            }
+        }
+
         release_names_if_done(
             node.input.iter().filter(|input| !input.is_empty()).map(String::as_str),
             &mut remaining_uses,
