@@ -10,6 +10,15 @@
 //!
 //! Each operation eliminates multiple kernel launches and intermediate
 //! GMEM round-trips compared to the equivalent candle op chain.
+//!
+//! Reusable elementwise ops with their own CPU/CUDA dispatch (not gated by
+//! the `cuda` feature at the module level — each op's `CustomOp2` handles
+//! backend dispatch internally):
+//! - [`snake`] — fused Snake periodic activation
+//! - [`atan2`] — fused two-argument arctangent
+
+pub mod atan2;
+pub mod snake;
 
 #[cfg(feature = "cuda")]
 mod cuda_impl;

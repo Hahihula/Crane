@@ -4,12 +4,13 @@ mod compat;
 mod constant_fold;
 mod eliminate;
 pub(crate) mod fuse_atan2;
+pub(crate) mod fuse_snake;
 
 use std::collections::{HashMap, HashSet};
 
 use candle_core::{Result, Tensor};
 
-use super::proto::GraphProto;
+use super::proto::{GraphProto, NodeProto};
 
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
@@ -41,6 +42,8 @@ pub struct OptimizationReport {
     pub removed_initializers: usize,
     /// Number of decomposed `atan2(y, x)` patterns fused into single nodes.
     pub fused_atan2_nodes: usize,
+    /// Number of decomposed `Snake` activation patterns fused into single nodes.
+    pub fused_snake_nodes: usize,
     /// DCE is skipped when graph-valued attributes may capture outer values.
     pub skipped_dce_for_subgraphs: bool,
 }
@@ -67,6 +70,7 @@ pub(crate) fn optimize(
 
     report.removed_alias_nodes += eliminate::eliminate_alias_nodes(graph);
     report.fused_atan2_nodes = fuse_atan2::fuse_atan2_decomposition(graph);
+    report.fused_snake_nodes = fuse_snake::fuse_snake_decomposition(graph);
 
     for _ in 0..options.max_optimization_passes {
         let folded = constant_fold::fold_constants(graph, constants, options.max_folded_elements)?;
@@ -86,6 +90,22 @@ pub(crate) fn optimize(
     report.removed_initializers = prune_unused_constants(graph, constants);
     report.final_nodes = graph.node.len();
     Ok(report)
+}
+
+/// Maps each node output name to a clone of its producing node, so a
+/// backward-walking fusion pass (e.g. [`fuse_atan2`] or [`fuse_snake`]) can
+/// trace a subgraph's inputs back to their producers without a second pass
+/// over the node list.
+pub(super) fn collect_producers(nodes: &[NodeProto]) -> HashMap<String, NodeProto> {
+    let mut producers = HashMap::with_capacity(nodes.len());
+    for node in nodes {
+        for output in &node.output {
+            if !output.is_empty() {
+                producers.insert(output.clone(), node.clone());
+            }
+        }
+    }
+    producers
 }
 
 fn prune_unused_constants(

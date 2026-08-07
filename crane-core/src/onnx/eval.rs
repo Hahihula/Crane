@@ -2,6 +2,7 @@ use super::ops;
 use super::proto::attribute_proto::AttributeType;
 use super::proto::tensor_proto::DataType;
 use super::proto::{self as onnx, GraphProto};
+use crate::ops::fused_ops;
 use candle::{DType, Device, IndexOp, Result, Tensor, bail};
 use candle_core as candle;
 use candle_core::Module;
@@ -1135,7 +1136,7 @@ fn simple_eval_(
                 let shape = broadcast_shape(y.dims(), x.dims())?;
                 let y = y.broadcast_as(shape.clone())?;
                 let x = x.broadcast_as(shape)?;
-                let output = ops::atan::atan2(&y, &x)?;
+                let output = fused_ops::atan2::atan2(&y, &x)?;
                 values.insert(node.output[0].clone(), output);
             },
             "Cos" => {
@@ -1146,6 +1147,18 @@ fn simple_eval_(
             "Sin" => {
                 let input = get(&node.input[0])?;
                 let output = input.sin()?;
+                values.insert(node.output[0].clone(), output);
+            },
+            // Crane Added 20260806: fused snake(x, alpha) — produced by the
+            // optimizer's snake-decomposition fusion pass, not present in
+            // the original ONNX model.
+            "Snake" => {
+                let x = get(&node.input[0])?;
+                let alpha = get(&node.input[1])?;
+                let shape = broadcast_shape(x.dims(), alpha.dims())?;
+                let x = x.broadcast_as(shape.clone())?;
+                let alpha = alpha.broadcast_as(shape)?;
+                let output = fused_ops::snake::snake(&x, &alpha)?;
                 values.insert(node.output[0].clone(), output);
             },
             "Neg" => {

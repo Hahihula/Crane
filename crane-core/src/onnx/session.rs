@@ -43,7 +43,7 @@ impl Session {
         let optimization_report = optimizer::optimize(graph, &mut initializers, &options)?;
         if std::env::var_os("CRANE_ONNX_OPT_REPORT").is_some() {
             eprintln!(
-                "Crane ONNX optimized '{}': {} -> {} nodes (folded {}, aliases {}, dead {}, initializers {}, fused_atan2 {})",
+                "Crane ONNX optimized '{}': {} -> {} nodes (folded {}, aliases {}, dead {}, initializers {}, fused_atan2 {}, fused_snake {})",
                 graph.name,
                 optimization_report.original_nodes,
                 optimization_report.final_nodes,
@@ -52,6 +52,7 @@ impl Session {
                 optimization_report.removed_dead_nodes,
                 optimization_report.removed_initializers,
                 optimization_report.fused_atan2_nodes,
+                optimization_report.fused_snake_nodes,
             );
         }
         graph.initializer.clear();
