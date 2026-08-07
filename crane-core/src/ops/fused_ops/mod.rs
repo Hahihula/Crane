@@ -15,7 +15,9 @@
 //! the `cuda` feature at the module level — each op's `CustomOp2` handles
 //! backend dispatch internally):
 //! - [`snake`] — fused Snake periodic activation
+//! - [`atan2`] — fused two-argument arctangent
 
+pub mod atan2;
 pub mod snake;
 
 #[cfg(feature = "cuda")]

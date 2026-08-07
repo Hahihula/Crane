@@ -1136,7 +1136,7 @@ fn simple_eval_(
                 let shape = broadcast_shape(y.dims(), x.dims())?;
                 let y = y.broadcast_as(shape.clone())?;
                 let x = x.broadcast_as(shape)?;
-                let output = ops::atan::atan2(&y, &x)?;
+                let output = fused_ops::atan2::atan2(&y, &x)?;
                 values.insert(node.output[0].clone(), output);
             },
             "Cos" => {
