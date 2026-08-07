@@ -520,6 +520,14 @@ fn try_vowel(
         out.push_str(long_vowel_ipa(ch));
         return Some(2);
     }
+    // Eszett: ß after a vowel signals that the vowel is long (post-1996
+    // orthography reform). The ß itself maps to /s/, consumed here so
+    // try_fixed_consonant's flat ß->s mapping is never reached.
+    if is_vowel(ch) && i + 1 < n && syllable[i + 1] == 'ß' {
+        out.push_str(long_vowel_ipa(ch));
+        out.push('s');
+        return Some(2);
+    }
     // Syllable-final "-er" vocalizes to [ɐ] in standard German, so it is
     // handled as a two-character unit before "r" ever reaches the
     // unconditional r -> ʁ mapping in `syllable_to_ipa`.
@@ -831,6 +839,20 @@ mod tests {
     fn eszett_maps_to_s() {
         assert!(hand_rules_ipa("straße").contains('s'));
         assert!(!hand_rules_ipa("straße").contains('ß'));
+    }
+
+    #[test]
+    fn eszett_lengthens_preceding_vowel() {
+        // Word-final ß: the vowel before ß must be long (post-1996 rule).
+        // "aß" is one syllable; without this rule the vowel falls through
+        // to the short default.
+        let ipa = hand_rules_ipa("aß");
+        assert!(ipa.contains("aː"), "{ipa}");
+        assert!(ipa.contains('s'), "{ipa}");
+
+        // Different vowel: "fuß" -> long /uː/ + /s/.
+        let ipa = hand_rules_ipa("fuß");
+        assert!(ipa.contains("uː"), "{ipa}");
     }
 
     #[test]
