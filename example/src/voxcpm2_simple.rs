@@ -87,12 +87,21 @@ fn main() -> anyhow::Result<()> {
             Device::Cpu
         }
     };
+    // CUDA → CUDA BF16; macOS → Metal F16 (halves the DiT/CFM sampler's
+    // activation memory vs F32, which panicked the M3 Pro GPU under
+    // full-pipeline load); everything else → CPU F32. Matches
+    // `crane-serve`'s `resolve_dtype` so launching the example and the
+    // server use the same numerics.
     let dtype = {
         #[cfg(feature = "cuda")]
         {
             DType::BF16
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(all(target_os = "macos", not(feature = "cuda")))]
+        {
+            DType::F16
+        }
+        #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
         {
             DType::F32
         }

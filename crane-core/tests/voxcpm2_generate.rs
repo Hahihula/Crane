@@ -15,13 +15,27 @@ fn voxcpm2_generate_is_well_formed() {
 
     let dir = std::env::var("CRANE_VOXCPM2_DIR").expect("set CRANE_VOXCPM2_DIR to a VoxCPM2 checkpoint dir");
 
+    // CUDA → CUDA BF16; macOS → Metal F16 (halves the DiT/CFM sampler's
+    // activation memory vs F32, which previously panicked the M3 Pro
+    // GPU under full-pipeline load); everything else → CPU F32.
+    //
+    // AGENTS.md flags F16's narrower exponent range as a known risk for
+    // some families (Gemma activations have overflowed in F16 elsewhere),
+    // but VoxCPM2's transformer math is BF16-validated upstream and the
+    // Metal F16 default here is opt-in per this test — flip back to F32
+    // if HF-diff validation ever finds divergence.
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
         (candle_core::Device::new_cuda(0).unwrap(), candle_core::DType::BF16)
     } else {
         (candle_core::Device::Cpu, candle_core::DType::F32)
     };
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(all(target_os = "macos", not(feature = "cuda")))]
+    let (device, dtype) = (
+        candle_core::Device::new_metal(0).unwrap_or(candle_core::Device::Cpu),
+        candle_core::DType::F16,
+    );
+    #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
     let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
 
     let mut model = VoxCpm2Model::new(&dir, &device, &dtype).expect("load VoxCPM2");

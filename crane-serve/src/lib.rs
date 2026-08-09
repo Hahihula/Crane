@@ -319,13 +319,16 @@ fn run_duplex_loop(
 
 /// Resolve the compute dtype. An explicit `--dtype` always wins; otherwise
 /// BF16 on CUDA and F32 elsewhere — except model families validated in F16 on
-/// Metal (currently qwen3_5), which default to F16 there (halves weight,
-/// activation and fp-KV memory vs F32).
+/// Metal (currently qwen3_5, voxcpm2), which default to F16 there (halves
+/// weight, activation and fp-KV memory vs F32).
 ///
 /// F16 stays opt-in for the other families: it has less range than the BF16
 /// most checkpoints are trained in, and models with large intermediate
 /// activations (e.g. Gemma) can overflow to inf/NaN — flip a family's default
-/// only after verifying its output quality in F16.
+/// only after verifying its output quality in F16. VoxCPM2's DiT/CFM sampler
+/// in particular stressed an M3 Pro GPU into a watchdog kernel-panic reset
+/// when launched at F32; F16 is the verified-safe default until upstream
+/// HF-diff validation confirms otherwise.
 fn resolve_dtype(
     flag: Option<&str>,
     device: &crane_core::models::Device,
@@ -343,7 +346,9 @@ fn resolve_dtype(
     if device.is_cuda() {
         return Ok(DType::BF16);
     }
-    if device.is_metal() && model_type == ModelType::Qwen3_5 {
+    if device.is_metal()
+        && matches!(model_type, ModelType::Qwen3_5 | ModelType::VoxCpm2)
+    {
         return Ok(DType::F16);
     }
     Ok(DType::F32)
@@ -905,11 +910,12 @@ mod dtype_tests {
     }
 
     #[test]
-    fn metal_defaults_f16_only_for_qwen3_5() {
+    fn metal_defaults_f16_for_qwen3_5_and_voxcpm2() {
         let Ok(d) = Device::new_metal(0) else {
             return; // no Metal on this machine/CI
         };
         assert_eq!(resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(), DType::F16);
+        assert_eq!(resolve_dtype(None, &d, ModelType::VoxCpm2).unwrap(), DType::F16);
         assert_eq!(resolve_dtype(None, &d, ModelType::Qwen3).unwrap(), DType::F32);
         assert_eq!(resolve_dtype(None, &d, ModelType::Gemma4).unwrap(), DType::F32);
     }
