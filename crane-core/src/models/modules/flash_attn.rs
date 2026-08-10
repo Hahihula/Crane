@@ -19,6 +19,13 @@ use candle_nn::attention::{flash_attn, AttnMask};
 /// Returns an error if `q`'s dtype is not `F32`, `F16`, or `BF16`, or if the
 /// underlying `flash_attn` kernel fails (e.g. non-CPU storage, shape
 /// mismatch).
+///
+/// # Note
+///
+/// The underlying CPU kernels always accumulate in F32 and return an F32
+/// tensor regardless of the input dtype. Callers must cast the output back
+/// to the model's working dtype before feeding it into layers whose weights
+/// are in that dtype.
 pub fn dispatch_flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, mask: AttnMask) -> Result<Tensor> {
     match q.dtype() {
         DType::F32 => flash_attn::<f32>(q, k, v, scale, mask, None, None),
