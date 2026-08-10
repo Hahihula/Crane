@@ -397,6 +397,15 @@ a generic GPU-batched implementation).
 
 ✨ **Multimodal & Vision support**: For models like PaddleOCR-VL, Gemma4-VL, and **Qwen 3.5-VL**, the endpoints accept OpenAI's structured `messages.[]content.[{type: "image_url", image_url: {url: "..."}}]` payload (remote URL or `data:image/...;base64,...` inline). For Qwen 3.5-VL: launch with `--model-type qwen3_5_vl`; for an end-to-end example that spawns the server and sends a sample image, run `cargo run --release --features cuda --example qwen3_5_vl_chat`. See [crane-serve/README.md](crane-serve/README.md) for full API documentation with request/response examples.
 
+**Text-only switch for Qwen 3.5-VL / Ornith:** vision-capable checkpoints load
+with vision by default (matching what the checkpoint declares in
+`config.json`). For users who don't need it, the vision tower still costs
+extra VRAM (~600M params, kept unquantized) — pass `--text-only` to opt out
+and load the same checkpoint directory as a plain text model instead.
+`Qwen3_5TextModel` only ever reads `language_model.*` tensors, so the vision
+weights are never even loaded into memory; this path also unlocks `--quant`,
+which is not available on the VLM load path.
+
 Now you can run LLM extremly fast (about 6x faster than vanilla transformers on M1)!
 
 ## 📁 Project Structure
