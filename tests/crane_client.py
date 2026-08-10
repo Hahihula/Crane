@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared HTTP client for crane-serve's TTS and ASR endpoints."""
+"""Shared HTTP client for crane-serve's TTS, ASR, and chat completion endpoints."""
 
 import argparse
 import json
@@ -36,15 +36,75 @@ def speech(
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read()
+    except urllib.error.HTTPError as e:
+        message = e.read().decode("utf-8", errors="replace")
+        try:
+            message = json.loads(message)["error"]["message"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+        raise RuntimeError(f"speech request failed ({e.code}): {message}") from e
     except urllib.error.URLError as e:
-        if isinstance(e, urllib.error.HTTPError):
-            message = e.read().decode("utf-8", errors="replace")
-            try:
-                message = json.loads(message)["error"]["message"]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
-            raise RuntimeError(f"speech request failed ({e.code}): {message}") from e
         raise RuntimeError(f"speech request failed: {e.reason}") from e
+
+
+def chat(
+    message: str,
+    system: str | None = None,
+    model: str = "default",
+    server_url: str = "http://localhost:8000",
+    max_tokens: int = 512,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    repetition_penalty: float | None = None,
+    **opts,
+) -> str:
+    """POST to /v1/chat/completions and return the assistant's reply text."""
+    messages = []
+    if system is not None:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": message})
+    payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": False}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if top_k is not None:
+        payload["top_k"] = top_k
+    if repetition_penalty is not None:
+        payload["repetition_penalty"] = repetition_penalty
+    payload.update(opts)  # allows callers to pass extra API fields
+
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{server_url}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        # Long prompts and long generations can take minutes on CPU/small GPUs.
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            response_body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        err_message = e.read().decode("utf-8", errors="replace")
+        try:
+            err_message = json.loads(err_message)["error"]["message"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+        raise RuntimeError(f"chat request failed ({e.code}): {err_message}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"chat request failed: {e.reason}") from e
+
+    try:
+        response = json.loads(response_body)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"chat response was not valid JSON: {response_body}") from e
+
+    try:
+        return response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"chat response missing content: {response}") from e
 
 
 def transcribe(
@@ -72,14 +132,14 @@ def transcribe(
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             response_body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        message = e.read().decode("utf-8", errors="replace")
+        try:
+            message = json.loads(message)["error"]["message"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+        raise RuntimeError(f"transcribe request failed ({e.code}): {message}") from e
     except urllib.error.URLError as e:
-        if isinstance(e, urllib.error.HTTPError):
-            message = e.read().decode("utf-8", errors="replace")
-            try:
-                message = json.loads(message)["error"]["message"]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
-            raise RuntimeError(f"transcribe request failed ({e.code}): {message}") from e
         raise RuntimeError(f"transcribe request failed: {e.reason}") from e
 
     try:
@@ -113,16 +173,16 @@ def _encode_multipart(boundary: str, fields: dict[str, str], file_path: str) -> 
         parts.append(
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-            f"{value}\r\n".encode("utf-8")
+            f"{value}\r\n".encode()
         )
     parts.append(
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+        f"Content-Type: {content_type}\r\n\r\n".encode()
         + file_bytes
         + b"\r\n"
     )
-    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    parts.append(f"--{boundary}--\r\n".encode())
 
     return f"multipart/form-data; boundary={boundary}", b"".join(parts)
 
@@ -154,6 +214,37 @@ _TRANSCRIBE_EXAMPLES = """examples:
   crane_client.py transcribe speech.wav --language en
   crane_client.py transcribe speech.wav -u http://localhost:9000"""
 
+_CHAT_EXAMPLES = """examples:
+  crane_client.py chat "what model is suggested for Qwen3 on a 16GB VRAM GPU?"
+  crane_client.py chat "summarize this" --file long_prompt.txt
+  crane_client.py chat "hi" --system "You are terse." --max-tokens 64
+  crane_client.py chat "hi" -u http://localhost:9000"""
+
+
+def _cmd_chat(args):
+    message = args.message
+    if args.file:
+        try:
+            with open(args.file, encoding="utf-8") as f:
+                # Filler text before the actual question, to construct long
+                # prompts that force chunked prefill.
+                message = f"{f.read()}\n\n{message}"
+        except OSError as e:
+            raise RuntimeError(f"could not read {args.file}: {e}") from e
+    print(f"POST {args.url}/v1/chat/completions", file=sys.stderr)
+    text = chat(
+        message,
+        system=args.system,
+        model=args.model,
+        server_url=args.url,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        repetition_penalty=args.repetition_penalty,
+    )
+    print(text)
+
 
 def _cmd_transcribe(args):
     print(f"POST {args.url}/v1/audio/transcriptions", file=sys.stderr)
@@ -173,7 +264,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="Crane HTTP client",
-        epilog=f"{_SPEECH_EXAMPLES}\n\n{_TRANSCRIBE_EXAMPLES}",
+        epilog=f"{_SPEECH_EXAMPLES}\n\n{_TRANSCRIBE_EXAMPLES}\n\n{_CHAT_EXAMPLES}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -203,6 +294,26 @@ def main():
     transcribe_parser.add_argument("wav_path", help="path to the WAV file to transcribe")
     transcribe_parser.add_argument("--language", default=None, help="language hint")
     transcribe_parser.set_defaults(func=_cmd_transcribe)
+
+    chat_parser = subparsers.add_parser(
+        "chat",
+        help="send a chat completion request",
+        epilog=_CHAT_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[url_parser],
+    )
+    chat_parser.add_argument("message", help="user message (the question to ask)")
+    chat_parser.add_argument(
+        "--file", default=None, help="prepend this file's contents to the message as context"
+    )
+    chat_parser.add_argument("--system", default=None, help="system prompt")
+    chat_parser.add_argument("--model", default="default", help="model name")
+    chat_parser.add_argument("--max-tokens", type=int, default=512)
+    chat_parser.add_argument("--temperature", type=float, default=None)
+    chat_parser.add_argument("--top-p", type=float, default=None)
+    chat_parser.add_argument("--top-k", type=int, default=None)
+    chat_parser.add_argument("--repetition-penalty", type=float, default=None)
+    chat_parser.set_defaults(func=_cmd_chat)
 
     args = parser.parse_args()
     try:
