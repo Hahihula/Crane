@@ -2,6 +2,7 @@ use candle_core::quantized::{gguf_file, QTensor};
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::rotary_emb::rope;
 use candle_nn::{linear_no_bias, Linear, RmsNorm, VarBuilder};
+use crate::utils::DeviceExt;
 use crate::models::modules::rotary::RotaryEmbedding;
 use serde::Deserialize;
 use std::io::{Read, Seek};
