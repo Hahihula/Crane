@@ -506,6 +506,22 @@ fn build_layer_caches(
     Ok((gdn_caches, attn_caches))
 }
 
+/// Append Qwen3.5's canonical stop-token ids (`<|im_end|>`, `<|endoftext|>`)
+/// to `eos_token_ids` by resolving them by name in `vocab`, skipping any
+/// already present. Used as a GGUF fallback: GGUF's `tokenizer.ggml.eos_token_id`
+/// metadata field can only hold one id, so a GGUF-only export (no sidecar
+/// `generation_config.json`) silently drops whichever canonical stop token the
+/// exporter didn't pick.
+fn merge_canonical_eos_ids(eos_token_ids: &mut Vec<u32>, vocab: &std::collections::HashMap<String, u32>) {
+    for name in ["<|im_end|>", "<|endoftext|>"] {
+        if let Some(&id) = vocab.get(name)
+            && !eos_token_ids.contains(&id)
+        {
+            eos_token_ids.push(id);
+        }
+    }
+}
+
 /// Read EOS token id(s) from `generation_config.json` (preferred) then
 /// `config.json`. The field may be a single integer or a list; returns an empty
 /// vec if absent.
@@ -669,7 +685,8 @@ impl Model {
         };
 
         // EOS: sibling generation_config.json wins (may hold the full multi-id
-        // set); fall back to the single id in GGUF metadata.
+        // set); fall back to the single id in GGUF metadata, then fill in any
+        // other canonical stop token by name (see `merge_canonical_eos_ids`).
         let mut eos_token_ids = read_eos_token_ids(&parent.to_string_lossy());
         if eos_token_ids.is_empty()
             && let Some(id) = ct
@@ -679,6 +696,7 @@ impl Model {
         {
             eos_token_ids.push(id);
         }
+        merge_canonical_eos_ids(&mut eos_token_ids, &tokenizer.get_vocab(true));
 
         let inner = Qwen3_5TextModel::from_gguf(ct, &mut file, device)?;
         let dtype = inner.dtype();
@@ -883,5 +901,48 @@ impl ModelForCausalLM for Model {
             );
         }
         Ok(tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_canonical_eos_ids;
+    use std::collections::HashMap;
+
+    #[test]
+    // A GGUF export that only recorded <|im_end|> (248046) must get
+    // <|endoftext|> (248044) added from the vocab, matching Qwen3.5's
+    // documented multi-id EOS set.
+    fn merge_adds_missing_canonical_id() {
+        let mut eos_token_ids = vec![248_046];
+        let vocab: HashMap<String, u32> =
+            [("<|im_end|>".to_string(), 248_046), ("<|endoftext|>".to_string(), 248_044)]
+                .into_iter()
+                .collect();
+        merge_canonical_eos_ids(&mut eos_token_ids, &vocab);
+        assert_eq!(eos_token_ids, vec![248_046, 248_044]);
+    }
+
+    #[test]
+    // An id already present (from generation_config.json or GGUF metadata)
+    // must not be duplicated.
+    fn merge_does_not_duplicate_existing_id() {
+        let mut eos_token_ids = vec![248_046, 248_044];
+        let vocab: HashMap<String, u32> =
+            [("<|im_end|>".to_string(), 248_046), ("<|endoftext|>".to_string(), 248_044)]
+                .into_iter()
+                .collect();
+        merge_canonical_eos_ids(&mut eos_token_ids, &vocab);
+        assert_eq!(eos_token_ids, vec![248_046, 248_044]);
+    }
+
+    #[test]
+    // A vocab lacking either canonical name (e.g. a different tokenizer)
+    // must leave the existing ids untouched rather than erroring.
+    fn merge_is_noop_when_vocab_lacks_canonical_names() {
+        let mut eos_token_ids = vec![7];
+        let vocab: HashMap<String, u32> = [("<|other|>".to_string(), 1)].into_iter().collect();
+        merge_canonical_eos_ids(&mut eos_token_ids, &vocab);
+        assert_eq!(eos_token_ids, vec![7]);
     }
 }
