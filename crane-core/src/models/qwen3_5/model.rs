@@ -154,7 +154,7 @@ impl Qwen3_5TextModel {
         // ~1 GB at Qwen3.5's 248k vocab), F32 on CPU.
         let dtype = if device.is_cuda() {
             DType::BF16
-        } else if device.is_metal() {
+        } else if device.is_metal() || device.is_rocm() {
             DType::F16
         } else {
             DType::F32
@@ -423,7 +423,6 @@ impl Qwen3_5TextModel {
                 mask_ref,
                 gdn_slot,
                 attn_slot,
-                is_decode_step,
             )?;
         }
 
@@ -475,7 +474,6 @@ impl Qwen3_5TextModel {
                 mask_ref,
                 gdn_slot,
                 attn_slot,
-                is_decode_step,
             )?;
         }
 

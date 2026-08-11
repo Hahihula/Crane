@@ -676,7 +676,6 @@ impl DecoderLayer {
         attention_mask: Option<&Tensor>,
         gdn_cache: Option<&mut GdnLayerCache>,
         attn_cache: Option<&mut KvCache>,
-        is_decode_step: bool,
     ) -> Result<Tensor> {
         let residual = x;
         let normed = self.input_layernorm.forward(x)?;
@@ -694,7 +693,7 @@ impl DecoderLayer {
                 let dims = self.gdn_dims.as_ref().ok_or_else(|| {
                     candle_core::Error::Msg("GDN dims missing for linear-attention layer".into())
                 })?;
-                gdn.forward(&normed, dims, cache, is_decode_step)?
+                gdn.forward(&normed, dims, cache)?
             }
         };
 
