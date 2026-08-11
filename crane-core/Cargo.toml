@@ -82,13 +82,9 @@ cuda = [
     "dep:bindgen_cuda",
 ]
 cudnn = ["candle-core/cudnn"]
-# AMD ROCm/HIP backend (experimental). Deliberately does NOT enable `cuda` or pull
-# `bindgen_cuda`; Crane's portable (non-cuda) op fallbacks then apply automatically.
-rocm = [
-    "candle-core/rocm",
-    "candle-nn/rocm",
-    "candle-transformers/rocm",
-]
+# AMD ROCm/HIP backend (experimental). candle 0.11 on crates.io has no `rocm`
+# feature, so this can't forward to `candle-core/rocm` yet.
+rocm = []
 mkl = [
     "dep:intel-mkl-src",
     "candle-core/mkl",
