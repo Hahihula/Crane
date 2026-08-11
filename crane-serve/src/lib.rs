@@ -9,11 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     http::StatusCode,
     response::Json,
     routing::{get, post},
-    Router,
 };
 use clap::Parser;
 use tracing::info;
@@ -70,6 +70,7 @@ pub struct Args {
     /// there regardless).
     #[arg(long)]
     pub llm_gguf: Option<String>,
+    pub text_only: bool,
 }
 
 pub struct AppState {
@@ -158,27 +159,37 @@ fn encode_tts_audio(
     audio_info: &crane::audio::AudioInfo,
     format: &openai_api::AudioResponseFormat,
 ) -> Result<handlers::tts::TtsResult, String> {
-    tracing::debug!("TTS encode: converting output tensor {:?} to f32", audio.dims());
+    tracing::debug!(
+        "TTS encode: converting output tensor {:?} to f32",
+        audio.dims()
+    );
     let audio_f32 = audio
         .to_dtype(candle_core::DType::F32)
         .map_err(|e| e.to_string())?
         .flatten_all()
         .map_err(|e| e.to_string())?;
-    tracing::debug!("TTS encode: copying {} samples out of the tensor", audio_f32.elem_count());
+    tracing::debug!(
+        "TTS encode: copying {} samples out of the tensor",
+        audio_f32.elem_count()
+    );
     let samples = audio_f32.to_vec1::<f32>().map_err(|e| e.to_string())?;
     tracing::info!("TTS writing {} samples", samples.len());
     match format {
         openai_api::AudioResponseFormat::Wav => {
             tracing::debug!("TTS encode: building WAV container");
-            let wav_bytes = crane::audio::encode_wav(&samples, audio_info).map_err(|e| e.to_string())?;
-            tracing::debug!("TTS encode: WAV container built ({} bytes)", wav_bytes.len());
+            let wav_bytes =
+                crane::audio::encode_wav(&samples, audio_info).map_err(|e| e.to_string())?;
+            tracing::debug!(
+                "TTS encode: WAV container built ({} bytes)",
+                wav_bytes.len()
+            );
             Ok(handlers::tts::TtsResult {
                 audio_bytes: wav_bytes,
                 content_type: "audio/wav",
                 file_name: "speech.wav".to_string(),
                 sample_rate: audio_info.sample_rate,
             })
-        }
+        },
         openai_api::AudioResponseFormat::Pcm => {
             tracing::debug!("TTS encode: converting samples to PCM16");
             let pcm = crane::audio::pcm_f32_to_i16(&samples);
@@ -189,7 +200,7 @@ fn encode_tts_audio(
                 file_name: "speech.pcm".to_string(),
                 sample_rate: audio_info.sample_rate,
             })
-        }
+        },
         other => Err(format!(
             "Unsupported response_format '{other:?}'. Supported: wav, pcm"
         )),
@@ -283,10 +294,13 @@ fn run_tts_loop(
     }
 }
 
-fn transcribe_audio(asr: &mut dyn crane::audio::Asr, req: &AsrTranscribeRequest) -> Result<String, String> {
+fn transcribe_audio(
+    asr: &mut dyn crane::audio::Asr,
+    req: &AsrTranscribeRequest,
+) -> Result<String, String> {
     let sample_rate = asr.input_sample_rate();
-    let samples = crane::audio::decode_wav(&req.audio_bytes, sample_rate).map_err(|e|
-        e.to_string())?;
+    let samples =
+        crane::audio::decode_wav(&req.audio_bytes, sample_rate).map_err(|e| e.to_string())?;
 
     let defaults = crane_core::generation::TranscribeOptions::default();
     let opts = crane_core::generation::TranscribeOptions {
@@ -294,7 +308,9 @@ fn transcribe_audio(asr: &mut dyn crane::audio::Asr, req: &AsrTranscribeRequest)
         language: req.language.clone(),
         ..defaults
     };
-    asr.transcribe(&samples, &opts).map(|t| t.text).map_err(|e| e.to_string())
+    asr.transcribe(&samples, &opts)
+        .map(|t| t.text)
+        .map_err(|e| e.to_string())
 }
 
 fn run_asr_loop(
@@ -336,28 +352,40 @@ fn run_duplex_loop(
     while let Some(req) = duplex_rx.blocking_recv() {
         match req {
             DuplexRequest::Prepare { system_prompt, tx } => {
-                let result = session.prepare(system_prompt.as_deref()).map_err(|e| e.to_string());
+                let result = session
+                    .prepare(system_prompt.as_deref())
+                    .map_err(|e| e.to_string());
                 if let Err(ref e) = result {
                     tracing::error!("Duplex prepare failed: {e}");
                 }
                 let _ = tx.send(result);
-            }
+            },
             DuplexRequest::Chunk { samples, tx } => {
                 let result = (|| -> Result<DuplexChunkEvent, String> {
-                    session.streaming_prefill(&samples).map_err(|e| e.to_string())?;
+                    session
+                        .streaming_prefill(&samples)
+                        .map_err(|e| e.to_string())?;
                     chunk_seed = chunk_seed.wrapping_add(1);
-                    let out = session.streaming_generate(chunk_seed).map_err(|e| e.to_string())?;
+                    let out = session
+                        .streaming_generate(chunk_seed)
+                        .map_err(|e| e.to_string())?;
                     let (audio_base64, audio_sample_rate) = match out.audio_waveform {
                         Some(waveform) => (Some(encode_pcm16_base64(&waveform)), Some(24_000)),
                         None => (None, None),
                     };
-                    Ok(DuplexChunkEvent { is_listen: out.is_listen, text: out.text, end_of_turn: out.end_of_turn, audio_base64, audio_sample_rate })
+                    Ok(DuplexChunkEvent {
+                        is_listen: out.is_listen,
+                        text: out.text,
+                        end_of_turn: out.end_of_turn,
+                        audio_base64,
+                        audio_sample_rate,
+                    })
                 })();
                 if let Err(ref e) = result {
                     tracing::error!("Duplex chunk processing failed: {e}");
                 }
                 let _ = tx.send(result);
-            }
+            },
         }
     }
 }
@@ -391,12 +419,22 @@ fn resolve_dtype(
     if device.is_cuda() {
         return Ok(DType::BF16);
     }
-    if device.is_metal()
-        && matches!(model_type, ModelType::Qwen3_5 | ModelType::VoxCpm2)
-    {
+    if device.is_metal() && matches!(model_type, ModelType::Qwen3_5 | ModelType::VoxCpm2) {
         return Ok(DType::F16);
     }
     Ok(DType::F32)
+}
+
+fn apply_text_only_override(
+    text_only: bool,
+    model_type: ModelType,
+    resolved_type: ModelType,
+) -> (ModelType, ModelType) {
+    if text_only && resolved_type == ModelType::Qwen3_5VL {
+        (ModelType::Qwen3_5, ModelType::Qwen3_5)
+    } else {
+        (model_type, resolved_type)
+    }
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -438,6 +476,14 @@ pub async fn run(args: Args) -> Result<()> {
         model_type
     };
 
+    if args.text_only && resolved_type == ModelType::Qwen3_5VL {
+        info!(
+            "--text-only: loading Qwen 3.5-VL checkpoint as text-only (vision tower weights not read)"
+        );
+    }
+    let (model_type, resolved_type) =
+        apply_text_only_override(args.text_only, model_type, resolved_type);
+
     let dtype = resolve_dtype(args.dtype.as_deref(), &device, resolved_type)?;
 
     let device_name = format!("{:?}", device);
@@ -475,7 +521,10 @@ pub async fn run(args: Args) -> Result<()> {
         Option<tokio::sync::mpsc::UnboundedSender<AsrTranscribeRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<handlers::duplex::DuplexRequest>>,
     ) = if is_tts {
-        info!("Loading TTS model ({:?}) from: {}", resolved_type, args.model_path);
+        info!(
+            "Loading TTS model ({:?}) from: {}",
+            resolved_type, args.model_path
+        );
         let model_path_clone = args.model_path.clone();
         let use_cpu = args.cpu || {
             #[cfg(feature = "cuda")]
@@ -487,7 +536,11 @@ pub async fn run(args: Args) -> Result<()> {
                 true
             }
         };
-        let tts_device = if use_cpu { crane_core::models::Device::Cpu } else { device.clone() };
+        let tts_device = if use_cpu {
+            crane_core::models::Device::Cpu
+        } else {
+            device.clone()
+        };
         let tts_dtype = dtype;
         let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<TtsGenerateRequest>();
         let resolved_name = resolved_type.display_name().to_string();
@@ -504,7 +557,7 @@ pub async fn run(args: Args) -> Result<()> {
                     Err(e) => {
                         tracing::error!("Failed to load TTS model: {e}");
                         return;
-                    }
+                    },
                 };
                 // Install candle's affinity-pinned rayon pool for this thread's lifetime.
                 tts_device.with_context(|| {
@@ -513,16 +566,38 @@ pub async fn run(args: Args) -> Result<()> {
             })
             .expect("Failed to spawn TTS thread");
         info!("TTS model routing established (type: {:?})", resolved_type);
-        let tokenizer = crane_core::utils::tokenizer_utils::load_tokenizer_from_model_dir(&args.model_path)
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load HF tokenizer: {e}; creating stub for TTS-only mode");
-                tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default())
-            });
-        let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
-        let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, Some(tts_tx), None, None)
+        let tokenizer =
+            crane_core::utils::tokenizer_utils::load_tokenizer_from_model_dir(&args.model_path)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to load HF tokenizer: {e}; creating stub for TTS-only mode"
+                    );
+                    tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default())
+                });
+        let eos_id = tokenizer
+            .token_to_id("<|im_end|>")
+            .or_else(|| tokenizer.token_to_id("<|endoftext|>"))
+            .unwrap_or(2);
+        let chat_template =
+            engine::model_factory::create_chat_template(model_type, &args.model_path);
+        (
+            None,
+            tokenizer,
+            vec![eos_id],
+            chat_template,
+            None,
+            None,
+            None,
+            None,
+            Some(tts_tx),
+            None,
+            None,
+        )
     } else if is_asr {
-        info!("Loading ASR model ({:?}) from: {}", resolved_type, args.model_path);
+        info!(
+            "Loading ASR model ({:?}) from: {}",
+            resolved_type, args.model_path
+        );
         let model_path_clone = args.model_path.clone();
         let use_cpu = args.cpu || {
             #[cfg(feature = "cuda")]
@@ -534,7 +609,11 @@ pub async fn run(args: Args) -> Result<()> {
                 true
             }
         };
-        let asr_device = if use_cpu { crane_core::models::Device::Cpu } else { device.clone() };
+        let asr_device = if use_cpu {
+            crane_core::models::Device::Cpu
+        } else {
+            device.clone()
+        };
         let asr_dtype = dtype;
         let (asr_tx, asr_rx) = tokio::sync::mpsc::unbounded_channel::<AsrTranscribeRequest>();
         let resolved_name = resolved_type.display_name().to_string();
@@ -551,7 +630,7 @@ pub async fn run(args: Args) -> Result<()> {
                     Err(e) => {
                         tracing::error!("Failed to load ASR model: {e}");
                         return;
-                    }
+                    },
                 };
                 // Install candle's affinity-pinned rayon pool for this thread's lifetime.
                 asr_device.with_context(|| {
@@ -560,14 +639,33 @@ pub async fn run(args: Args) -> Result<()> {
             })
             .expect("Failed to spawn ASR thread");
         info!("ASR model routing established (type: {:?})", resolved_type);
-        let tokenizer = crane_core::utils::tokenizer_utils::load_tokenizer_from_model_dir(&args.model_path)
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load HF tokenizer: {e}; creating stub for ASR-only mode");
-                tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default())
-            });
-        let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
-        let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, None, Some(asr_tx), None)
+        let tokenizer =
+            crane_core::utils::tokenizer_utils::load_tokenizer_from_model_dir(&args.model_path)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to load HF tokenizer: {e}; creating stub for ASR-only mode"
+                    );
+                    tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default())
+                });
+        let eos_id = tokenizer
+            .token_to_id("<|im_end|>")
+            .or_else(|| tokenizer.token_to_id("<|endoftext|>"))
+            .unwrap_or(2);
+        let chat_template =
+            engine::model_factory::create_chat_template(model_type, &args.model_path);
+        (
+            None,
+            tokenizer,
+            vec![eos_id],
+            chat_template,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(asr_tx),
+            None,
+        )
     } else if is_vlm {
         let use_cpu = args.cpu || {
             #[cfg(feature = "cuda")]
@@ -584,181 +682,313 @@ pub async fn run(args: Args) -> Result<()> {
         #[cfg(not(feature = "cuda"))]
         let use_bf16 = false;
         let tok_path = std::path::Path::new(&args.model_path).join("tokenizer.json");
-        let tokenizer = tokenizers::Tokenizer::from_file(&tok_path).map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
-        let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
+        let tokenizer = tokenizers::Tokenizer::from_file(&tok_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
+        let chat_template =
+            engine::model_factory::create_chat_template(model_type, &args.model_path);
         let mut vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<VlmRequest>> = None;
-        let mut gemma4_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>> = None;
-        let mut qwen3_5_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>> = None;
-        let mut minicpm_v_vlm_tx_opt_inner: Option<tokio::sync::mpsc::UnboundedSender<MinicpmVVlmRequest>> = None;
+        let mut gemma4_vlm_tx_opt_inner: Option<
+            tokio::sync::mpsc::UnboundedSender<Gemma4VlmRequest>,
+        > = None;
+        let mut qwen3_5_vlm_tx_opt_inner: Option<
+            tokio::sync::mpsc::UnboundedSender<Qwen3_5VlmRequest>,
+        > = None;
+        let mut minicpm_v_vlm_tx_opt_inner: Option<
+            tokio::sync::mpsc::UnboundedSender<MinicpmVVlmRequest>,
+        > = None;
         if resolved_type == engine::model_factory::ModelType::MinicpmV46 {
             info!("Loading MiniCPM-V-4.6 model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let device_clone = device.clone();
             let dtype_clone = dtype;
-            let (mcpv_tx, mut mcpv_rx) = tokio::sync::mpsc::unbounded_channel::<MinicpmVVlmRequest>();
-            std::thread::Builder::new().name("minicpm-v-vlm-engine".into()).spawn(move || {
-                use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
-                let mut vlm = match MinicpmV46VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::error!("Failed to load MiniCPM-V-4.6 model: {e}");
-                        return;
+            let (mcpv_tx, mut mcpv_rx) =
+                tokio::sync::mpsc::unbounded_channel::<MinicpmVVlmRequest>();
+            std::thread::Builder::new()
+                .name("minicpm-v-vlm-engine".into())
+                .spawn(move || {
+                    use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
+                    let mut vlm = match MinicpmV46VLModel::new(
+                        &model_path_clone,
+                        &device_clone,
+                        &dtype_clone,
+                    ) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::error!("Failed to load MiniCPM-V-4.6 model: {e}");
+                            return;
+                        },
+                    };
+                    info!("MiniCPM-V-4.6 engine thread started");
+                    while let Some(req) = mcpv_rx.blocking_recv() {
+                        let MinicpmVVlmRequest {
+                            img_path,
+                            text_prompt,
+                            max_tokens,
+                            tx,
+                        } = req;
+                        let res = (|| -> anyhow::Result<String> {
+                            let img = image::open(&img_path)?;
+                            let cfg = VlGenerationConfig {
+                                max_new_tokens: max_tokens,
+                                ..Default::default()
+                            };
+                            let started = std::time::Instant::now();
+                            let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
+                            tracing::info!(
+                                "MiniCPM-V-4.6 request completed in {:?}",
+                                started.elapsed()
+                            );
+                            Ok(out)
+                        })();
+                        if let Err(ref e) = res {
+                            tracing::error!("MiniCPM-V-4.6 request failed: {e}");
+                        }
+                        let _ = tx.send(res.map_err(|e| e.to_string()));
                     }
-                };
-                info!("MiniCPM-V-4.6 engine thread started");
-                while let Some(req) = mcpv_rx.blocking_recv() {
-                    let MinicpmVVlmRequest { img_path, text_prompt, max_tokens, tx } = req;
-                    let res = (|| -> anyhow::Result<String> {
-                        let img = image::open(&img_path)?;
-                        let cfg = VlGenerationConfig {
-                            max_new_tokens: max_tokens,
-                            ..Default::default()
-                        };
-                        let started = std::time::Instant::now();
-                        let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
-                        tracing::info!("MiniCPM-V-4.6 request completed in {:?}", started.elapsed());
-                        Ok(out)
-                    })();
-                    if let Err(ref e) = res {
-                        tracing::error!("MiniCPM-V-4.6 request failed: {e}");
-                    }
-                    let _ = tx.send(res.map_err(|e| e.to_string()));
-                }
-            }).expect("Failed to spawn MiniCPM-V-4.6 thread");
+                })
+                .expect("Failed to spawn MiniCPM-V-4.6 thread");
             minicpm_v_vlm_tx_opt_inner = Some(mcpv_tx);
         } else if resolved_type == engine::model_factory::ModelType::Qwen3_5VL {
             info!("Loading Qwen 3.5 VL model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let device_clone = device.clone();
             let dtype_clone = dtype;
-            let (q35vlm_tx, mut q35vlm_rx) = tokio::sync::mpsc::unbounded_channel::<Qwen3_5VlmRequest>();
-            std::thread::Builder::new().name("qwen3_5-vlm-engine".into()).spawn(move || {
-                use crane_core::models::qwen3_5::{Qwen3_5VLModel, VlGenerationConfig};
-                let mut vlm = match Qwen3_5VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::error!("Failed to load Qwen 3.5 VL model: {e}");
-                        return;
-                    }
-                };
-                info!("Qwen 3.5 VL engine thread started");
-                while let Some(req) = q35vlm_rx.blocking_recv() {
-                    let Qwen3_5VlmRequest { img_path, text_prompt, max_tokens, tx } = req;
-                    let res = (|| -> anyhow::Result<String> {
-                        let img = image::open(&img_path)?;
-                        let cfg = VlGenerationConfig {
-                            max_new_tokens: max_tokens,
-                            ..Default::default()
+            let (q35vlm_tx, mut q35vlm_rx) =
+                tokio::sync::mpsc::unbounded_channel::<Qwen3_5VlmRequest>();
+            std::thread::Builder::new()
+                .name("qwen3_5-vlm-engine".into())
+                .spawn(move || {
+                    use crane_core::models::qwen3_5::{Qwen3_5VLModel, VlGenerationConfig};
+                    let mut vlm =
+                        match Qwen3_5VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::error!("Failed to load Qwen 3.5 VL model: {e}");
+                                return;
+                            },
                         };
-                        let started = std::time::Instant::now();
-                        let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
-                        tracing::info!("Qwen 3.5 VL request completed in {:?}", started.elapsed());
-                        Ok(out)
-                    })();
-                    if let Err(ref e) = res {
-                        tracing::error!("Qwen 3.5 VL request failed: {e}");
+                    info!("Qwen 3.5 VL engine thread started");
+                    while let Some(req) = q35vlm_rx.blocking_recv() {
+                        let Qwen3_5VlmRequest {
+                            img_path,
+                            text_prompt,
+                            max_tokens,
+                            tx,
+                        } = req;
+                        let res = (|| -> anyhow::Result<String> {
+                            let img = image::open(&img_path)?;
+                            let cfg = VlGenerationConfig {
+                                max_new_tokens: max_tokens,
+                                ..Default::default()
+                            };
+                            let started = std::time::Instant::now();
+                            let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
+                            tracing::info!(
+                                "Qwen 3.5 VL request completed in {:?}",
+                                started.elapsed()
+                            );
+                            Ok(out)
+                        })();
+                        if let Err(ref e) = res {
+                            tracing::error!("Qwen 3.5 VL request failed: {e}");
+                        }
+                        let _ = tx.send(res.map_err(|e| e.to_string()));
                     }
-                    let _ = tx.send(res.map_err(|e| e.to_string()));
-                }
-            }).expect("Failed to spawn Qwen 3.5 VL thread");
+                })
+                .expect("Failed to spawn Qwen 3.5 VL thread");
             qwen3_5_vlm_tx_opt_inner = Some(q35vlm_tx);
         } else if resolved_type == engine::model_factory::ModelType::Gemma4VL {
             info!("Loading Gemma4 VLM model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let device_clone = device.clone();
             let dtype_clone = dtype;
-            let (g4vlm_tx, mut g4vlm_rx) = tokio::sync::mpsc::unbounded_channel::<Gemma4VlmRequest>();
-            std::thread::Builder::new().name("gemma4-vlm-engine".into()).spawn(move || {
-                use crane_core::models::gemma4::vision::{ImagePreprocessConfig, load_and_preprocess_image};
-                use crane_core::models::gemma4::vlm::Gemma4VLModel;
-                let mut vlm = match Gemma4VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::error!("Failed to load Gemma4 VLM model: {e}");
-                        return;
-                    }
-                };
-                info!("Gemma4 VLM engine thread started");
-                let preprocess_config = ImagePreprocessConfig::default();
-                // Install candle's affinity-pinned rayon pool for this thread's lifetime.
-                device_clone.with_context(|| {
-                    while let Some(req) = g4vlm_rx.blocking_recv() {
-                        let Gemma4VlmRequest { img_path, text_prompt, max_tokens, tx } = req;
-                        let res = (|| -> anyhow::Result<String> {
-                            let preprocessed = load_and_preprocess_image(&img_path, &preprocess_config, &device_clone)?;
-                            let image_embeds = vlm.encode_image(&preprocessed.pixel_values, &preprocessed.pixel_position_ids, &preprocessed.padding_positions)?;
-                            let image_token_id = 258880u32;
-                            let mut prompt_ids: Vec<u32> = vec![2, 105, 2364, 107, 255999];
-                            for _ in 0..preprocessed.num_image_tokens { prompt_ids.push(image_token_id); }
-                            prompt_ids.push(258882);
-                            if !text_prompt.is_empty() {
-                                let text_ids = vlm.tokenizer.tokenizer.encode(text_prompt.as_str(), false).map_err(|e| anyhow::anyhow!("{e}"))?.get_ids().to_vec();
-                                prompt_ids.extend(text_ids);
-                            }
-                            prompt_ids.extend_from_slice(&[106, 107, 105, 4368, 107]);
-                            vlm.clear_kv_cache();
-                            let input_tensor = candle_core::Tensor::new(prompt_ids.as_slice(), &device_clone)?.unsqueeze(0)?;
-                            let logits = vlm.forward(&input_tensor, Some(&image_embeds), 0)?.squeeze(0)?.squeeze(0)?.to_dtype(candle_core::DType::F32)?;
-                            let mut tokens = prompt_ids.clone();
-                            let mut generated = Vec::new();
-                            let mut next_token = candle_nn::ops::softmax_last_dim(&logits)?.argmax(candle_core::D::Minus1)?.to_scalar::<u32>()?;
-                            generated.push(next_token);
-                            tokens.push(next_token);
-                            for _ in 1..max_tokens {
-                                if next_token == 1 || next_token == 106 { break; }
-                                let input = candle_core::Tensor::new(&[next_token], &device_clone)?.unsqueeze(0)?;
-                                let logits = vlm.forward(&input, None, tokens.len() - 1)?.squeeze(0)?.squeeze(0)?.to_dtype(candle_core::DType::F32)?;
-                                next_token = candle_nn::ops::softmax_last_dim(&logits)?.argmax(candle_core::D::Minus1)?.to_scalar::<u32>()?;
+            let (g4vlm_tx, mut g4vlm_rx) =
+                tokio::sync::mpsc::unbounded_channel::<Gemma4VlmRequest>();
+            std::thread::Builder::new()
+                .name("gemma4-vlm-engine".into())
+                .spawn(move || {
+                    use crane_core::models::gemma4::vision::{
+                        ImagePreprocessConfig, load_and_preprocess_image,
+                    };
+                    use crane_core::models::gemma4::vlm::Gemma4VLModel;
+                    let mut vlm =
+                        match Gemma4VLModel::new(&model_path_clone, &device_clone, &dtype_clone) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::error!("Failed to load Gemma4 VLM model: {e}");
+                                return;
+                            },
+                        };
+                    info!("Gemma4 VLM engine thread started");
+                    let preprocess_config = ImagePreprocessConfig::default();
+                    // Install candle's affinity-pinned rayon pool for this thread's lifetime.
+                    device_clone.with_context(|| {
+                        while let Some(req) = g4vlm_rx.blocking_recv() {
+                            let Gemma4VlmRequest {
+                                img_path,
+                                text_prompt,
+                                max_tokens,
+                                tx,
+                            } = req;
+                            let res = (|| -> anyhow::Result<String> {
+                                let preprocessed = load_and_preprocess_image(
+                                    &img_path,
+                                    &preprocess_config,
+                                    &device_clone,
+                                )?;
+                                let image_embeds = vlm.encode_image(
+                                    &preprocessed.pixel_values,
+                                    &preprocessed.pixel_position_ids,
+                                    &preprocessed.padding_positions,
+                                )?;
+                                let image_token_id = 258880u32;
+                                let mut prompt_ids: Vec<u32> = vec![2, 105, 2364, 107, 255999];
+                                for _ in 0..preprocessed.num_image_tokens {
+                                    prompt_ids.push(image_token_id);
+                                }
+                                prompt_ids.push(258882);
+                                if !text_prompt.is_empty() {
+                                    let text_ids = vlm
+                                        .tokenizer
+                                        .tokenizer
+                                        .encode(text_prompt.as_str(), false)
+                                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                                        .get_ids()
+                                        .to_vec();
+                                    prompt_ids.extend(text_ids);
+                                }
+                                prompt_ids.extend_from_slice(&[106, 107, 105, 4368, 107]);
+                                vlm.clear_kv_cache();
+                                let input_tensor =
+                                    candle_core::Tensor::new(prompt_ids.as_slice(), &device_clone)?
+                                        .unsqueeze(0)?;
+                                let logits = vlm
+                                    .forward(&input_tensor, Some(&image_embeds), 0)?
+                                    .squeeze(0)?
+                                    .squeeze(0)?
+                                    .to_dtype(candle_core::DType::F32)?;
+                                let mut tokens = prompt_ids.clone();
+                                let mut generated = Vec::new();
+                                let mut next_token = candle_nn::ops::softmax_last_dim(&logits)?
+                                    .argmax(candle_core::D::Minus1)?
+                                    .to_scalar::<u32>()?;
                                 generated.push(next_token);
                                 tokens.push(next_token);
-                            }
-                            Ok(vlm.tokenizer.tokenizer.decode(&generated, true).unwrap_or_default())
-                        })();
-                        let _ = tx.send(res.map_err(|e| e.to_string()));
-                    }
-                });
-            }).expect("Failed to spawn Gemma4 VLM thread");
+                                for _ in 1..max_tokens {
+                                    if next_token == 1 || next_token == 106 {
+                                        break;
+                                    }
+                                    let input =
+                                        candle_core::Tensor::new(&[next_token], &device_clone)?
+                                            .unsqueeze(0)?;
+                                    let logits = vlm
+                                        .forward(&input, None, tokens.len() - 1)?
+                                        .squeeze(0)?
+                                        .squeeze(0)?
+                                        .to_dtype(candle_core::DType::F32)?;
+                                    next_token = candle_nn::ops::softmax_last_dim(&logits)?
+                                        .argmax(candle_core::D::Minus1)?
+                                        .to_scalar::<u32>()?;
+                                    generated.push(next_token);
+                                    tokens.push(next_token);
+                                }
+                                Ok(vlm
+                                    .tokenizer
+                                    .tokenizer
+                                    .decode(&generated, true)
+                                    .unwrap_or_default())
+                            })();
+                            let _ = tx.send(res.map_err(|e| e.to_string()));
+                        }
+                    });
+                })
+                .expect("Failed to spawn Gemma4 VLM thread");
             gemma4_vlm_tx_opt_inner = Some(g4vlm_tx);
         } else {
             info!("Loading VLM model (PaddleOCR-VL) from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let (vlm_tx, mut vlm_rx) = tokio::sync::mpsc::unbounded_channel::<VlmRequest>();
-            std::thread::Builder::new().name("vlm-engine".into()).spawn(move || {
-                let mut vlm = match engine::model_factory::create_vlm_model(&model_path_clone, use_cpu, use_bf16) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::error!("Failed to load VLM model: {e}");
-                        return;
-                    }
-                };
-                info!("VLM engine thread started");
-                // Clone device: with_context borrows &self, which would overlap the &mut vlm borrows below.
-                let vlm_device = vlm.device.clone();
-                // Install candle's affinity-pinned rayon pool for this thread's lifetime.
-                vlm_device.with_context(|| {
-                    while let Some(req) = vlm_rx.blocking_recv() {
-                        match req {
-                            VlmRequest::Recognize { img_path, task, max_tokens, tx } => {
-                                let res = vlm.recognize(&img_path, task, max_tokens).map(|r| r.text);
-                                if let Err(ref e) = res { tracing::error!("VLM Recognize failed: {:?}", e); }
-                                let _ = tx.send(res.map_err(|e| e.to_string()));
-                            }
-                            VlmRequest::RecognizeStream { img_path, task, max_tokens, token_tx, done_tx } => {
-                                let res = vlm.recognize_stream(&img_path, task, max_tokens, |token_text: &str| {
-                                    let _ = token_tx.send(token_text.to_string());
-                                });
-                                if let Err(ref e) = res { tracing::error!("VLM RecognizeStream failed: {:?}", e); }
-                                let _ = done_tx.send(res.map(|_| ()).map_err(|e| e.to_string()));
+            std::thread::Builder::new()
+                .name("vlm-engine".into())
+                .spawn(move || {
+                    let mut vlm = match engine::model_factory::create_vlm_model(
+                        &model_path_clone,
+                        use_cpu,
+                        use_bf16,
+                    ) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::error!("Failed to load VLM model: {e}");
+                            return;
+                        },
+                    };
+                    info!("VLM engine thread started");
+                    // Clone device: with_context borrows &self, which would overlap the &mut vlm borrows below.
+                    let vlm_device = vlm.device.clone();
+                    // Install candle's affinity-pinned rayon pool for this thread's lifetime.
+                    vlm_device.with_context(|| {
+                        while let Some(req) = vlm_rx.blocking_recv() {
+                            match req {
+                                VlmRequest::Recognize {
+                                    img_path,
+                                    task,
+                                    max_tokens,
+                                    tx,
+                                } => {
+                                    let res =
+                                        vlm.recognize(&img_path, task, max_tokens).map(|r| r.text);
+                                    if let Err(ref e) = res {
+                                        tracing::error!("VLM Recognize failed: {:?}", e);
+                                    }
+                                    let _ = tx.send(res.map_err(|e| e.to_string()));
+                                },
+                                VlmRequest::RecognizeStream {
+                                    img_path,
+                                    task,
+                                    max_tokens,
+                                    token_tx,
+                                    done_tx,
+                                } => {
+                                    let res = vlm.recognize_stream(
+                                        &img_path,
+                                        task,
+                                        max_tokens,
+                                        |token_text: &str| {
+                                            let _ = token_tx.send(token_text.to_string());
+                                        },
+                                    );
+                                    if let Err(ref e) = res {
+                                        tracing::error!("VLM RecognizeStream failed: {:?}", e);
+                                    }
+                                    let _ =
+                                        done_tx.send(res.map(|_| ()).map_err(|e| e.to_string()));
+                                },
                             }
                         }
-                    }
-                });
-            }).expect("Failed to spawn VLM thread");
+                    });
+                })
+                .expect("Failed to spawn VLM thread");
             vlm_tx_opt_inner = Some(vlm_tx);
         }
         info!("VLM model routing established (type: {:?})", resolved_type);
-        let eos_id = tokenizer.token_to_id("</s>").or_else(|| tokenizer.token_to_id("<end_of_turn>")) .or_else(|| tokenizer.token_to_id("<|end_of_sentence|>")) .unwrap_or(1);
-        (None, tokenizer, vec![eos_id], chat_template, vlm_tx_opt_inner, gemma4_vlm_tx_opt_inner, qwen3_5_vlm_tx_opt_inner, minicpm_v_vlm_tx_opt_inner, None, None, None)
+        let eos_id = tokenizer
+            .token_to_id("</s>")
+            .or_else(|| tokenizer.token_to_id("<end_of_turn>"))
+            .or_else(|| tokenizer.token_to_id("<|end_of_sentence|>"))
+            .unwrap_or(1);
+        (
+            None,
+            tokenizer,
+            vec![eos_id],
+            chat_template,
+            vlm_tx_opt_inner,
+            gemma4_vlm_tx_opt_inner,
+            qwen3_5_vlm_tx_opt_inner,
+            minicpm_v_vlm_tx_opt_inner,
+            None,
+            None,
+            None,
+        )
     } else if is_duplex {
         info!("Loading MiniCPM-o duplex model from: {}", args.model_path);
         let model_path_clone = args.model_path.clone();
@@ -772,13 +1002,18 @@ pub async fn run(args: Args) -> Result<()> {
                 true
             }
         };
-        let duplex_device = if use_cpu { crane_core::models::Device::Cpu } else { device.clone() };
+        let duplex_device = if use_cpu {
+            crane_core::models::Device::Cpu
+        } else {
+            device.clone()
+        };
         let duplex_dtype = dtype;
         let llm_gguf_clone = args.llm_gguf.clone();
         if let Some(ref gguf) = llm_gguf_clone {
             info!("MiniCPM-o duplex: loading LLM tower from GGUF: {gguf}");
         }
-        let (duplex_tx, duplex_rx) = tokio::sync::mpsc::unbounded_channel::<handlers::duplex::DuplexRequest>();
+        let (duplex_tx, duplex_rx) =
+            tokio::sync::mpsc::unbounded_channel::<handlers::duplex::DuplexRequest>();
         std::thread::Builder::new()
             .name("duplex-engine".into())
             .spawn(move || {
@@ -803,7 +1038,7 @@ pub async fn run(args: Args) -> Result<()> {
                     Err(e) => {
                         tracing::error!("Failed to load MiniCPM-o duplex session: {e}");
                         return;
-                    }
+                    },
                 };
                 duplex_device.with_context(|| {
                     run_duplex_loop(duplex_rx, &mut session);
@@ -811,33 +1046,100 @@ pub async fn run(args: Args) -> Result<()> {
             })
             .expect("Failed to spawn duplex thread");
         info!("MiniCPM-o duplex model routing established");
-        let tokenizer = crane_core::utils::tokenizer_utils::load_tokenizer_from_model_dir(&args.model_path)
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load HF tokenizer: {e}; creating stub for duplex-only mode");
-                tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default())
-            });
-        let eos_id = tokenizer.token_to_id("<|im_end|>").or_else(|| tokenizer.token_to_id("<|endoftext|>")).unwrap_or(2);
-        let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        (None, tokenizer, vec![eos_id], chat_template, None, None, None, None, None, None, Some(duplex_tx))
+        let tokenizer =
+            crane_core::utils::tokenizer_utils::load_tokenizer_from_model_dir(&args.model_path)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to load HF tokenizer: {e}; creating stub for duplex-only mode"
+                    );
+                    tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default())
+                });
+        let eos_id = tokenizer
+            .token_to_id("<|im_end|>")
+            .or_else(|| tokenizer.token_to_id("<|endoftext|>"))
+            .unwrap_or(2);
+        let chat_template =
+            engine::model_factory::create_chat_template(model_type, &args.model_path);
+        (
+            None,
+            tokenizer,
+            vec![eos_id],
+            chat_template,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(duplex_tx),
+        )
     } else {
         // Only one of the TTS/ASR/VLM/LLM branches runs per process, so each is
         // the sole long-lived consumer of candle's process-wide rayon pool.
-        let mut backend = engine::model_factory::create_backend(model_type, &args.model_path, &device, &dtype, format, args.quant.as_deref())?;
-        info!("Model loaded successfully (type: {:?}, format: {:?})", resolved_type, format);
+        let mut backend = engine::model_factory::create_backend(
+            model_type,
+            &args.model_path,
+            &device,
+            &dtype,
+            format,
+            args.quant.as_deref(),
+        )?;
+        info!(
+            "Model loaded successfully (type: {:?}, format: {:?})",
+            resolved_type, format
+        );
         // Install candle's affinity-pinned rayon pool so warmup's forward passes run on warm threads.
         device.with_context(|| backend.warmup());
         info!("Model warmed up");
         let tokenizer = backend.tokenizer().clone();
         let eos_token_id = backend.eos_token_id();
-        let chat_template = engine::model_factory::create_chat_template(model_type, &args.model_path);
-        let mut memory_config = MemoryConfig::parse(args.max_seq_len, args.gpu_memory_limit.as_deref(), &device);
+        let chat_template =
+            engine::model_factory::create_chat_template(model_type, &args.model_path);
+        let mut memory_config =
+            MemoryConfig::parse(args.max_seq_len, args.gpu_memory_limit.as_deref(), &device);
         memory_config.record_baseline(&device);
         let baseline_gpu = memory_config.baseline_gpu_bytes;
-        info!("Memory config: max_seq_len={}, gpu_limit={}, baseline_gpu={}", if memory_config.max_seq_len == 0 { "unlimited".to_string() } else { memory_config.max_seq_len.to_string() }, if memory_config.gpu_memory_limit_bytes == 0 { "unlimited".to_string() } else { format_bytes(memory_config.gpu_memory_limit_bytes) }, format_bytes(baseline_gpu));
-        let (engine, handle) = InferenceEngine::new(backend, args.max_concurrent, args.decode_tokens_per_seq, memory_config);
-        std::thread::Builder::new().name("inference-engine".into()).spawn(move || engine.run()).expect("Failed to spawn engine thread");
-        info!("Inference engine started (max_concurrent={}, decode_tokens_per_seq={})", args.max_concurrent, args.decode_tokens_per_seq);
-        (Some(handle), tokenizer, eos_token_id, chat_template, None, None, None, None, None, None, None)
+        info!(
+            "Memory config: max_seq_len={}, gpu_limit={}, baseline_gpu={}",
+            if memory_config.max_seq_len == 0 {
+                "unlimited".to_string()
+            } else {
+                memory_config.max_seq_len.to_string()
+            },
+            if memory_config.gpu_memory_limit_bytes == 0 {
+                "unlimited".to_string()
+            } else {
+                format_bytes(memory_config.gpu_memory_limit_bytes)
+            },
+            format_bytes(baseline_gpu)
+        );
+        let (engine, handle) = InferenceEngine::new(
+            backend,
+            args.max_concurrent,
+            args.decode_tokens_per_seq,
+            memory_config,
+        );
+        std::thread::Builder::new()
+            .name("inference-engine".into())
+            .spawn(move || engine.run())
+            .expect("Failed to spawn engine thread");
+        info!(
+            "Inference engine started (max_concurrent={}, decode_tokens_per_seq={})",
+            args.max_concurrent, args.decode_tokens_per_seq
+        );
+        (
+            Some(handle),
+            tokenizer,
+            eos_token_id,
+            chat_template,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     };
 
     let model_name = args.model_name.clone().unwrap_or_else(|| {
@@ -846,7 +1148,10 @@ pub async fn run(args: Args) -> Result<()> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| resolved_type.display_name().to_string())
     });
-    let gpu_memory_limit_display = args.gpu_memory_limit.clone().unwrap_or_else(|| "unlimited".to_string());
+    let gpu_memory_limit_display = args
+        .gpu_memory_limit
+        .clone()
+        .unwrap_or_else(|| "unlimited".to_string());
     let state = Arc::new(AppState {
         engine: engine_handle,
         model_name: model_name.clone(),
@@ -889,9 +1194,17 @@ pub async fn run(args: Args) -> Result<()> {
         info!("mode: duplex");
         info!(duplex_ws = %format!("ws://{local_addr}/v1/audio/duplex"), "duplex endpoint");
     } else {
-        info!(max_concurrent = args.max_concurrent, decode_tokens_per_seq = args.decode_tokens_per_seq, "scheduler configured");
+        info!(
+            max_concurrent = args.max_concurrent,
+            decode_tokens_per_seq = args.decode_tokens_per_seq,
+            "scheduler configured"
+        );
         if args.max_seq_len > 0 || state.gpu_memory_limit != "unlimited" {
-            let seq_str = if args.max_seq_len == 0 { "unlimited".to_string() } else { args.max_seq_len.to_string() };
+            let seq_str = if args.max_seq_len == 0 {
+                "unlimited".to_string()
+            } else {
+                args.max_seq_len.to_string()
+            };
             info!(max_seq_len = %seq_str, gpu_memory_limit = %state.gpu_memory_limit, "memory limits configured");
         }
     }
@@ -907,19 +1220,28 @@ const MAX_TRANSCRIPTION_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let transcriptions_router = Router::new()
-        .route("/v1/audio/transcriptions", post(handlers::asr::transcriptions))
+        .route(
+            "/v1/audio/transcriptions",
+            post(handlers::asr::transcriptions),
+        )
         .layer(DefaultBodyLimit::max(MAX_TRANSCRIPTION_UPLOAD_BYTES));
 
     Router::new()
         .route("/health", get(handlers::common::health))
         .route("/v1/stats", get(handlers::common::stats))
-        .route("/v1/chat/completions", post(handlers::openai::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(handlers::openai::chat_completions),
+        )
         .route("/v1/completions", post(handlers::openai::completions))
         .route("/v1/audio/speech", post(handlers::tts::speech))
         .route("/v1/audio/duplex", get(handlers::duplex::duplex_ws))
         .merge(transcriptions_router)
         .route("/v1/models", get(handlers::openai::list_models))
-        .route("/v1/models/{model_id}", get(handlers::openai::retrieve_model))
+        .route(
+            "/v1/models/{model_id}",
+            get(handlers::openai::retrieve_model),
+        )
         .route("/v1/tokenize", post(handlers::openai::tokenize))
         .route("/v1/detokenize", post(handlers::openai::detokenize))
         .route("/tokenize", post(handlers::openai::tokenize))
@@ -928,7 +1250,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/model_info", get(handlers::sglang::model_info))
         .route("/server_info", get(handlers::sglang::server_info))
         .route("/health_generate", get(handlers::sglang::health_generate))
-        .route("/flush_cache", get(handlers::sglang::flush_cache).post(handlers::sglang::flush_cache))
+        .route(
+            "/flush_cache",
+            get(handlers::sglang::flush_cache).post(handlers::sglang::flush_cache),
+        )
         .route("/abort_request", post(handlers::sglang::abort_request))
         .with_state(state)
 }
@@ -941,17 +1266,32 @@ mod dtype_tests {
     #[test]
     fn explicit_flag_wins() {
         let d = Device::Cpu;
-        assert_eq!(resolve_dtype(Some("f16"), &d, ModelType::Qwen3).unwrap(), DType::F16);
-        assert_eq!(resolve_dtype(Some("BF16"), &d, ModelType::Qwen3_5).unwrap(), DType::BF16);
-        assert_eq!(resolve_dtype(Some("fp32"), &d, ModelType::Qwen3_5).unwrap(), DType::F32);
+        assert_eq!(
+            resolve_dtype(Some("f16"), &d, ModelType::Qwen3).unwrap(),
+            DType::F16
+        );
+        assert_eq!(
+            resolve_dtype(Some("BF16"), &d, ModelType::Qwen3_5).unwrap(),
+            DType::BF16
+        );
+        assert_eq!(
+            resolve_dtype(Some("fp32"), &d, ModelType::Qwen3_5).unwrap(),
+            DType::F32
+        );
         assert!(resolve_dtype(Some("int8"), &d, ModelType::Qwen3).is_err());
     }
 
     #[test]
     fn cpu_defaults_to_f32() {
         let d = Device::Cpu;
-        assert_eq!(resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(), DType::F32);
-        assert_eq!(resolve_dtype(None, &d, ModelType::Qwen3).unwrap(), DType::F32);
+        assert_eq!(
+            resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(),
+            DType::F32
+        );
+        assert_eq!(
+            resolve_dtype(None, &d, ModelType::Qwen3).unwrap(),
+            DType::F32
+        );
     }
 
     #[test]
@@ -959,9 +1299,55 @@ mod dtype_tests {
         let Ok(d) = Device::new_metal(0) else {
             return; // no Metal on this machine/CI
         };
-        assert_eq!(resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(), DType::F16);
-        assert_eq!(resolve_dtype(None, &d, ModelType::VoxCpm2).unwrap(), DType::F16);
-        assert_eq!(resolve_dtype(None, &d, ModelType::Qwen3).unwrap(), DType::F32);
-        assert_eq!(resolve_dtype(None, &d, ModelType::Gemma4).unwrap(), DType::F32);
+        assert_eq!(
+            resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(),
+            DType::F16
+        );
+        assert_eq!(
+            resolve_dtype(None, &d, ModelType::VoxCpm2).unwrap(),
+            DType::F16
+        );
+        assert_eq!(
+            resolve_dtype(None, &d, ModelType::Qwen3).unwrap(),
+            DType::F32
+        );
+        assert_eq!(
+            resolve_dtype(None, &d, ModelType::Gemma4).unwrap(),
+            DType::F32
+        );
+    }
+
+    // ── --text-only override ──
+
+    #[test]
+    fn text_only_downgrades_qwen3_5_vl_to_text() {
+        let (mt, rt) = apply_text_only_override(true, ModelType::Qwen3_5VL, ModelType::Qwen3_5VL);
+        assert_eq!(mt, ModelType::Qwen3_5);
+        assert_eq!(rt, ModelType::Qwen3_5);
+    }
+
+    #[test]
+    fn text_only_downgrades_auto_resolved_qwen3_5_vl() {
+        // Mirrors the auto-detect case: model_type is still Auto (never
+        // re-detected), resolved_type is what detect_model_type() returned.
+        let (mt, rt) = apply_text_only_override(true, ModelType::Auto, ModelType::Qwen3_5VL);
+        assert_eq!(mt, ModelType::Qwen3_5);
+        assert_eq!(rt, ModelType::Qwen3_5);
+    }
+
+    #[test]
+    fn text_only_is_noop_without_the_flag() {
+        let (mt, rt) = apply_text_only_override(false, ModelType::Qwen3_5VL, ModelType::Qwen3_5VL);
+        assert_eq!(mt, ModelType::Qwen3_5VL);
+        assert_eq!(rt, ModelType::Qwen3_5VL);
+    }
+
+    #[test]
+    fn text_only_is_noop_for_other_vlm_types() {
+        // Scoped to Qwen 3.5-VL / Ornith only — other VLM families aren't
+        // known to share a checkpoint layout with a text-only sibling.
+        let (mt, rt) = apply_text_only_override(true, ModelType::MinicpmV46, ModelType::MinicpmV46);
+        assert_eq!(mt, ModelType::MinicpmV46);
+        assert_eq!(rt, ModelType::MinicpmV46);
     }
 }

@@ -453,7 +453,12 @@ pub fn create_backend(
             anyhow::bail!("Gemma4-VL is a VLM model — use the VLM endpoint instead of create_backend()")
         }
         ModelType::Qwen3_5VL => {
-            anyhow::bail!("Qwen3_5-VL is a VLM model — use the Qwen3_5-VL endpoint instead of create_backend()")
+            anyhow::bail!(
+                "Qwen3_5-VL is a VLM model — use the Qwen3_5-VL endpoint instead of \
+                 create_backend(), or pass --text-only (or --model-type qwen3_5) to load the \
+                 same checkpoint text-only (skips the vision tower's weights entirely, also \
+                 unlocks --quant)"
+            )
         }
         ModelType::MinicpmV46 => {
             anyhow::bail!("MiniCPM-V-4.6 is a VLM model — use the MiniCPM-V-4.6 endpoint instead of create_backend()")
@@ -1027,5 +1032,32 @@ mod tests {
     fn resolve_explicit_type_is_passthrough() {
         let result = resolve(ModelType::HunyuanDense, "/models/whatever");
         assert_eq!(result, ModelType::HunyuanDense);
+    }
+
+    // ── text-only override for Qwen 3.5 / Ornith VL checkpoints ──
+
+    #[test]
+    fn detect_from_config_json_qwen3_5_with_vision_config_is_vl() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "qwen3_5", "vision_config": {}}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Qwen3_5VL);
+    }
+
+    /// `--model-type qwen3_5` is the "load text-only, skip the vision tower"
+    /// switch for Qwen3.5-VL / Ornith checkpoints (same weights,
+    /// `Qwen3_5TextModel::new` only ever reads `language_model.*` tensors).
+    /// Unlike Gemma4 (`resolved_type` in crane-serve's `run()` auto-upgrades
+    /// an explicit `gemma4` to `gemma4_vl` when the directory is VL), Qwen 3.5
+    /// must NOT auto-upgrade an explicit `qwen3_5` — that would silently
+    /// remove the only way to force the lighter, non-VLM load path.
+    #[test]
+    fn resolve_explicit_qwen3_5_is_not_upgraded_to_vl_even_with_vision_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "qwen3_5", "vision_config": {}}"#).unwrap();
+        let result = resolve(ModelType::Qwen3_5, dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Qwen3_5);
     }
 }

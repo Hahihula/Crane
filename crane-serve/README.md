@@ -626,7 +626,7 @@ Currently crane-serve runs on a single CUDA device (device 0). Multi-GPU tensor 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--model-path` | *(required)* | Path to model directory or GGUF file |
-| `--model-type` | `auto` | Architecture: `auto`, `hunyuan`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_tts`, `voxtral_tts` (aliases: `voxtral`, `voxtral-tts`, `voxtral_4b`) |
+| `--model-type` | `auto` | Architecture: `auto`, `hunyuan`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`, `qwen3_tts`, `voxtral_tts` (aliases: `voxtral`, `voxtral-tts`, `voxtral_4b`) |
 | `--model-name` | directory name | Model name shown in API responses |
 | `--host` | `0.0.0.0` | Bind address |
 | `--port` | `8080` | Bind port |
@@ -636,6 +636,7 @@ Currently crane-serve runs on a single CUDA device (device 0). Multi-GPU tensor 
 | `--format` | `auto` | Weight format: `auto`, `safetensors`, `gguf` |
 | `--max-seq-len` | `0` | Max sequence length (prompt + generation); `0` = unlimited |
 | `--gpu-memory-limit` | *(none)* | VRAM cap: absolute (`5G`, `8G`, `5120M`) or fractional (`0.7` = 70% of total) |
+| `--text-only` | `false` | Qwen 3.5-VL / Ornith only: opt out of the vision tower and load the same checkpoint as a plain text model (skips the ~600M-param ViT entirely — no extra VRAM — and unlocks `--quant`, which the VLM path doesn't support). Vision-capable checkpoints load with vision by default; this flag is the opt-out. |
 
 ### Parameter tuning guide
 
