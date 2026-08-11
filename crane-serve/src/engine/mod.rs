@@ -40,8 +40,8 @@ pub use stats::{EngineStats, StatsSnapshot};
 pub use types::{EngineHandle, EngineRequest, EngineResponse, GenerationParams};
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use candle_core::{Device, Tensor};
@@ -53,6 +53,12 @@ use crane_core::utils::token_output_stream::TokenOutputStream;
 use sampling::SamplingBuffers;
 use scheduler::{Scheduler, SchedulerOutput};
 use sequence::{Sequence, SequenceStatus};
+
+/// Maximum number of prompt tokens fed to a single `forward_step` during
+/// prefill. Larger prompts are split into chunks of this size so each forward
+/// step's intermediate state (causal-mask allocation, attention logits, GDN
+/// recurrent scratch) stays bounded. See [`InferenceEngine::step_prefill`].
+const PREFILL_CHUNK_SIZE: usize = 2048;
 
 // ─────────────────────────────────────────────────────────────
 //  Memory configuration
@@ -289,10 +295,7 @@ impl InferenceEngine {
             tracked_kv_bytes: 0,
             eviction_cooldown: 0,
         };
-        let handle = EngineHandle {
-            request_tx,
-            stats,
-        };
+        let handle = EngineHandle { request_tx, stats };
         (engine, handle)
     }
 
@@ -328,72 +331,78 @@ impl InferenceEngine {
             "Engine started (max_concurrent={}, decode_tokens_per_seq={}, max_seq_len={})",
             self.scheduler.max_running,
             self.decode_tokens_per_seq,
-            if self.memory_config.max_seq_len == 0 { "unlimited".to_string() } else { self.memory_config.max_seq_len.to_string() },
+            if self.memory_config.max_seq_len == 0 {
+                "unlimited".to_string()
+            } else {
+                self.memory_config.max_seq_len.to_string()
+            },
         );
 
         // Install candle's private, affinity-pinned rayon pool for the
         // engine's lifetime so every forward pass's matmuls run on warm
         // worker threads instead of rayon's ambient global pool.
         let device = self.model.device().clone();
-        device.with_context(|| loop {
-            self.drain_requests();
-            self.check_cancelled();
+        device.with_context(|| {
+            loop {
+                self.drain_requests();
+                self.check_cancelled();
 
-            // Decrement eviction cooldown (cuMemGetInfo grace period).
-            self.eviction_cooldown = self.eviction_cooldown.saturating_sub(1);
+                // Decrement eviction cooldown (cuMemGetInfo grace period).
+                self.eviction_cooldown = self.eviction_cooldown.saturating_sub(1);
 
-            self.stats
-                .active_sequences
-                .store(self.scheduler.running.len() as u64, Ordering::Relaxed);
-            self.stats
-                .waiting_sequences
-                .store(self.scheduler.waiting.len() as u64, Ordering::Relaxed);
+                self.stats
+                    .active_sequences
+                    .store(self.scheduler.running.len() as u64, Ordering::Relaxed);
+                self.stats
+                    .waiting_sequences
+                    .store(self.scheduler.waiting.len() as u64, Ordering::Relaxed);
 
-            let output = self.scheduler.schedule();
+                let output = self.scheduler.schedule();
 
-            match output {
-                Some(output) => {
-                    // KV cache budget gate: if a prefill is scheduled but we're
-                    // over the KV budget, first try to evict (preempt) the
-                    // largest running sequence to make room. If still over,
-                    // defer the prefill and drain existing sequences.
-                    if output.is_prefill && self.is_over_kv_budget() {
-                        // Attempt eviction before deferring.
-                        self.evict_if_needed();
+                match output {
+                    Some(output) => {
+                        // KV cache budget gate: if a prefill is scheduled but we're
+                        // over the KV budget, first try to evict (preempt) the
+                        // largest running sequence to make room. If still over,
+                        // defer the prefill and drain existing sequences.
+                        if output.is_prefill && self.is_over_kv_budget() {
+                            // Attempt eviction before deferring.
+                            self.evict_if_needed();
 
-                        if self.is_over_kv_budget() && !self.scheduler.running.is_empty() {
-                            // Still over budget and have running sequences to drain.
-                            for seq_id in &output.batch {
-                                self.scheduler.waiting.push_front(seq_id.clone());
+                            if self.is_over_kv_budget() && !self.scheduler.running.is_empty() {
+                                // Still over budget and have running sequences to drain.
+                                for seq_id in &output.batch {
+                                    self.scheduler.waiting.push_front(seq_id.clone());
+                                }
+                                let decode_batch: Vec<String> =
+                                    self.scheduler.running.iter().cloned().collect();
+                                let decode_output = SchedulerOutput {
+                                    batch: decode_batch,
+                                    is_prefill: false,
+                                };
+                                self.execute_step(decode_output);
+                            } else {
+                                // Budget OK after eviction (or nothing running) — proceed.
+                                self.execute_step(output);
                             }
-                            let decode_batch: Vec<String> =
-                                self.scheduler.running.iter().cloned().collect();
-                            let decode_output = SchedulerOutput {
-                                batch: decode_batch,
-                                is_prefill: false,
-                            };
-                            self.execute_step(decode_output);
                         } else {
-                            // Budget OK after eviction (or nothing running) — proceed.
                             self.execute_step(output);
                         }
-                    } else {
-                        self.execute_step(output);
-                    }
-                    self.step_counter += 1;
+                        self.step_counter += 1;
 
-                    if self.step_counter.is_multiple_of(50) {
-                        self.log_stats();
-                    }
-                }
-                None => {
-                    if let Some(req) = self.request_rx.blocking_recv() {
-                        self.accept_request(req);
-                    } else {
-                        info!("Engine channel closed, shutting down");
-                        self.log_stats();
-                        return;
-                    }
+                        if self.step_counter.is_multiple_of(50) {
+                            self.log_stats();
+                        }
+                    },
+                    None => {
+                        if let Some(req) = self.request_rx.blocking_recv() {
+                            self.accept_request(req);
+                        } else {
+                            info!("Engine channel closed, shutting down");
+                            self.log_stats();
+                            return;
+                        }
+                    },
                 }
             }
         });
@@ -420,7 +429,11 @@ impl InferenceEngine {
                 budget_info,
             )
         } else {
-            format!(" | kv_cache: {}{}", format_bytes_engine(self.tracked_kv_bytes), budget_info)
+            format!(
+                " | kv_cache: {}{}",
+                format_bytes_engine(self.tracked_kv_bytes),
+                budget_info
+            )
         };
         info!(
             "Engine stats | uptime={}s | requests: total={} completed={} cancelled={} failed={} | \
@@ -565,12 +578,16 @@ impl InferenceEngine {
                 .running
                 .iter()
                 .filter_map(|id| {
-                    self.sequences.get(id).map(|seq| (id.clone(), seq.tokens.len()))
+                    self.sequences
+                        .get(id)
+                        .map(|seq| (id.clone(), seq.tokens.len()))
                 })
                 .max_by_key(|(_, len)| *len)
                 .map(|(id, _)| id);
 
-            let Some(victim_id) = victim_id else { break };
+            let Some(victim_id) = victim_id else {
+                break;
+            };
 
             // Compute bytes being freed.
             let freed = self
@@ -655,12 +672,10 @@ impl InferenceEngine {
                 max_seq_len = self.memory_config.max_seq_len,
                 "Prompt exceeds max_seq_len, rejecting request",
             );
-            let _ = req.response_tx.send(EngineResponse::Error(
-                format!(
-                    "Prompt length ({}) exceeds server max_seq_len ({})",
-                    prompt_len, self.memory_config.max_seq_len,
-                ),
-            ));
+            let _ = req.response_tx.send(EngineResponse::Error(format!(
+                "Prompt length ({}) exceeds server max_seq_len ({})",
+                prompt_len, self.memory_config.max_seq_len,
+            )));
             self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -727,7 +742,9 @@ impl InferenceEngine {
 
         for id in cancelled {
             warn!(id = %id, "Client disconnected, cancelling sequence");
-            self.stats.cancelled_requests.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .cancelled_requests
+                .fetch_add(1, Ordering::Relaxed);
             self.cleanup_sequence(&id);
         }
     }
@@ -769,12 +786,31 @@ impl InferenceEngine {
 
         let prompt_len = input_ids.len();
 
-        let logits = match self.model.forward_step(&input_ids, start_pos) {
-            Ok(l) => l,
-            Err(e) => {
-                self.send_error(&seq_id, &format!("Prefill forward failed: {e}"));
+        let mut logits = None;
+        let mut processed = 0usize;
+        while processed < prompt_len {
+            let chunk_end = (processed + PREFILL_CHUNK_SIZE).min(prompt_len);
+            let chunk = &input_ids[processed..chunk_end];
+            let chunk_start_pos = start_pos + processed;
+            logits = match self.model.forward_step(chunk, chunk_start_pos) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    self.send_error(
+                        &seq_id,
+                        &format!("Prefill forward failed at chunk {processed}/{prompt_len}: {e}"),
+                    );
+                    return;
+                },
+            };
+            processed = chunk_end;
+        }
+
+        let logits = match logits {
+            Some(l) => l,
+            None => {
+                self.send_error(&seq_id, "Empty prefill");
                 return;
-            }
+            },
         };
 
         let next_token = {
@@ -784,7 +820,7 @@ impl InferenceEngine {
                 Err(e) => {
                     self.send_error(&seq_id, &format!("Sampling failed: {e}"));
                     return;
-                }
+                },
             }
         };
 
@@ -812,6 +848,7 @@ impl InferenceEngine {
         info!(
             id = %seq_id,
             prompt_len,
+            prefill_chunks = prompt_len.div_ceil(PREFILL_CHUNK_SIZE),
             prefill_ms = prefill_us / 1000,
             prefill_tok_s = format!("{:.1}", prefill_tok_s),
             "Prefill complete, first token generated",
@@ -844,7 +881,9 @@ impl InferenceEngine {
             .collect();
         for id in &cancelled {
             warn!(id = %id, "Client disconnected before decode batch");
-            self.stats.cancelled_requests.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .cancelled_requests
+                .fetch_add(1, Ordering::Relaxed);
             self.cleanup_sequence(id);
         }
         batch
@@ -896,12 +935,12 @@ impl InferenceEngine {
                 }
                 // KV caches changed for multiple sequences — recount.
                 self.recount_kv_bytes();
-            }
+            },
             Err(e) => {
                 error!("Final KV extraction failed: {e}");
                 self.model.clear_kv_cache();
                 self.recount_kv_bytes();
-            }
+            },
         }
     }
 
@@ -932,20 +971,19 @@ impl InferenceEngine {
             .map(|id| self.sequences.get(id).unwrap().kv_caches.clone())
             .collect();
 
-        let (kv_lens, original_max_kv) =
-            match self
-                .model
-                .setup_batch_decode(&kv_caches, self.decode_tokens_per_seq)
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("Batch decode setup failed: {e}");
-                    for seq_id in &batch {
-                        self.send_error(seq_id, &format!("Batch decode setup failed: {e}"));
-                    }
-                    return;
+        let (kv_lens, original_max_kv) = match self
+            .model
+            .setup_batch_decode(&kv_caches, self.decode_tokens_per_seq)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Batch decode setup failed: {e}");
+                for seq_id in &batch {
+                    self.send_error(seq_id, &format!("Batch decode setup failed: {e}"));
                 }
-            };
+                return;
+            },
+        };
         drop(kv_caches);
 
         // Now that setup_batch_decode has consumed the KV views (building its
@@ -963,18 +1001,18 @@ impl InferenceEngine {
 
         // Pre-build attention mask.
         let max_total_width = original_max_kv + self.decode_tokens_per_seq;
-        let full_mask = match self.model.build_batch_decode_mask(
-            &kv_lens,
-            original_max_kv,
-            max_total_width,
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                error!("Mask build failed: {e}");
-                self.model.clear_kv_cache();
-                return;
-            }
-        };
+        let full_mask =
+            match self
+                .model
+                .build_batch_decode_mask(&kv_lens, original_max_kv, max_total_width)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("Mask build failed: {e}");
+                    self.model.clear_kv_cache();
+                    return;
+                },
+            };
 
         // Multi-round decode loop with lazy eviction.
         let mut total_tokens_this_step = 0u64;
@@ -1001,25 +1039,28 @@ impl InferenceEngine {
             let tokens: Vec<u32> = (0..batch.len())
                 .map(|i| {
                     if alive[i] {
-                        *self.sequences.get(&batch[i]).unwrap().tokens.last().unwrap()
+                        *self
+                            .sequences
+                            .get(&batch[i])
+                            .unwrap()
+                            .tokens
+                            .last()
+                            .unwrap()
                     } else {
                         last_tokens[i]
                     }
                 })
                 .collect();
 
-            let input_ids = match crane_core::ops::copy_from_slice_u32(
-                &tokens,
-                self.model.device(),
-            )
-            .and_then(|t| t.reshape((batch_size, 1)))
+            let input_ids = match crane_core::ops::copy_from_slice_u32(&tokens, self.model.device())
+                .and_then(|t| t.reshape((batch_size, 1)))
             {
                 Ok(t) => t,
                 Err(e) => {
                     error!("Decode input_ids upload failed: {e}");
                     self.model.clear_kv_cache();
                     return;
-                }
+                },
             };
 
             let mask_width = original_max_kv + round + 1;
@@ -1044,7 +1085,7 @@ impl InferenceEngine {
                     }
                     self.model.clear_kv_cache();
                     return;
-                }
+                },
             };
 
             rounds_done += 1;
@@ -1060,7 +1101,7 @@ impl InferenceEngine {
                         self.send_error(seq_id, &format!("Logits extraction failed: {e}"));
                         alive[i] = false;
                         continue;
-                    }
+                    },
                 };
 
                 let next_token = {
@@ -1071,7 +1112,7 @@ impl InferenceEngine {
                             self.send_error(seq_id, &format!("Sampling failed: {e}"));
                             alive[i] = false;
                             continue;
-                        }
+                        },
                     }
                 };
 
@@ -1081,7 +1122,9 @@ impl InferenceEngine {
                 last_tokens[i] = next_token;
 
                 total_tokens_this_step += 1;
-                self.stats.total_decode_steps.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_decode_steps
+                    .fetch_add(1, Ordering::Relaxed);
 
                 self.send_token(seq_id, next_token);
 
@@ -1110,7 +1153,9 @@ impl InferenceEngine {
             self.finish_sequence(id);
         }
         for id in &pending_cancel {
-            self.stats.cancelled_requests.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .cancelled_requests
+                .fetch_add(1, Ordering::Relaxed);
             self.cleanup_sequence(id);
         }
 
@@ -1171,7 +1216,9 @@ impl InferenceEngine {
 
             for _round in 0..self.decode_tokens_per_seq {
                 let (input_ids, start_pos) = {
-                    let Some(seq) = self.sequences.get(seq_id) else { break };
+                    let Some(seq) = self.sequences.get(seq_id) else {
+                        break;
+                    };
                     (seq.next_input_ids().to_vec(), seq.start_pos())
                 };
 
@@ -1180,7 +1227,7 @@ impl InferenceEngine {
                     Err(e) => {
                         self.send_error(seq_id, &format!("Decode forward failed: {e}"));
                         break;
-                    }
+                    },
                 };
 
                 let next_token = {
@@ -1190,7 +1237,7 @@ impl InferenceEngine {
                         Err(e) => {
                             self.send_error(seq_id, &format!("Sampling failed: {e}"));
                             break;
-                        }
+                        },
                     }
                 };
 
@@ -1205,11 +1252,7 @@ impl InferenceEngine {
 
                 self.send_token(seq_id, next_token);
 
-                if self
-                    .sequences
-                    .get(seq_id)
-                    .is_none_or(Sequence::should_stop)
-                {
+                if self.sequences.get(seq_id).is_none_or(Sequence::should_stop) {
                     self.finish_sequence(seq_id);
                     break;
                 }
@@ -1328,7 +1371,7 @@ impl InferenceEngine {
                 Err(e) => {
                     warn!(id = %seq_id, "Token decode error: {e}");
                     return;
-                }
+                },
             }
         } else {
             return;
@@ -1433,12 +1476,8 @@ impl InferenceEngine {
         // evict → cap=6 → repeat). Once the load subsides and all waiting
         // sequences are served, we reset so the next burst can try full
         // concurrency again.
-        if self.scheduler.effective_max_running.is_some()
-            && self.scheduler.waiting.is_empty()
-        {
-            debug!(
-                "Eviction cap lifted (no waiting sequences, load subsided)"
-            );
+        if self.scheduler.effective_max_running.is_some() && self.scheduler.waiting.is_empty() {
+            debug!("Eviction cap lifted (no waiting sequences, load subsided)");
             self.scheduler.effective_max_running = None;
         }
 
