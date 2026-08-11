@@ -52,12 +52,16 @@ pub struct Args {
     #[arg(long)]
     pub quant: Option<String>,
     /// Compute dtype: f16, bf16 or f32. Defaults per device: BF16 on CUDA,
-    /// F32 on CPU; on Metal F32, except model families validated in F16
-    /// (currently qwen3_5) which default to F16.
+    /// F16 on ROCm, F32 on CPU; on Metal F32, except model families validated
+    /// in F16 (currently qwen3_5) which default to F16.
     #[arg(long)]
     pub dtype: Option<String>,
     #[arg(long, default_value_t = 0)]
     pub max_seq_len: usize,
+    /// GPU memory budget: either a fraction of total VRAM (`0.9`), an absolute
+    /// size (`8G`, `8GB`, `8GiB`, `5120M`, `5120MiB` — all binary units), or a
+    /// plain byte count. Unset or `0` means unlimited. Only enforced for LLM
+    /// engine mode (not TTS/ASR/VLM/duplex).
     #[arg(long)]
     pub gpu_memory_limit: Option<String>,
     /// MiniCPM-o duplex only: load the LLM tower from a standalone
@@ -390,6 +394,18 @@ fn run_duplex_loop(
     }
 }
 
+/// Returns `true` if `device` is a real GPU backend (CUDA or ROCm) rather
+/// than CPU or a backend (e.g. Metal) without fused-kernel/device-side
+/// sampling support.
+///
+/// Centralizes the `is_cuda() || is_rocm()` check so call sites don't
+/// hand-roll a `#[cfg(feature = "cuda")]`-only version of it, which
+/// silently forces CPU on ROCm builds (the bug this replaced in the
+/// TTS/ASR/duplex/VLM device-selection code below).
+pub(crate) fn is_gpu_device(device: &crane_core::models::Device) -> bool {
+    device.is_cuda() || device.is_rocm()
+}
+
 /// Resolve the compute dtype. An explicit `--dtype` always wins; otherwise
 /// BF16 on CUDA and F32 elsewhere — except model families validated in F16 on
 /// Metal (currently qwen3_5, voxcpm2), which default to F16 there (halves
@@ -419,6 +435,11 @@ fn resolve_dtype(
     if device.is_cuda() {
         return Ok(DType::BF16);
     }
+    // ROCm backend is experimental: F16 has the broadest kernel coverage on candle's
+    // rocm path today, whereas BF16 support is still incomplete. Default there.
+    if device.is_rocm() {
+        return Ok(DType::F16);
+    }
     if device.is_metal() && matches!(model_type, ModelType::Qwen3_5 | ModelType::VoxCpm2) {
         return Ok(DType::F16);
     }
@@ -443,11 +464,18 @@ pub async fn run(args: Args) -> Result<()> {
     let device = if args.cpu {
         crane_core::models::Device::Cpu
     } else {
+        // Exactly one backend is selected, in priority order: cuda → rocm → metal → cpu.
+        // cuda and rocm are mutually exclusive builds; the cfg gates below never overlap.
         #[cfg(feature = "cuda")]
         {
             crane_core::models::Device::cuda_if_available(0)?
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(all(not(feature = "cuda"), feature = "rocm"))]
+        {
+            // Fall back to CPU when no AMD GPU is present, mirroring the metal idiom.
+            crane_core::models::Device::new_rocm(0).unwrap_or(crane_core::models::Device::Cpu)
+        }
+        #[cfg(all(not(feature = "cuda"), not(feature = "rocm")))]
         {
             #[cfg(target_os = "macos")]
             {
@@ -496,6 +524,15 @@ pub async fn run(args: Args) -> Result<()> {
     let is_asr = resolved_type.is_asr();
     let is_duplex = resolved_type.is_duplex();
 
+    // The memory gate lives in the LLM engine's scheduler; the one-shot
+    // TTS/ASR/VLM/duplex paths have no admission point to enforce it at yet.
+    // Warn instead of silently accepting the flag.
+    if (is_tts || is_asr || is_vlm || is_duplex) && args.gpu_memory_limit.is_some() {
+        tracing::warn!(
+            "--gpu-memory-limit is only enforced for LLM engine mode; ignored for this model type"
+        );
+    }
+
     let (
         engine_handle,
         tokenizer,
@@ -526,21 +563,10 @@ pub async fn run(args: Args) -> Result<()> {
             resolved_type, args.model_path
         );
         let model_path_clone = args.model_path.clone();
-        let use_cpu = args.cpu || {
-            #[cfg(feature = "cuda")]
-            {
-                !candle_core::utils::cuda_is_available()
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                true
-            }
-        };
-        let tts_device = if use_cpu {
-            crane_core::models::Device::Cpu
-        } else {
-            device.clone()
-        };
+        // `device` already resolves cuda -> rocm -> metal -> cpu (and honors
+        // `args.cpu`); re-deriving CPU-vs-GPU here only checked the `cuda`
+        // feature, so it silently forced CPU on rocm/metal builds.
+        let tts_device = device.clone();
         let tts_dtype = dtype;
         let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<TtsGenerateRequest>();
         let resolved_name = resolved_type.display_name().to_string();
@@ -599,21 +625,9 @@ pub async fn run(args: Args) -> Result<()> {
             resolved_type, args.model_path
         );
         let model_path_clone = args.model_path.clone();
-        let use_cpu = args.cpu || {
-            #[cfg(feature = "cuda")]
-            {
-                !candle_core::utils::cuda_is_available()
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                true
-            }
-        };
-        let asr_device = if use_cpu {
-            crane_core::models::Device::Cpu
-        } else {
-            device.clone()
-        };
+        // See the `tts_device` comment above: reuse the already-resolved
+        // top-level device instead of a CUDA-only re-check.
+        let asr_device = device.clone();
         let asr_dtype = dtype;
         let (asr_tx, asr_rx) = tokio::sync::mpsc::unbounded_channel::<AsrTranscribeRequest>();
         let resolved_name = resolved_type.display_name().to_string();
@@ -667,20 +681,14 @@ pub async fn run(args: Args) -> Result<()> {
             None,
         )
     } else if is_vlm {
-        let use_cpu = args.cpu || {
-            #[cfg(feature = "cuda")]
-            {
-                !candle_core::utils::cuda_is_available()
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                true
-            }
-        };
-        #[cfg(feature = "cuda")]
-        let use_bf16 = !use_cpu;
-        #[cfg(not(feature = "cuda"))]
-        let use_bf16 = false;
+        // Only the PaddleOCR-VL fallback branch below actually consumes
+        // `use_cpu`/`use_bf16` (the other VLM variants use `device.clone()`
+        // directly); `PaddleOcrVL::from_local` re-derives a CUDA-only
+        // device internally, so `use_cpu` here doesn't yet get ROCm/Metal
+        // GPU acceleration, but it at least reflects the real device
+        // instead of unconditionally forcing CPU on ROCm builds.
+        let use_cpu = args.cpu || !is_gpu_device(&device);
+        let use_bf16 = device.is_cuda();
         let tok_path = std::path::Path::new(&args.model_path).join("tokenizer.json");
         let tokenizer = tokenizers::Tokenizer::from_file(&tok_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
@@ -992,21 +1000,9 @@ pub async fn run(args: Args) -> Result<()> {
     } else if is_duplex {
         info!("Loading MiniCPM-o duplex model from: {}", args.model_path);
         let model_path_clone = args.model_path.clone();
-        let use_cpu = args.cpu || {
-            #[cfg(feature = "cuda")]
-            {
-                !candle_core::utils::cuda_is_available()
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                true
-            }
-        };
-        let duplex_device = if use_cpu {
-            crane_core::models::Device::Cpu
-        } else {
-            device.clone()
-        };
+        // See the `tts_device` comment above: reuse the already-resolved
+        // top-level device instead of a CUDA-only re-check.
+        let duplex_device = device.clone();
         let duplex_dtype = dtype;
         let llm_gguf_clone = args.llm_gguf.clone();
         if let Some(ref gguf) = llm_gguf_clone {
