@@ -489,6 +489,7 @@ impl AudioEncoderAttention {
             return Self::forward_attn_cpu_varlen(&q_bshd, &k_bshd, &v_bshd, cu_seqlens, scale);
         }
 
+        let dtype = q_bshd.dtype();
         let mut outputs = Vec::with_capacity(n_blocks);
         for i in 0..n_blocks {
             let start = cu_seqlens[i];
@@ -498,20 +499,17 @@ impl AudioEncoderAttention {
             let v_block = v_bshd.narrow(1, start, len)?;
             // Each block attends only within itself (no cross-block mixing),
             // so an unmasked kernel is correct here.
-            outputs.push(dispatch_flash_attn(
-                &q_block,
-                &k_block,
-                &v_block,
-                scale,
-                AttnMask::None,
-            )?);
+            outputs.push(dispatch_flash_attn(&q_block, &k_block, &v_block, scale, AttnMask::None)?);
         }
 
-        if n_blocks == 1 {
-            Ok(outputs.into_iter().next().expect("n_blocks == 1 checked above"))
+        let attn_output = if n_blocks == 1 {
+            outputs.into_iter().next().expect("n_blocks == 1 checked above")
         } else {
-            Tensor::cat(&outputs, 2)
-        }
+            Tensor::cat(&outputs, 2)?
+        };
+        // Cast back from F32 so the caller's `out_proj` (in the model's
+        // working dtype) matches — see `dispatch_flash_attn`'s doc.
+        attn_output.to_dtype(dtype)
     }
 
     /// Fused CPU path for `forward_attn_cpu`: `q_bshd`/`k_bshd`/`v_bshd` are

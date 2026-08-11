@@ -400,6 +400,8 @@ impl GqaAttention {
         };
 
         let attn_output = dispatch_flash_attn(&q_bshd, &k_bshd, &v_bshd, scale_f32, mask)?;
+        // Cast back from F32 before `o_proj` — see `dispatch_flash_attn`'s doc.
+        let attn_output = attn_output.to_dtype(q.dtype())?;
 
         // flash_attn output is BHSD [B, H, 1, D] → [B, 1, H*D].
         let attn_output = attn_output
@@ -416,6 +418,60 @@ mod tests {
     use super::*;
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
+
+    // Regression test for the missing dtype cast after the CPU flash-attn
+    // decode path: candle's CPU flash-attn kernel always accumulates and
+    // returns F32 regardless of input dtype (see `flash_attn.rs`'s
+    // `dispatch_f16_produces_correct_shape`), so an F16 model whose decode
+    // step hits `flash_attn_decode` (single sequence, CPU, GQA) must cast
+    // back to F16 before `o_proj`, or its weight (F16) mismatches the F32
+    // attention output in `Linear::forward`'s matmul.
+    #[test]
+    fn decode_after_prefill_stays_f16_through_cpu_flash_attn_path() {
+        // GQA config (n_heads != n_kv_heads) matching a real F16 GPU model
+        // shape, run on CPU so `q_seq_len == 1 && b_sz == 1 && is_cpu()`
+        // takes the flash-attn decode fast path this test guards.
+        let cfg = AttentionConfig {
+            dim: 3072,
+            n_heads: 32,
+            n_kv_heads: 8,
+            head_dim: 128,
+            qkv_bias: false,
+            o_bias: false,
+            rope_mode: RopeMode::Interleaved,
+            use_qk_norm: false,
+            norm_eps: 1e-6,
+        };
+        let device = Device::Cpu;
+        let vb = nonzero_vb_f16(&cfg, 0.02);
+        let mut attn = GqaAttention::new(cfg, vb).unwrap();
+
+        let half_dim = cfg.head_dim / 2;
+        let prompt_len = 12usize;
+        let cos_p = Tensor::rand(0f32, 1f32, (prompt_len, half_dim), &device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let sin_p = cos_p.clone();
+        let x = Tensor::randn(0f32, 1f32, (1, prompt_len, cfg.dim), &device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let prefill_out = attn.forward(&x, Some((&cos_p, &sin_p)), None).unwrap();
+        assert_eq!(prefill_out.dtype(), DType::F16);
+
+        let cos_d = Tensor::rand(0f32, 1f32, (1, half_dim), &device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let sin_d = cos_d.clone();
+        let step = Tensor::randn(0f32, 1f32, (1, 1, cfg.dim), &device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let decode_out = attn.forward(&step, Some((&cos_d, &sin_d)), None).unwrap();
+        assert_eq!(decode_out.dtype(), DType::F16);
+    }
 
     // Base config used by most tests: dim=16, 4 heads, head_dim=4, no bias/rope/norm.
     fn base_cfg() -> AttentionConfig {
@@ -517,6 +573,30 @@ mod tests {
         }
 
         VarBuilder::from_tensors(t, DType::F32, device)
+    }
+
+    /// Like `nonzero_vb`, but weights are stored (and the `VarBuilder`
+    /// configured) at F16, matching a real F16-inference deployment.
+    fn nonzero_vb_f16(cfg: &AttentionConfig, scale: f32) -> VarBuilder<'static> {
+        let device = &Device::Cpu;
+        let mut t: HashMap<String, Tensor> = HashMap::new();
+        let q_out = cfg.n_heads * cfg.head_dim;
+        let kv_out = cfg.n_kv_heads * cfg.head_dim;
+
+        let fill = |rows: usize, cols: usize| {
+            let data: Vec<f32> = (0..rows * cols).map(|i| (i as f32 + 1.0) * scale).collect();
+            Tensor::from_vec(data, (rows, cols), device)
+                .expect("weight")
+                .to_dtype(DType::F16)
+                .expect("f16")
+        };
+
+        t.insert("q_proj.weight".into(), fill(q_out, cfg.dim));
+        t.insert("k_proj.weight".into(), fill(kv_out, cfg.dim));
+        t.insert("v_proj.weight".into(), fill(kv_out, cfg.dim));
+        t.insert("o_proj.weight".into(), fill(cfg.dim, q_out));
+
+        VarBuilder::from_tensors(t, DType::F16, device)
     }
 
     /// Build an input tensor where every element is distinct: `x[b][t][d] = (index + 1) * 0.01`.

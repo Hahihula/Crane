@@ -413,6 +413,8 @@ impl Attention {
             };
 
             let attn_output = dispatch_flash_attn(&q_bshd, &k_bshd, &v_bshd, scale_f32, mask)?;
+            // Cast back from F32 before `o_proj` — see `dispatch_flash_attn`'s doc.
+            let attn_output = attn_output.to_dtype(q.dtype())?;
 
             // flash_attn output is BHSD [B, H, 1, D] → [B, 1, H*D]
             let attn_output = attn_output
@@ -445,6 +447,8 @@ impl Attention {
             let mask = AttnMask::Causal { kv_offset };
 
             let attn_output = dispatch_flash_attn(&q_bshd, &k_bshd, &v_bshd, scale_f32, mask)?;
+            // Cast back from F32 before `o_proj` — see `dispatch_flash_attn`'s doc.
+            let attn_output = attn_output.to_dtype(q.dtype())?;
 
             // flash_attn output is BHSD [B, H, S, D] → [B, S, H*D]
             let attn_output = attn_output
