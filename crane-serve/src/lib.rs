@@ -60,7 +60,8 @@ pub struct Args {
     pub max_seq_len: usize,
     /// GPU memory budget: either a fraction of total VRAM (`0.9`), an absolute
     /// size (`8G`, `8GB`, `8GiB`, `5120M`, `5120MiB` — all binary units), or a
-    /// plain byte count. Unset or `0` means unlimited.
+    /// plain byte count. Unset or `0` means unlimited. Only enforced for LLM
+    /// engine mode (not TTS/ASR/VLM/duplex).
     #[arg(long)]
     pub gpu_memory_limit: Option<String>,
     /// MiniCPM-o duplex only: load the LLM tower from a standalone
@@ -522,6 +523,15 @@ pub async fn run(args: Args) -> Result<()> {
     let is_tts = resolved_type.is_tts();
     let is_asr = resolved_type.is_asr();
     let is_duplex = resolved_type.is_duplex();
+
+    // The memory gate lives in the LLM engine's scheduler; the one-shot
+    // TTS/ASR/VLM/duplex paths have no admission point to enforce it at yet.
+    // Warn instead of silently accepting the flag.
+    if (is_tts || is_asr || is_vlm || is_duplex) && args.gpu_memory_limit.is_some() {
+        tracing::warn!(
+            "--gpu-memory-limit is only enforced for LLM engine mode; ignored for this model type"
+        );
+    }
 
     let (
         engine_handle,
