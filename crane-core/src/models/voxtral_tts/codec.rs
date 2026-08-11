@@ -454,6 +454,12 @@ pub struct CodecDecoder {
     stages: Vec<CodecStage>,
     output_conv: CausalConv1d,
     alibi_slopes: Vec<f32>,
+    /// Working dtype of the decoder's weights (e.g. F16 on GPU). The
+    /// semantic codebook division (`embedding_sum / cluster_usage`) and the
+    /// FSQ dequantization arithmetic in [`Self::embed_codes`] are computed
+    /// in F32 for precision, then cast to this dtype before entering the
+    /// conv/transformer stack.
+    dtype: DType,
     semantic_dim: usize,
     acoustic_dim: usize,
     fsq_levels: usize,
@@ -476,6 +482,7 @@ impl CodecDecoder {
     /// shape.
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(cfg: &AudioTokenizerArgs, vb: VarBuilder) -> Result<Self> {
+        let dtype = vb.dtype();
         let semantic_codebook = Self::load_semantic_codebook(cfg, vb.clone())?;
         let alibi_slopes = compute_alibi_slopes(cfg.n_heads);
 
@@ -558,6 +565,7 @@ impl CodecDecoder {
             stages,
             output_conv,
             alibi_slopes,
+            dtype,
             semantic_dim: cfg.semantic_dim,
             acoustic_dim: cfg.acoustic_dim,
             fsq_levels: cfg.acoustic_codebook_size,
@@ -586,11 +594,14 @@ impl CodecDecoder {
 
     /// Embed frame codes into the latent space.
     ///
-    /// Input `codes` has shape `[B, n_frames, 37]` (f32, with special token
-    /// offset 2 already included).  Returns `[B, 292, n_frames]` (channel-first).
+    /// Input `codes` has shape `[B, n_frames, 37]` (integer codes, any
+    /// dtype — internally cast to F32; special token offset 2 already
+    /// included). Returns `[B, 292, n_frames]` (channel-first) with dtype
+    /// [`Self::dtype`].
     #[allow(clippy::cast_precision_loss)]
     fn embed_codes(&self, codes: &Tensor) -> Result<Tensor> {
         let (b, n_frames, _) = codes.dims3()?;
+        let codes = &codes.to_dtype(DType::F32)?;
 
         let sem_codes = codes.narrow(2, 0, 1)?.squeeze(2)?;
         let sem_indices = (sem_codes - SPECIAL_TOKEN_OFFSET)?
@@ -607,7 +618,8 @@ impl CodecDecoder {
             (ac_codes - SPECIAL_TOKEN_OFFSET)?.clamp(0.0, (self.fsq_levels - 1) as f64)?;
         let ac_vals = ((ac_codes * (2.0 / (self.fsq_levels - 1) as f64))? - 1.0)?;
 
-        let embedded = Tensor::cat(&[sem_emb, ac_vals], 2)?;
+        // Cast to decoder working dtype (see `Self::dtype`).
+        let embedded = Tensor::cat(&[sem_emb, ac_vals], 2)?.to_dtype(self.dtype)?;
         embedded.transpose(1, 2)
     }
 
@@ -908,10 +920,11 @@ mod tests {
 
         let decoder = CodecDecoder {
             semantic_codebook: codebook,
-            input_conv: dummy_causal_conv1d(292, 1024, 3, 1, dev)?,
+            input_conv: dummy_causal_conv1d(292, 1024, 3, 1, DType::F32, dev)?,
             stages: vec![],
-            output_conv: dummy_causal_conv1d(1024, 240, 7, 1, dev)?,
+            output_conv: dummy_causal_conv1d(1024, 240, 7, 1, DType::F32, dev)?,
             alibi_slopes: compute_alibi_slopes(8),
+            dtype: DType::F32,
             semantic_dim,
             acoustic_dim,
             fsq_levels: 21,
@@ -939,15 +952,56 @@ mod tests {
         Ok(())
     }
 
+    // Regression test: the semantic codebook is loaded (and the FSQ
+    // dequantization computed) in F32 for precision regardless of the
+    // decoder's working dtype, so `embed_codes` must cast its output to
+    // `self.dtype` — otherwise the F32 result mismatches `input_conv`'s F16
+    // weight in `decode`'s first conv1d ("dtype mismatch in conv1d, lhs:
+    // F32, rhs: F16").
+    #[test]
+    fn test_embed_codes_matches_decoder_dtype() -> Result<()> {
+        let dev = &Device::Cpu;
+        let semantic_dim = 256;
+        let acoustic_dim = 36;
+        let n_frames = 3;
+        let codebook_size = 64;
+
+        // The codebook itself stays F32 (as `load_semantic_codebook` always
+        // produces), but the decoder's working dtype is F16 — matching a
+        // real GPU F16 deployment.
+        let codebook = Tensor::randn(0f32, 1.0, (codebook_size, semantic_dim), dev)?;
+
+        let decoder = CodecDecoder {
+            semantic_codebook: codebook,
+            input_conv: dummy_causal_conv1d(292, 1024, 3, 1, DType::F16, dev)?,
+            stages: vec![],
+            output_conv: dummy_causal_conv1d(1024, 240, 7, 1, DType::F16, dev)?,
+            alibi_slopes: compute_alibi_slopes(8),
+            dtype: DType::F16,
+            semantic_dim,
+            acoustic_dim,
+            fsq_levels: 21,
+            samples_per_frame: 1920,
+        };
+
+        let code_data = vec![12.0f32; n_frames * 37];
+        let codes = Tensor::new(code_data.as_slice(), dev)?.reshape((1, n_frames, 37))?;
+
+        let emb = decoder.embed_codes(&codes)?;
+        assert_eq!(emb.dtype(), DType::F16);
+        Ok(())
+    }
+
     fn dummy_causal_conv1d(
         in_ch: usize,
         out_ch: usize,
         kernel: usize,
         stride: usize,
+        dtype: DType,
         dev: &Device,
     ) -> Result<CausalConv1d> {
-        let weight = Tensor::randn(0f32, 0.01, (out_ch, in_ch, kernel), dev)?;
-        let bias = Tensor::zeros(out_ch, DType::F32, dev)?;
+        let weight = Tensor::randn(0f32, 0.01, (out_ch, in_ch, kernel), dev)?.to_dtype(dtype)?;
+        let bias = Tensor::zeros(out_ch, dtype, dev)?;
         let config = Conv1dConfig {
             stride,
             ..Default::default()
@@ -963,10 +1017,11 @@ mod tests {
         out_ch: usize,
         kernel: usize,
         stride: usize,
+        dtype: DType,
         dev: &Device,
     ) -> Result<CausalConvTranspose1d> {
-        let weight = Tensor::randn(0f32, 0.01, (in_ch, out_ch, kernel), dev)?;
-        let bias = Tensor::zeros(out_ch, DType::F32, dev)?;
+        let weight = Tensor::randn(0f32, 0.01, (in_ch, out_ch, kernel), dev)?.to_dtype(dtype)?;
+        let bias = Tensor::zeros(out_ch, dtype, dev)?;
         let config = ConvTranspose1dConfig {
             stride,
             ..Default::default()
@@ -977,16 +1032,16 @@ mod tests {
         })
     }
 
-    fn dummy_rms_norm(dim: usize, dev: &Device) -> Result<RmsNorm> {
+    fn dummy_rms_norm(dim: usize, dtype: DType, dev: &Device) -> Result<RmsNorm> {
         use std::collections::HashMap;
         let mut t: HashMap<String, Tensor> = HashMap::new();
-        t.insert("weight".to_string(), Tensor::ones(dim, DType::F32, dev)?);
-        RmsNorm::new(dim, 1e-6, VarBuilder::from_tensors(t, DType::F32, dev))
+        t.insert("weight".to_string(), Tensor::ones(dim, dtype, dev)?);
+        RmsNorm::new(dim, 1e-6, VarBuilder::from_tensors(t, dtype, dev))
     }
 
-    fn dummy_layer_scale(dim: usize, dev: &Device) -> Result<LayerScale> {
+    fn dummy_layer_scale(dim: usize, dtype: DType, dev: &Device) -> Result<LayerScale> {
         Ok(LayerScale {
-            scale: Tensor::ones(dim, DType::F32, dev)?,
+            scale: Tensor::ones(dim, dtype, dev)?,
         })
     }
 
@@ -995,28 +1050,55 @@ mod tests {
         n_heads: usize,
         n_kv_heads: usize,
         head_dim: usize,
+        dtype: DType,
         dev: &Device,
     ) -> Result<CodecAttention> {
         let kv_dim = n_kv_heads * head_dim;
         let q_dim = n_heads * head_dim;
         Ok(CodecAttention {
-            wq: Linear::new(Tensor::randn(0f32, 0.01, (q_dim, dim), dev)?, None),
-            wk: Linear::new(Tensor::randn(0f32, 0.01, (kv_dim, dim), dev)?, None),
-            wv: Linear::new(Tensor::randn(0f32, 0.01, (kv_dim, dim), dev)?, None),
-            wo: Linear::new(Tensor::randn(0f32, 0.01, (dim, q_dim), dev)?, None),
-            q_norm: dummy_rms_norm(q_dim, dev)?,
-            k_norm: dummy_rms_norm(kv_dim, dev)?,
+            wq: Linear::new(
+                Tensor::randn(0f32, 0.01, (q_dim, dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
+            wk: Linear::new(
+                Tensor::randn(0f32, 0.01, (kv_dim, dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
+            wv: Linear::new(
+                Tensor::randn(0f32, 0.01, (kv_dim, dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
+            wo: Linear::new(
+                Tensor::randn(0f32, 0.01, (dim, q_dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
+            q_norm: dummy_rms_norm(q_dim, dtype, dev)?,
+            k_norm: dummy_rms_norm(kv_dim, dtype, dev)?,
             n_heads,
             n_kv_heads,
             head_dim,
         })
     }
 
-    fn dummy_codec_ffn(dim: usize, hidden_dim: usize, dev: &Device) -> Result<CodecFfn> {
+    fn dummy_codec_ffn(
+        dim: usize,
+        hidden_dim: usize,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<CodecFfn> {
         Ok(CodecFfn {
-            w1: Linear::new(Tensor::randn(0f32, 0.01, (hidden_dim, dim), dev)?, None),
-            w2: Linear::new(Tensor::randn(0f32, 0.01, (dim, hidden_dim), dev)?, None),
-            w3: Linear::new(Tensor::randn(0f32, 0.01, (hidden_dim, dim), dev)?, None),
+            w1: Linear::new(
+                Tensor::randn(0f32, 0.01, (hidden_dim, dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
+            w2: Linear::new(
+                Tensor::randn(0f32, 0.01, (dim, hidden_dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
+            w3: Linear::new(
+                Tensor::randn(0f32, 0.01, (hidden_dim, dim), dev)?.to_dtype(dtype)?,
+                None,
+            ),
         })
     }
 
@@ -1026,25 +1108,33 @@ mod tests {
         n_kv_heads: usize,
         head_dim: usize,
         hidden_dim: usize,
+        dtype: DType,
         dev: &Device,
     ) -> Result<CodecTransformerLayer> {
         Ok(CodecTransformerLayer {
-            attention: dummy_codec_attention(dim, n_heads, n_kv_heads, head_dim, dev)?,
-            ffn: dummy_codec_ffn(dim, hidden_dim, dev)?,
-            attention_norm: dummy_rms_norm(dim, dev)?,
-            ffn_norm: dummy_rms_norm(dim, dev)?,
-            attn_scale: dummy_layer_scale(dim, dev)?,
-            ffn_scale: dummy_layer_scale(dim, dev)?,
+            attention: dummy_codec_attention(dim, n_heads, n_kv_heads, head_dim, dtype, dev)?,
+            ffn: dummy_codec_ffn(dim, hidden_dim, dtype, dev)?,
+            attention_norm: dummy_rms_norm(dim, dtype, dev)?,
+            ffn_norm: dummy_rms_norm(dim, dtype, dev)?,
+            attn_scale: dummy_layer_scale(dim, dtype, dev)?,
+            ffn_scale: dummy_layer_scale(dim, dtype, dev)?,
         })
     }
 
-    /// Build a reduced-dimension dummy codec decoder for CPU unit tests.
+    /// Build a reduced-dimension dummy codec decoder for CPU unit tests, at
+    /// the default F32 working dtype.
     ///
     /// Config: semantic_dim=4, acoustic_dim=4, embed_dim=8, dim=8,
     /// n_heads=2, n_kv_heads=2, head_dim=4, hidden_dim=16, patch_size=4,
     /// 2 stages ([1 layer + upsample], [1 layer]), total_upsample=2,
     /// samples_per_frame=8.
     fn dummy_codec_decoder(dev: &Device) -> Result<CodecDecoder> {
+        dummy_codec_decoder_with_dtype(DType::F32, dev)
+    }
+
+    /// Same as [`dummy_codec_decoder`], but builds all weights at `dtype`
+    /// (e.g. `DType::F16`) instead of the default F32.
+    fn dummy_codec_decoder_with_dtype(dtype: DType, dev: &Device) -> Result<CodecDecoder> {
         let semantic_dim = 4usize;
         let acoustic_dim = 4usize;
         let dim = 8usize;
@@ -1058,20 +1148,26 @@ mod tests {
         let embed_dim = semantic_dim + acoustic_dim;
         let total_upsample = 2usize;
 
+        // The semantic codebook is always F32 in real usage (see
+        // `load_semantic_codebook`), regardless of the decoder's dtype.
         let semantic_codebook =
             Tensor::randn(0f32, 0.01, (codebook_size, semantic_dim), dev)?;
         let alibi_slopes = compute_alibi_slopes(n_heads);
-        let input_conv = dummy_causal_conv1d(embed_dim, dim, 3, 1, dev)?;
-        let output_conv = dummy_causal_conv1d(dim, patch_size, 7, 1, dev)?;
+        let input_conv = dummy_causal_conv1d(embed_dim, dim, 3, 1, dtype, dev)?;
+        let output_conv = dummy_causal_conv1d(dim, patch_size, 7, 1, dtype, dev)?;
 
-        let layer0 = dummy_codec_transformer_layer(dim, n_heads, n_kv_heads, head_dim, hidden_dim, dev)?;
+        let layer0 = dummy_codec_transformer_layer(
+            dim, n_heads, n_kv_heads, head_dim, hidden_dim, dtype, dev,
+        )?;
         let stage0 = CodecStage {
             layers: vec![layer0],
-            upsample: Some(dummy_causal_conv_transpose1d(dim, dim, 4, 2, dev)?),
+            upsample: Some(dummy_causal_conv_transpose1d(dim, dim, 4, 2, dtype, dev)?),
             window_size: 4,
         };
 
-        let layer1 = dummy_codec_transformer_layer(dim, n_heads, n_kv_heads, head_dim, hidden_dim, dev)?;
+        let layer1 = dummy_codec_transformer_layer(
+            dim, n_heads, n_kv_heads, head_dim, hidden_dim, dtype, dev,
+        )?;
         let stage1 = CodecStage {
             layers: vec![layer1],
             upsample: None,
@@ -1084,6 +1180,7 @@ mod tests {
             stages: vec![stage0, stage1],
             output_conv,
             alibi_slopes,
+            dtype,
             semantic_dim,
             acoustic_dim,
             fsq_levels,
@@ -1175,6 +1272,29 @@ mod tests {
                 "shape mismatch for chunk_size={chunk_size}"
             );
         }
+        Ok(())
+    }
+
+    // Regression test for the full decode pipeline (not just `embed_codes`
+    // in isolation): with an F16 decoder, `decode` must run end-to-end
+    // without a dtype mismatch and produce finite F16 output.
+    #[test]
+    fn test_decode_f16_weights() -> Result<()> {
+        let dev = &Device::Cpu;
+        let decoder = dummy_codec_decoder_with_dtype(DType::F16, dev)?;
+        let n_cols = 1 + decoder.acoustic_dim;
+        let n_frames = 5;
+        let codes = dummy_codes(n_frames, n_cols, dev)?;
+
+        let wav = decoder.decode(&codes)?;
+        assert_eq!(wav.dtype(), DType::F16);
+        assert_eq!(wav.dims(), &[1, n_frames * decoder.samples_per_frame()]);
+
+        let wav_vals: Vec<f32> = wav.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        assert!(
+            wav_vals.iter().all(|v| v.is_finite()),
+            "F16 decode produced non-finite values"
+        );
         Ok(())
     }
 
