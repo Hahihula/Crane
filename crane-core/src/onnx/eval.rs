@@ -2,6 +2,7 @@ use super::ops;
 use super::proto::attribute_proto::AttributeType;
 use super::proto::tensor_proto::DataType;
 use super::proto::{self as onnx, GraphProto};
+use super::utils::{collect_all_captures, count_nested_subgraph_captures, release_names_if_done};
 use crate::ops::fused_ops;
 use candle::{DType, Device, IndexOp, Result, Tensor, bail};
 use candle_core as candle;
@@ -24,7 +25,7 @@ pub fn dtype(dt: DataType) -> Option<DType> {
     }
 }
 
-trait Attr {
+pub(crate) trait Attr {
     const TYPE: AttributeType;
     fn get(attr: &onnx::AttributeProto) -> Result<&Self>;
 }
@@ -153,7 +154,7 @@ fn get_attr<'a, T: Attr + ?Sized>(node: &'a onnx::NodeProto, name: &str) -> Resu
     T::get(attr)
 }
 
-fn get_attr_opt<'a, T: Attr + ?Sized>(
+pub(crate) fn get_attr_opt<'a, T: Attr + ?Sized>(
     node: &'a onnx::NodeProto,
     name: &str,
 ) -> Result<Option<&'a T>> {
@@ -294,7 +295,7 @@ pub fn simple_eval(
     simple_eval_(graph, &mut inputs)
 }
 
-fn simple_eval_(
+pub(crate) fn simple_eval_(
     graph: &onnx::GraphProto,
     values: &mut HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>> {
@@ -379,6 +380,24 @@ fn simple_eval_(
             *remaining_uses.entry(input.as_str()).or_default() += 1;
         }
     }
+    // Crane Added 20260804: also count references a nested subgraph (e.g.
+    // an "If" node's then_branch/else_branch) makes to a name from this
+    // scope. ONNX lets a subgraph reference any name visible in its
+    // enclosing scope without declaring it as an explicit node input, so
+    // the flat scan just above never sees these — without this, a value
+    // could hit a remaining-use count of zero (from its top-level
+    // consumers alone) and be evicted before a later "If" node's
+    // not-yet-evaluated branch gets to use it. See count_nested_subgraph_captures.
+    count_nested_subgraph_captures(graph, &mut remaining_uses);
+    // Crane Added 20260804: never evict a value this invocation didn't
+    // itself produce. "If" (below) recursively calls simple_eval_ on a
+    // branch's subgraph while sharing the same `values` map with the
+    // enclosing graph. That recursive call's own last-use bookkeeping is
+    // scoped only to the branch's own node list, so without this guard it
+    // would free an outer-scope value the moment the branch's *local* view
+    // of its uses hits zero — even though the outer graph still needs that
+    // value after the "If" node returns.
+    let inherited_values: HashSet<String> = values.keys().cloned().collect();
 
     // The nodes are topologically sorted so we can just process them in order.
     for node in graph.node.iter() {
@@ -444,6 +463,15 @@ fn simple_eval_(
                 let output = xs.exp()?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260804: new op, needed by a fine-tuned Kokoro
+            // backbone's ISTFTNet vocoder — its noise-residual block
+            // computes `1 / alpha` (Snake activation) via `x.__rdiv__`,
+            // which the ONNX exporter lowers to `Reciprocal`.
+            "Reciprocal" => {
+                let xs = get(&node.input[0])?;
+                let output = ops::reciprocal::reciprocal(xs)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Equal" => {
                 let input0 = get(&node.input[0])?;
                 let input1 = get(&node.input[1])?;
@@ -454,6 +482,11 @@ fn simple_eval_(
                 let xs = get(&node.input[0])?;
                 let xs = xs.eq(&xs.zeros_like()?)?;
                 values.insert(node.output[0].clone(), xs);
+            },
+            "IsNaN" => {
+                let xs = get(&node.input[0])?;
+                let output = ops::is_nan::is_nan(xs)?;
+                values.insert(node.output[0].clone(), output);
             },
             // Crane Added 20260731: implementation lives in ops/nonzero.rs.
             "NonZero" => {
@@ -642,6 +675,17 @@ fn simple_eval_(
                 let output = ops::layer_norm::layer_norm(node, x, scale, bias)?;
                 values.insert(node.output[0].clone(), output);
             },
+            // Crane Added 20260804: implementation lives in
+            // ops/instance_norm.rs — needed by a fine-tuned Kokoro
+            // backbone's ISTFTNet decoder (F0Ntrain's residual blocks use
+            // InstanceNorm1d).
+            "InstanceNormalization" => {
+                let x = get(&node.input[0])?;
+                let scale = get(&node.input[1])?;
+                let bias = get(&node.input[2])?;
+                let output = ops::instance_norm::instance_normalization(node, x, scale, bias)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "Squeeze" => {
                 let xs = get(&node.input[0])?;
                 let axes = get_opt(1).transpose()?;
@@ -710,12 +754,27 @@ fn simple_eval_(
                 };
                 values.insert(node.output[0].clone(), xs);
             },
+            "TopK" => {
+                let xs = get(&node.input[0])?;
+                let k = get(&node.input[1])?;
+                let (out_values, out_indices) = ops::topk::top_k(node, xs, k)?;
+                values.insert(node.output[0].clone(), out_values);
+                if let Some(indices_name) = node.output.get(1).filter(|s| !s.is_empty()) {
+                    values.insert(indices_name.clone(), out_indices);
+                }
+            },
             "Gather" => {
                 // https://github.com/onnx/onnx/blob/main/docs/Operators.md#Gather
                 let xs = get(&node.input[0])?;
                 let indices = get(&node.input[1])?;
                 let axis = get_attr_opt::<i64>(node, "axis")?.copied().unwrap_or(0);
                 let axis = xs.normalize_axis(axis)?;
+
+                // Crane Added 20260805: normalize indices to I64 up front.
+                // index_select's CPU backend only accepts U8/U32/I64, but
+                // mid-graph indices (e.g. from Cast/Where/mask ops) can be
+                // I32, which would otherwise fail with UnsupportedDTypeForOp.
+                let indices = &indices.to_dtype(DType::I64)?;
 
                 // index_select does not support negative indices, so normalize them
                 // to positive indices.
@@ -732,25 +791,22 @@ fn simple_eval_(
                 // In Pytorch or Numpy this can be done by indexing the xs tensor using the indices
                 // tensor directly, but candle does not support tensor indexing at the moment, so
                 // some workarounds must be done.
-                let xs = match indices.dims() {
-                    [] => {
-                        let index = indices.to_vec0::<i64>()? as usize;
-                        xs.narrow(axis, index, 1)?.squeeze(axis)?
-                    },
-                    [_] => xs.index_select(indices, axis)?,
-                    [first, _] => {
-                        let mut v = Vec::with_capacity(*first);
-                        for i in 0..*first {
-                            v.push(xs.index_select(&indices.get(i)?, axis)?)
-                        }
-                        Tensor::stack(&v, axis)?
-                    },
-                    _ => {
-                        // TODO: Provide an op to handle the ONNX generalized gather op ideally in a
-                        // differentiable way.
-                        todo!("implement gather for {xs:?} {indices:?} axis {axis}")
-                    },
-                };
+                //
+                // Crane Added 20260804: generalize to a single implementation
+                // that handles any index rank (previously hit `todo!()` for
+                // ranks above 2, needed by a fine-tuned Kokoro backbone that
+                // gathers with a 4-D index tensor). index_select only accepts
+                // a 1-D index tensor, so flatten `indices`, gather along
+                // `axis`, then reshape the result to the ONNX-spec output
+                // shape (`data.shape[:axis] + indices.shape + data.shape[axis+1:]`).
+                // This also subsumes the previous rank-0/1/2 special cases,
+                // which produced identical results through this same path.
+                let flat_indices = indices.flatten_all()?;
+                let gathered = xs.index_select(&flat_indices, axis)?;
+                let mut out_shape = xs.dims()[..axis].to_vec();
+                out_shape.extend(indices.dims());
+                out_shape.extend(&xs.dims()[axis + 1..]);
+                let xs = gathered.reshape(out_shape)?;
                 values.insert(node.output[0].clone(), xs);
             },
             // https://onnx.ai/onnx/operators/onnx__GatherElements.html#gatherelements
@@ -1266,6 +1322,12 @@ fn simple_eval_(
                 let output = input.to_dtype(dtype)?;
                 values.insert(node.output[0].clone(), output);
             },
+            "CastLike" => {
+                let input = get(&node.input[0])?;
+                let target_type = get(&node.input[1])?;
+                let output = ops::cast_like::cast_like(input, target_type)?;
+                values.insert(node.output[0].clone(), output);
+            },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#CumSum
             "CumSum" => {
                 let exclusive = get_attr_opt::<i64>(node, "exclusive")?
@@ -1302,12 +1364,12 @@ fn simple_eval_(
             "If" => {
                 // protobuf encodes boolean false as 0 and true as 1
                 let cond = to_scalar_flexible::<u8>(&get(&node.input[0])?.get(0)?)?;
-                let attr_name = if cond != 0 {
-                    "then_branch"
+                let (taken_attr, untaken_attr) = if cond != 0 {
+                    ("then_branch", "else_branch")
                 } else {
-                    "else_branch"
+                    ("else_branch", "then_branch")
                 };
-                let sub_graph = get_attr::<GraphProto>(node, attr_name)?;
+                let sub_graph = get_attr::<GraphProto>(node, taken_attr)?;
                 if sub_graph.output.len() != node.output.len() {
                     bail!(
                         "If node {:?} is malformed: branch outputs ({}) don't match node outputs ({})",
@@ -1323,6 +1385,39 @@ fn simple_eval_(
                         branch_out.get(&sub_graph.output[i].name).unwrap().clone(),
                     );
                 }
+                // Crane Added 20260806: release the taken branch's captured
+                // (outer-scope) references, recursively through any nested
+                // subgraphs it contains (e.g. an inner "If"), now that it
+                // has actually run — matches the up-front over-count in
+                // count_nested_subgraph_captures, which counts both
+                // branches (and nested subgraphs within them) since the
+                // taken one isn't known until here.
+                let mut taken_captures = Vec::new();
+                collect_all_captures(sub_graph, &mut taken_captures);
+                release_names_if_done(
+                    taken_captures,
+                    &mut remaining_uses,
+                    &graph_outputs,
+                    &inherited_values,
+                    values,
+                );
+                // Crane Added 20260806: the untaken branch's captures were
+                // also counted up front (count_nested_subgraph_captures
+                // can't know which branch will be taken) but that branch
+                // never runs, so its counts would otherwise never be
+                // released. The attribute may be absent (an "If" is valid
+                // with only one branch set), hence get_attr_opt.
+                if let Some(untaken_graph) = get_attr_opt::<GraphProto>(node, untaken_attr)? {
+                    let mut untaken_captures = Vec::new();
+                    collect_all_captures(untaken_graph, &mut untaken_captures);
+                    release_names_if_done(
+                        untaken_captures,
+                        &mut remaining_uses,
+                        &graph_outputs,
+                        &inherited_values,
+                        values,
+                    );
+                }
             },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#pad
             "Pad" => {
@@ -1336,51 +1431,8 @@ fn simple_eval_(
                         node.name
                     );
                 }
-                if pads.rank() != 1 {
-                    bail!("Pad expects 'pads' input to be 1D vector: {pads:?}");
-                }
-                if pads.dim(0).unwrap() != 2 * data.rank() {
-                    bail!(
-                        "Pad expects 'pads' input len to be 2 * rank of 'data' input: pads: {}, data rank: {}",
-                        pads,
-                        data.rank()
-                    );
-                }
-
-                let pads = pads.to_vec1::<i64>()?;
-                let (pads_pre, pads_post) = pads.split_at(pads.len() / 2);
-
-                match mode {
-                    "reflect" => {
-                        let mut out = data.clone();
-                        for (i, &dim) in data.dims().iter().enumerate().rev() {
-                            if pads_pre[i] == 0 && pads_post[i] == 0 {
-                                continue;
-                            }
-                            fn zigzag(min: i64, max: i64) -> impl Iterator<Item = i64> {
-                                std::iter::repeat((min..max).chain((min + 1..=max).rev())).flatten()
-                            }
-                            let idx = if dim > 1 {
-                                let cycle_len = dim * 2 - 2;
-                                let skip = cycle_len - ((pads_pre[i] as usize) % cycle_len);
-                                let idx = zigzag(0, (dim - 1) as i64)
-                                    .skip(skip)
-                                    .take((pads_pre[i] as usize) + dim + (pads_post[i] as usize));
-                                Tensor::from_iter(idx, out.device())?
-                            } else {
-                                Tensor::full(0i64, (dim,), out.device())?
-                            };
-
-                            out = out.index_select(&idx, i)?;
-                        }
-
-                        values.insert(node.output[0].clone(), out);
-                    },
-                    _ => bail!(
-                        "unsupported 'mode' value {mode:?} for Pad node {:?}",
-                        node.name
-                    ),
-                }
+                let output = ops::pad::pad(node, data, pads, mode)?;
+                values.insert(node.output[0].clone(), output);
             },
             // https://github.com/onnx/onnx/blob/main/docs/Operators.md#slice
             "Slice" => {
@@ -1748,6 +1800,12 @@ fn simple_eval_(
                 }
                 values.insert(node.output[0].clone(), result);
             },
+            "ReduceProd" => {
+                let input = get(&node.input[0])?;
+                let axes = get_opt(1).and_then(Result::ok);
+                let output = ops::reduce_prod::reduce_prod(node, input, axes)?;
+                values.insert(node.output[0].clone(), output);
+            },
             //https://github.com/onnx/onnx/blob/main/docs/Operators.md#ReduceSum
             // Version 13 impl
             "ReduceSum" => {
@@ -1817,36 +1875,8 @@ fn simple_eval_(
                 values.insert(node.output[0].clone(), output);
             },
             random_type @ ("RandomUniform" | "RandomNormal") => {
-                let dt: i64 = get_attr_opt(node, "dtype")?.copied().unwrap_or(1); // 1 is float
-                // type by
-                // default
-                let dtype = match DataType::try_from(dt as i32) {
-                    Ok(dt) => match dtype(dt) {
-                        Some(DType::U8 | DType::U32 | DType::I64) => {
-                            bail!(
-                                "unsupported 'dtype' value {dt:?}, only floats are allowed, for {random_type} {}",
-                                node.name
-                            )
-                        },
-                        Some(dt) => dt,
-                        None => {
-                            bail!(
-                                "unsupported 'dtype' value {dt:?} for {random_type} {}",
-                                node.name
-                            )
-                        },
-                    },
-                    Err(_) => {
-                        bail!(
-                            "unsupported 'dtype' value {dt:?} for {random_type} {}",
-                            node.name
-                        )
-                    },
-                };
-                let seed: Option<f32> = get_attr_opt(node, "seed")?.copied();
-                if seed.is_some() {
-                    bail!("seed for {random_type} is currently not supported")
-                };
+                let dtype = ops::random::parse_random_float_dtype(node, random_type, DType::F32)?;
+                ops::random::reject_random_seed(node, random_type)?;
                 let shape: Vec<usize> = get_attr::<[i64]>(node, "shape")?
                     .iter()
                     .map(|x| *x as usize)
@@ -1860,6 +1890,16 @@ fn simple_eval_(
                     let scale: f32 = get_attr_opt(node, "scale")?.copied().unwrap_or(1.0);
                     Tensor::randn(mean, scale, shape, &Device::Cpu)?.to_dtype(dtype)?
                 };
+                values.insert(node.output[0].clone(), output);
+            },
+            "RandomUniformLike" => {
+                let input = get(&node.input[0])?;
+                let output = ops::random::random_uniform_like(node, input)?;
+                values.insert(node.output[0].clone(), output);
+            },
+            "RandomNormalLike" => {
+                let input = get(&node.input[0])?;
+                let output = ops::random::random_normal_like(node, input)?;
                 values.insert(node.output[0].clone(), output);
             },
             "ArgMin" => {
@@ -2633,6 +2673,13 @@ fn simple_eval_(
 
                 values.insert(node.output[0].clone(), output);
             },
+            "ScatterElements" => {
+                let data = get(&node.input[0])?;
+                let indices = get(&node.input[1])?;
+                let updates = get(&node.input[2])?;
+                let output = ops::scatter_elements::scatter_elements(node, data, indices, updates)?;
+                values.insert(node.output[0].clone(), output);
+            },
             "ScatterND" => {
                 let data = get(&node.input[0])?;
 
@@ -2780,14 +2827,40 @@ fn simple_eval_(
             op_type => bail!("unsupported op_type {op_type} for op {node:?}"),
         }
 
-        for input in node.input.iter().filter(|input| !input.is_empty()) {
-            if let Some(count) = remaining_uses.get_mut(input.as_str()) {
-                *count -= 1;
-                if *count == 0 && !graph_outputs.contains(input.as_str()) {
-                    values.remove(input);
-                }
+        // Crane Added 20260807: detach every output this node just produced
+        // from its computation graph. `simple_eval_` is a forward-only
+        // evaluator that never calls `Tensor::backward()`, but candle's
+        // `Tensor::track_op()` is `is_variable || op.is_some()` and
+        // `BackpropOp::new1/2/3` check it transitively on their operands —
+        // so once any tensor anywhere upstream is a `Var` (the "LSTM" op
+        // above wraps its weights in one, since `candle_nn::rnn::lstm()`
+        // requires a `VarBuilder`), the taint propagates forward forever:
+        // every tensor computed from it, and everything computed from
+        // those, keeps retaining full backward-provenance for the rest of
+        // the graph. On a model whose LSTM feeds into a large downstream
+        // network (e.g. a TTS vocoder), that produces a real, deep
+        // computation graph, and dropping the final output recurses through
+        // the whole thing in one native call-stack frame per node —
+        // confirmed via gdb backtrace to overflow the stack on Kokoro
+        // synthesis. Detaching per node keeps every tensor's `Drop` O(1)
+        // regardless of what fed into it, and as a side effect lets
+        // `release_names_if_done` below actually free memory — previously
+        // an evicted name's storage could still be kept alive by a later
+        // tensor's retained op chain even after its `values` entry was
+        // removed.
+        for output_name in node.output.iter().filter(|name| !name.is_empty()) {
+            if let Some(value) = values.get_mut(output_name.as_str()) {
+                *value = value.detach();
             }
         }
+
+        release_names_if_done(
+            node.input.iter().filter(|input| !input.is_empty()).map(String::as_str),
+            &mut remaining_uses,
+            &graph_outputs,
+            &inherited_values,
+            values,
+        );
     }
     graph
         .output
@@ -2865,7 +2938,7 @@ fn broadcast_shape_from_many(shapes: &[&[usize]]) -> Result<Vec<usize>> {
 /// Extract scalar from tensors that may be wrapped in extra dimensions.
 /// Some ONNX exports use shape [1] or [1,1] where scalars are expected.
 /// Only accepts single-element tensors; multi-element tensors still fail.
-fn to_scalar_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
+pub(crate) fn to_scalar_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
     if t.rank() > 0 && t.elem_count() == 1 {
         t.flatten_all()?.i(0)?.to_scalar::<T>()
     } else {
@@ -2884,9 +2957,11 @@ fn to_vec0_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Result};
+    use std::collections::HashMap;
 
-    use super::{Value, simple_eval};
+    use candle_core::{DType, Device, Result};
+
+    use super::{Value, simple_eval, simple_eval_};
     use crate::onnx::proto::attribute_proto::AttributeType;
     use crate::onnx::proto::{AttributeProto, GraphProto, ModelProto, NodeProto, ValueInfoProto};
 
