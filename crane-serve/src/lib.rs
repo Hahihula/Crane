@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use crane_core::utils::DeviceExt;
 use tracing::info;
 
 use chat_template::ChatTemplateProcessor;

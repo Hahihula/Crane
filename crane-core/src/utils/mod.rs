@@ -24,3 +24,15 @@ pub fn select_device(force_cpu: bool) -> Result<Device> {
 pub fn cuda_is_available() -> bool {
     candle_cuda_is_available()
 }
+
+/// Adds ROCm/HIP device detection to `Device`.
+pub trait DeviceExt {
+    /// Returns `true` if this device is a ROCm/HIP device.
+    fn is_rocm(&self) -> bool;
+}
+
+impl DeviceExt for Device {
+    fn is_rocm(&self) -> bool {
+        false
+    }
+}

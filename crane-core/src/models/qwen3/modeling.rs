@@ -44,6 +44,7 @@ use candle_nn::{linear_no_bias, Linear, RmsNorm, VarBuilder};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
+use crate::utils::DeviceExt;
 use crate::models::modules::flash_attn::dispatch_flash_attn;
 use crate::models::modules::kv_cache;
 use crate::models::modules::rotary::RotaryEmbedding;

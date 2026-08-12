@@ -8,6 +8,7 @@ use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{embedding, Embedding, Linear, VarBuilder};
 
+use crate::utils::DeviceExt;
 use crate::ops::linear::{parse_ggml_dtype, quantize_linear, LinearLayer};
 // TODO(candle-transformers-removal): Generation helpers only; see CANDLE_TRANSFORMERS.md.
 use candle_transformers::generation::LogitsProcessor;

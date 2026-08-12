@@ -1,6 +1,8 @@
 use candle_core::{Result, Tensor, D};
 use candle_nn::{Activation, Module, VarBuilder};
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use crate::utils::DeviceExt;
 use crate::models::with_tracing::{linear_no_bias, Linear};
 
 /// `SwiGLU` feed-forward network with merged gate/up projection.

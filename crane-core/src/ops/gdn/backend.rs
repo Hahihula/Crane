@@ -11,6 +11,8 @@ use candle_core::{DType, IndexOp, Result, Tensor, D};
 
 use super::cache::GdnLayerCache;
 use super::config::GdnDims;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use crate::utils::DeviceExt;
 
 // ─────────────────────────────────────────────────────────────────────
 //  Elementwise helpers
