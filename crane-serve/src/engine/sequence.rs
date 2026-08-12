@@ -54,6 +54,8 @@ pub struct Sequence {
     pub max_tokens: usize,
     pub eos_token_id: Vec<u32>,
     pub repetition_penalty: f32,
+    pub frequency_penalty: f32,
+    pub presence_penalty: f32,
     pub repeat_last_n: usize,
 
     // ── response channel ──
@@ -151,6 +153,8 @@ mod tests {
             max_tokens,
             eos_token_id: vec![eos_token_id],
             repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             repeat_last_n: 64,
             response_tx: tx,
         }
