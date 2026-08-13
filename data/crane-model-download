@@ -132,6 +132,12 @@ MODELS = {
         "kind": "tts",
         "description": "Kokoro 82M, ONNX, 55 voices / 10 languages (Apache-2.0)",
     },
+    "kokoro-de": {
+        "repo_id": "crane-local-ai/Kokoro-82M-v1.0-German-ONNX",
+        "dirname": "Kokoro-82M-v1.0-German-ONNX",
+        "kind": "tts",
+        "description": "Kokoro 82M, ONNX, German-only fine-tune, 1 voice (Apache-2.0)",
+    },
     "minicpm5-1b": {
         "repo_id": "openbmb/MiniCPM5-1B",
         "dirname": "MiniCPM5-1B",

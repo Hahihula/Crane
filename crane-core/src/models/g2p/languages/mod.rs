@@ -10,6 +10,7 @@
 use anyhow::Result;
 
 use english::EnglishG2p;
+use german::GermanG2p;
 
 pub mod english;
 mod english_numerals;
@@ -23,7 +24,7 @@ mod german_rules;
 ///
 /// Grows as languages are implemented, per the rollout order in the G2P
 /// design: English, then German, then French.
-pub const SUPPORTED_LANGUAGES: &[&str] = &["en_us"];
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en_us", "de"];
 
 /// One language's grapheme-to-phoneme engine.
 ///
@@ -40,8 +41,12 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &["en_us"];
 /// parallelism.
 #[derive(Debug)]
 pub enum LanguageG2p {
-    /// English (`en_us`) engine.
-    English(EnglishG2p),
+    /// English (`en_us`) engine. Boxed: `EnglishG2p` (lexicon + OOV model +
+    /// LRU cache) is far larger than `GermanG2p`, and an unboxed variant
+    /// would size every `LanguageG2p` value to the largest variant.
+    English(Box<EnglishG2p>),
+    /// German (`de`) engine.
+    German(GermanG2p),
 }
 
 impl LanguageG2p {
@@ -54,6 +59,7 @@ impl LanguageG2p {
     pub fn text_to_ipa(&self, text: &str) -> Result<String> {
         match self {
             Self::English(engine) => engine.text_to_ipa(text),
+            Self::German(engine) => engine.text_to_ipa(text),
         }
     }
 
@@ -62,6 +68,7 @@ impl LanguageG2p {
     pub fn language(&self) -> &'static str {
         match self {
             Self::English(_) => "en_us",
+            Self::German(_) => "de",
         }
     }
 }
@@ -77,22 +84,36 @@ mod tests {
         assert_send_sync::<LanguageG2p>();
     }
 
-    fn test_language() -> LanguageG2p {
-        LanguageG2p::English(EnglishG2p::new("hello\thəlˈoʊ\n", None, false).unwrap())
+    fn test_english_language() -> LanguageG2p {
+        LanguageG2p::English(Box::new(EnglishG2p::new("hello\thəlˈoʊ\n", None, false).unwrap()))
+    }
+
+    fn test_german_language() -> LanguageG2p {
+        LanguageG2p::German(GermanG2p::new("Haus\thaʊ̯s\n").unwrap())
     }
 
     #[test]
     fn english_language_identifier() {
-        assert_eq!(test_language().language(), "en_us");
+        assert_eq!(test_english_language().language(), "en_us");
     }
 
     #[test]
     fn english_text_to_ipa_delegates_to_engine() {
-        assert_eq!(test_language().text_to_ipa("hello").unwrap(), "həlˈoʊ");
+        assert_eq!(test_english_language().text_to_ipa("hello").unwrap(), "həlˈoʊ");
     }
 
     #[test]
-    fn supported_languages_lists_english() {
-        assert_eq!(SUPPORTED_LANGUAGES, &["en_us"]);
+    fn german_language_identifier() {
+        assert_eq!(test_german_language().language(), "de");
+    }
+
+    #[test]
+    fn german_text_to_ipa_delegates_to_engine() {
+        assert_eq!(test_german_language().text_to_ipa("Haus").unwrap(), "haʊ̯s");
+    }
+
+    #[test]
+    fn supported_languages_lists_english_and_german() {
+        assert_eq!(SUPPORTED_LANGUAGES, &["en_us", "de"]);
     }
 }

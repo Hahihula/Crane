@@ -21,7 +21,7 @@ use crate::generation::SpeechOptions;
 use crate::models::g2p::Phonemizer;
 use crate::models::g2p::ipa_postprocess::IpaNormalizer;
 
-use super::ipa::build_kokoro_normalizer;
+use super::ipa::{build_kokoro_normalizer, fix_post_vocalic_rhotic, reposition_stress_before_vowel};
 
 /// Kokoro always outputs mono PCM at 24 kHz.
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -525,6 +525,21 @@ impl Model {
 
         let language = resolve_language(language);
         let ipa = phonemizer.text_to_ipa(text, language)?;
+        // German's G2P dictionary places stress before a syllable's whole
+        // onset cluster (e.g. "wäre" -> "ˈvɛːʁə"), not before the vowel like
+        // Kokoro's training data expects (see `reposition_stress_before_vowel`'s
+        // doc comment and `MOONSHINE_DE.md` at the repo root) — reposition it
+        // before handing the phoneme string to Kokoro's vocab normalizer.
+        // It also uses the uvular fricative `ʁ` unconditionally for every
+        // orthographic "r", where Kokoro's training data (espeak-ng) uses
+        // context-dependent allophones instead (see `fix_post_vocalic_rhotic`'s
+        // doc comment and `G2P_FIX.md`) — fix that up too.
+        let ipa = if language == "de" {
+            let ipa = reposition_stress_before_vowel(&ipa);
+            fix_post_vocalic_rhotic(&ipa)
+        } else {
+            ipa
+        };
         let normalizer = self.normalizer_for(language)?;
         let phonemes = normalizer.normalize(&ipa);
 
@@ -901,7 +916,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", dict_path.display()));
         let english = EnglishG2p::new(&dict_tsv, None, false).expect("build EnglishG2p");
         let mut phonemizer = MoonshineG2p::new();
-        phonemizer.add_language(LanguageG2p::English(english));
+        phonemizer.add_language(LanguageG2p::English(Box::new(english)));
 
         let mut model = Model::new(&kokoro_dir, &Device::Cpu, &DType::F32).unwrap();
         let (waveform, sample_rate) = model
@@ -952,7 +967,7 @@ mod tests {
         let dict_tsv = std::fs::read_to_string(&dict_path).unwrap();
         let english = EnglishG2p::new(&dict_tsv, None, false).unwrap();
         let mut phonemizer = MoonshineG2p::new();
-        phonemizer.add_language(LanguageG2p::English(english));
+        phonemizer.add_language(LanguageG2p::English(Box::new(english)));
 
         let mut model = Model::new(&kokoro_dir, &Device::Cpu, &DType::F32).unwrap();
         let (waveform, sample_rate) = model

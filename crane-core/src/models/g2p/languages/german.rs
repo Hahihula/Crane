@@ -6,9 +6,8 @@
 //! decomposition (see [`german_compound`](super::german_compound)) for a
 //! whole-word miss, then hand-written letter-to-sound rules (see
 //! [`german_rules`](super::german_rules)) as the final fallback when neither
-//! finds anything. `GermanG2p` is not yet reachable through
-//! [`LanguageG2p`](super::LanguageG2p) — a `LanguageG2p::German` variant
-//! lands in a later step.
+//! finds anything. Reachable through
+//! [`LanguageG2p::German`](super::LanguageG2p::German).
 
 use anyhow::Result;
 
@@ -19,8 +18,9 @@ use crate::models::g2p::text_normalize::{split_text_to_words, trim_edge_punctuat
 use super::german_numerals::GermanNumerals;
 
 /// German grapheme-to-phoneme engine: case-cascading lexicon lookup, then
-/// hand-written rule fallback (rules not yet wired in — see the module
-/// docs).
+/// compound-word decomposition, then hand-written letter-to-sound rules as
+/// the final fallback — see the module docs for the full three-tier
+/// pipeline.
 ///
 /// Unlike English's engine, there is no out-of-vocabulary model tier for
 /// German and therefore no interior mutability: the lexicon is immutable
