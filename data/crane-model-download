@@ -205,9 +205,27 @@ MODELS = {
         },
         "description": "VoxCPM2, tokenizer-free diffusion TTS, voice cloning + prompt cache (Apache-2.0)",
     },
+    "muscriptor-small": {
+        "repo_id": "MuScriptor/muscriptor-small",
+        "dirname": "muscriptor-small",
+        "kind": "amt",
+        "description": "MuScriptor small (~100M), audio-to-MIDI transcription, fastest/lightest variant (CC-BY-NC-4.0, gated)",
+    },
+    "muscriptor-medium": {
+        "repo_id": "MuScriptor/muscriptor-medium",
+        "dirname": "muscriptor-medium",
+        "kind": "amt",
+        "description": "MuScriptor medium (~300M), audio-to-MIDI transcription, quality/speed trade-off (CC-BY-NC-4.0, gated)",
+    },
+    "muscriptor-large": {
+        "repo_id": "MuScriptor/muscriptor-large",
+        "dirname": "muscriptor-large",
+        "kind": "amt",
+        "description": "MuScriptor large (~1.3B), audio-to-MIDI transcription, best quality (CC-BY-NC-4.0, gated)",
+    },
 }
 
-_VALID_KINDS = ("tts", "asr", "vad", "llm", "g2p", "vlm", "omni")
+_VALID_KINDS = ("tts", "asr", "vad", "llm", "g2p", "vlm", "omni", "amt")
 _REQUIRED_KEYS = ("repo_id", "dirname", "kind", "description")
 for _key, _info in MODELS.items():
     _missing = [k for k in _REQUIRED_KEYS if k not in _info]
@@ -332,7 +350,17 @@ def download_model(model_key, path, token, quant):
             )
         sys.exit(1)
 
-    print(f"\nDone. Use with: crane-serve --model-path {target}")
+    if info["kind"] == "amt":
+        # MuScriptor isn't served through crane-serve — it's a standalone
+        # CLI, so the generic crane-serve hint below would be actively
+        # wrong here rather than just imprecise (unlike e.g. g2p/vad, which
+        # are auxiliary assets crane-serve's own pipelines do load).
+        print(
+            f"\nDone. Use with: cargo run -p crane-examples --release --features cuda "
+            f"--bin muscriptor_transcribe -- --model-dir {target} --transcribe audio.wav"
+        )
+    else:
+        print(f"\nDone. Use with: crane-serve --model-path {target}")
 
 
 def main():

@@ -36,6 +36,7 @@ A high-performance inference framework leveraging Rust's Candle for maximum spee
 - [x] Silero VAD
 - [x] 🎙️ Qwen3-TTS (12Hz, 24kHz, 16-codebook RVQGAN + native Candle decoder, voice cloning)
 - [x] 🎙️ [Voxtral-4B-TTS](https://arxiv.org/abs/2603.25551) (12.5Hz, 24kHz, autoregressive + flow-matching, 20 preset voices across 10 languages)
+- [x] 🎼 [MuScriptor](https://huggingface.co/MuScriptor) (small / medium / large — automatic music transcription, audio → multi-track MIDI)
 - [ ] ~~🎙️ TTS: [Spark-TTS](https://github.com/SparkAudio/Spark-TTS) | [Orpheus-TTS](https://github.com/canopyai/Orpheus-TTS) (WIP)~~
 
 
@@ -79,6 +80,7 @@ We include:
 ## 🔥 Updates
 
 - **`2026.08.16`**: 🧠 **Qwen 3.8 / Qwen 3.6 (27B) support + flexible thinking control.** Both declare `model_type: "qwen3_5"` and convert to GGUF as `qwen35`, so they are the Qwen 3.5 architecture scaled up (64 layers, 24 q / 4 KV heads, 48 GDN value heads, untied `lm_head`) and need **no new modeling code** — every difference is a config value. Thinking is now controllable per request via `chat_template_kwargs: {"enable_thinking": …, "reasoning_effort": "low|medium|xhigh"}` (or OpenAI's top-level `reasoning_effort`), and the `<think>` scratchpad is separated out of `content` into **`reasoning_content`**, streaming included. 🗜️ GGUF embedding tables now stay quantized and dequantize only the rows a forward pass gathers, instead of expanding all 248320 of them at load: **1772 MiB saved** on Qwen 3.8-27B Q4_K_M (peak 22007 → 20235 MiB), bit-exact on untied checkpoints (prefill logits cosine `1.000000000`). Qwen 3.8-27B Q4_K_M runs text-only on a single 24 GB RTX 3090.
+- **`2026.08.15`**: 🎼 **MuScriptor support** — automatic music transcription, audio → multi-track Standard MIDI File. Decoder-only transformer with a mel-spectrogram prefix conditioner (small/medium/large, [MuScriptor org on HuggingFace](https://huggingface.co/MuScriptor)); transcribes audio of any length by chunking into 5 s windows with tie-prologue forcing across chunk boundaries so notes sustained across a boundary keep the right instrument. Greedy or sampled (temperature/top-k/top-p) decoding. See [the MuScriptor section](#muscriptor-automatic-music-transcription) below.
 - **`2026.08.06`**: 🗣️ **Kokoro-82M TTS support** — from-scratch Rust G2P + `candle-onnx` synthesis pipeline, currently English only, wired into `/v1/audio/speech` in crane-serve. Benchmarked against Moonshine-TTS's reference C++ implementation on the same Kokoro-82M ONNX model: **1.6-4.3x faster synthesis** across short/medium/long text.
 - **`2026.08.02`**: ⏱️ Decode is dispatch-bound, not kernel-bound — and now isn't. New `CRANE_PROF=1` forward-pass profiler measures *submission* time against wall-clock time after a device sync, which `rocm-smi`'s busy counter cannot distinguish. It showed the CPU spending **21.8 ms of a 26.9 ms token** merely enqueueing ~2000 kernel launches. Collapsing `Qwen35RmsNorm` and the GDN gated norm into single fused `rms_norm` launches, rewriting the Q/K L2 norm as one (`x/√(Σx²+ε) ≡ rms_norm(x, 1/√K, ε/K)` — an identity, not an approximation), and hoisting `-exp(A_log)`/`dt_bias` to load time cut submission to **6.9 ms**; decode is now GPU-bound. On an RX 7800 XT with Qwen3.5-2B-Q8_0: decode **35.7 → 63.0 t/s** @ depth 0, **31.7 → 55.6** @ 2048, **28.8 → 49.2** @ 4096; prefill **2257 → 2726 t/s**. Gap to llama.cpp: 3.0× → ~1.7×.
 - **`2026.08.01`**: 🔴 AMD ROCm kernels — Crane's own `kernels/cuda/*.cu` now run on AMD too (the ROCm build compiles them with `hipcc` on first use and caches the code object), so the fused GDN recurrence, GPU top-k sampling and `fused_silu_mul` are no longer CUDA-only. The causal Conv1D also became `kernel` shifted multiply-accumulates instead of one windowed reduction per timestep, which helps every backend. Qwen 3.5's GGUF loader also stops forcing F32 side tensors (embeddings, norms, attention scores) on ROCm — F16 like Metal. On an RX 7800 XT with Qwen3.5-2B-Q8_0: prefill **183 → ~1600 t/s**, decode @ depth 2048 **15.4 → 30.6 t/s**, and peak VRAM on a 3800-token prompt drops from 99% to 69% of 16 GB.
@@ -535,6 +537,75 @@ and load the same checkpoint directory as a plain text model instead.
 `Qwen3_5TextModel` only ever reads `language_model.*` tensors, so the vision
 weights are never even loaded into memory; this path also unlocks `--quant`,
 which is not available on the VLM load path.
+
+### MuScriptor (Automatic Music Transcription)
+
+[MuScriptor](https://huggingface.co/MuScriptor) is a decoder-only
+transformer that transcribes a music recording (any genre, multiple
+simultaneous instruments) into a multi-track Standard MIDI File. Audio of
+any length is supported — it's split into consecutive 5-second chunks, with
+each chunk's still-sounding notes teacher-forced into the next chunk's
+opening tokens (*tie-prologue forcing*) so a note straddling a chunk
+boundary keeps the same instrument instead of the model re-guessing it.
+Decoding is greedy by default, or sampled via `--use-sampling` /
+`--temperature` / `--top-k` / `--top-p`. Runs on CPU, CUDA, and (architecturally
+— no Apple hardware in this repo's CI to confirm on) Metal.
+
+**Weights** are gated on HuggingFace (CC BY-NC 4.0, non-commercial) — accept
+each variant's license on its model page first, then download with either
+the bundled downloader or `huggingface-cli` directly:
+
+```bash
+# Any one variant — pick small/medium/large for your speed/quality/VRAM budget.
+./data/crane-model-download --model muscriptor-small --path ~/models --token hf_...
+# or, without the helper script:
+huggingface-cli download MuScriptor/muscriptor-small --local-dir ~/models/muscriptor-small
+```
+
+| Variant  | Params | HF repo |
+|----------|-------:|---------|
+| `small`  | ≈100M  | [MuScriptor/muscriptor-small](https://huggingface.co/MuScriptor/muscriptor-small) |
+| `medium` | ≈300M  | [MuScriptor/muscriptor-medium](https://huggingface.co/MuScriptor/muscriptor-medium) |
+| `large`  | ≈1.3B  | [MuScriptor/muscriptor-large](https://huggingface.co/MuScriptor/muscriptor-large) |
+
+**Run:**
+
+```bash
+cargo run -p crane-examples --release --features cuda --bin muscriptor_transcribe -- \
+  --model-dir ~/models/amt/muscriptor-small \
+  --transcribe audio.wav \
+  --output out.mid
+# --model-dir above matches crane-model-download's <path>/<kind>/<dirname>
+# layout; point it at wherever you actually downloaded the weights instead
+# (e.g. ~/models/muscriptor-small if you used huggingface-cli directly).
+# --duration omitted transcribes to the end of the file; --instruments
+# acoustic_piano,acoustic_guitar hard-masks decoding to only those groups.
+```
+
+**Example — [Toccata and Fugue in D minor, BWV 565 (J.S. Bach)](data/audio/toccata-amp-fugue-js-bach.mp3)**,
+48 s, transcribed end-to-end with each published variant (no `--duration`,
+default greedy decoding):
+
+| Variant | Output MIDI | Time (RTX 3090) | Peak VRAM |
+|---------|-------------|-----------------:|----------:|
+| `small` | [muscriptor_toccata_small.mid](data/audio/output/muscriptor_toccata_small.mid) | ≈ 5 s | ≈ 1 GB |
+| `large` | [muscriptor_toccata_large.mid](data/audio/output/muscriptor_toccata_large.mid) | ≈ 35-40 s | ≈ 7 GB |
+
+Both MIDI files download as-is (GitHub doesn't render an inline MIDI
+player) — open with any DAW, `fluidsynth`, or a browser-based player like
+<https://signal.vercel.app>. VRAM figures are the delta over an idle GPU
+(f32 throughout — nothing here is quantized yet); times are wall-clock for
+the whole 48 s / 10-chunk piece, F32 compute on CUDA. Small is comfortable
+on essentially any GPU (or CPU, just much slower — see the module README's
+performance notes); large's ≈7 GB peak is comfortable on a 12 GB card and
+should fit an 8 GB one too, though with little headroom left for anything
+else sharing that GPU — both are well inside this repo's usual 24 GB
+RTX 3090 target.
+
+See [`crane-core/src/models/muscriptor/README.md`](crane-core/src/models/muscriptor/README.md)
+for the architecture, tokenizer, and conditioning details, and what's
+still not implemented (classifier-free guidance, beam search, f16/bf16
+compute).
 
 Now you can run LLM extremly fast (about 6x faster than vanilla transformers on M1)!
 

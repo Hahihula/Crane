@@ -6,6 +6,7 @@ pub mod kokoro_tts;
 #[cfg(feature = "onnx")]
 pub mod moonshine_asr;
 pub mod orpheus;
+pub mod muscriptor;
 pub mod paddleocr_vl;
 #[cfg(feature = "onnx")]
 pub mod paddleocr_v6;
