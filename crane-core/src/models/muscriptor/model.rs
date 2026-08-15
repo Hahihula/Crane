@@ -27,8 +27,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use candle_core::quantized::GgmlDType;
 use candle_core::{DType, D, Device, Module, Tensor};
-use candle_nn::{embedding, layer_norm, linear_no_bias, Embedding, LayerNorm, Linear, VarBuilder};
+use candle_nn::{embedding, layer_norm, Embedding, LayerNorm, VarBuilder};
 
 use crate::models::muscriptor::config::{VariantConfig, SAMPLE_RATE, SEGMENT_DURATION};
 use crate::models::muscriptor::conditioner::{
@@ -41,6 +42,7 @@ use crate::models::muscriptor::mt3::{
     EOS_ID,
 };
 use crate::models::muscriptor::transformer::{StreamingTransformer, TransformerState};
+use crate::ops::linear::LinearLayer;
 
 // ── Public note/event stream types ────────────────────────────────────
 
@@ -149,7 +151,7 @@ type ConditionTensors = std::collections::HashMap<String, (Tensor, Tensor)>;
 pub struct LMModel {
     emb: ScaledEmbedding,
     out_norm: LayerNorm,
-    linear: Linear,
+    linear: LinearLayer,
     transformer: StreamingTransformer,
     /// LM head output dim. Always equals the published `card` (1393 for
     /// small, 1395 for medium/large). For medium/large the trailing
@@ -158,14 +160,25 @@ pub struct LMModel {
     /// cap used in the keep-mask.
     card: usize,
     embed_dim: usize,
+    /// Cached off `vb.device()` at construction — `generate()` needs it to
+    /// build the BOS/decode-step tensors, and `LinearLayer` (unlike the
+    /// `candle_nn::Linear` it replaced for quantization support) doesn't
+    /// expose a `.weight()` to read it back off.
+    device: Device,
 }
 
 impl LMModel {
-    pub fn new(vb: VarBuilder, config: &VariantConfig) -> Result<Self> {
+    /// `quant` in-situ quantizes every big `Linear` (attention in/out
+    /// projections, FFN, LM head) to the given GGML level; embeddings and
+    /// norms always stay in the surrounding compute dtype (matching the
+    /// Qwen 3.5 ISQ convention — quantizing those would only add memory,
+    /// not save it, since lookups need the dequantized values anyway).
+    pub fn new(vb: VarBuilder, config: &VariantConfig, quant: Option<GgmlDType>) -> Result<Self> {
+        let device = vb.device().clone();
         let emb = ScaledEmbedding::new(config.card + 1, config.dim, vb.pp("emb"))?;
-        let transformer = StreamingTransformer::new(vb.pp("transformer"), config)?;
+        let transformer = StreamingTransformer::new(vb.pp("transformer"), config, quant)?;
         let out_norm = layer_norm(config.dim, 1e-5, vb.pp("out_norm"))?;
-        let linear = linear_no_bias(config.dim, config.card, vb.pp("linear"))?;
+        let linear = crate::ops::linear::linear_layer(config.dim, config.card, vb.pp("linear"), quant)?;
         Ok(Self {
             emb,
             out_norm,
@@ -173,6 +186,7 @@ impl LMModel {
             transformer,
             card: config.card,
             embed_dim: config.dim,
+            device,
         })
     }
 
@@ -254,7 +268,7 @@ impl LMModel {
         forbidden_tokens: Option<&[u32]>,
         state: &mut TransformerState,
     ) -> Result<Vec<u32>> {
-        let device = self.linear.weight().device().clone();
+        let device = self.device.clone();
         let card = self.card;
         let vocab_size = crate::models::muscriptor::mt3::CARD;
 
@@ -355,7 +369,32 @@ pub struct Model {
 
 impl Model {
     /// Load `model.safetensors` + `config.json` from `model_dir`.
+    /// `dtype` is the compute dtype for the transformer only — see
+    /// [`Self::new_with_options`].
     pub fn new(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
+        Self::new_with_options(model_dir, device, dtype, None)
+    }
+
+    /// `quant` in-situ quantizes the transformer's linear projections
+    /// (`--quant q4k|q8_0|…`, same levels as Qwen 3.5's ISQ); `None` keeps
+    /// them in `dtype`.
+    ///
+    /// `dtype` governs the transformer (embedding table, attention/FFN
+    /// projections, LM head) — pass `F16`/`BF16` to roughly halve its VRAM
+    /// even without `quant`, or combine both for a bigger cut. The
+    /// conditioning pipeline (mel-spectrogram projection, class embeddings)
+    /// **always loads and computes in F32 regardless of `dtype`** — log-mel
+    /// of quiet passages underflows in fp16, and it's a tiny fraction of
+    /// total weights (≈1.6M params) so there's nothing worth saving there
+    /// anyway. `LMModel::forward` casts the conditioner's F32 output to the
+    /// transformer's dtype right before splicing it in, so this costs
+    /// nothing at the seam.
+    pub fn new_with_options(
+        model_dir: &str,
+        device: &Device,
+        dtype: DType,
+        quant: Option<GgmlDType>,
+    ) -> Result<Self> {
         let dir = Path::new(model_dir);
         let cfg_bytes = std::fs::read(dir.join("config.json"))
             .with_context(|| format!("read {}/config.json", model_dir))?;
@@ -383,9 +422,11 @@ impl Model {
             );
         }
 
+        // Kept in the checkpoint's native dtype here (F32 for every
+        // published variant) — dtype conversion happens per-destination
+        // below (transformer vs. always-F32 conditioners), not here.
         let mut tensors: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
         for (name, t) in raw {
-            let t = t.to_dtype(dtype)?;
             let mut new_name = name;
             if let Some(rest) = new_name.strip_prefix("emb.0.") {
                 new_name = format!("emb.{rest}");
@@ -397,21 +438,37 @@ impl Model {
 
         // Pull out the non-parameter buffers the VarBuilder can't
         // reach through `pp(...)` paths before handing the rest off.
+        // Forced to F32 regardless of the checkpoint's on-disk dtype or
+        // the caller's requested `dtype` — these feed the conditioners,
+        // which must always run in F32 (see `new_with_options` doc).
         let fb_name = "condition_provider.conditioners.self_wav.mel_spec_transform.mel_scale.fb";
         let filterbank = tensors
             .remove(fb_name)
             .ok_or_else(|| anyhow::anyhow!("missing tensor {fb_name}"))?
-            .to_dtype(dtype)?;
+            .to_dtype(DType::F32)?;
         let lg_name = "condition_provider.conditioners.instrument_group.embed.weight";
         let lg_emb = tensors
             .remove(lg_name)
             .ok_or_else(|| anyhow::anyhow!("missing tensor {lg_name}"))?
-            .to_dtype(dtype)?;
+            .to_dtype(DType::F32)?;
         let ds_name = "condition_provider.conditioners.dataset_name.embed.weight";
         let ds_emb = tensors
             .remove(ds_name)
             .ok_or_else(|| anyhow::anyhow!("missing tensor {ds_name}"))?
-            .to_dtype(dtype)?;
+            .to_dtype(DType::F32)?;
+
+        // Two views over the same (cheaply `Tensor::clone`d — Arc bump, no
+        // data copy) weight map: `vb` casts to the transformer's compute
+        // `dtype` on fetch, `vb_f32` always casts to F32. Only the mel
+        // conditioner's `output_proj.{weight,bias}` are fetched through
+        // `vb_f32` (everything else the conditioners need was already
+        // pulled out above as raw F32 tensors); every other key goes
+        // through `vb`. `VarBuilder::from_tensors`' backend forces every
+        // fetched tensor to the builder's own configured dtype regardless
+        // of what's actually stored in the map, so this split — not a
+        // per-tensor dtype in the map — is what keeps the conditioner path
+        // off the transformer's (possibly quantized/half-precision) dtype.
+        let vb_f32 = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
         let vb = VarBuilder::from_tensors(tensors, dtype, device);
 
         let mut mel = std::collections::HashMap::new();
@@ -421,8 +478,8 @@ impl Model {
             Arc::new(MelSpectrogramConditioner::new(
                 config.dim,
                 device,
-                dtype,
-                vb.pp("condition_provider.conditioners.self_wav"),
+                DType::F32,
+                vb_f32.pp("condition_provider.conditioners.self_wav"),
                 filterbank,
             )?),
         );
@@ -444,7 +501,7 @@ impl Model {
         );
         let conditioner = Arc::new(ConditioningProvider::new(mel, class));
 
-        let inner = LMModel::new(vb, &config)?;
+        let inner = LMModel::new(vb, &config, quant)?;
         Ok(Self {
             inner,
             conditioner,
@@ -560,6 +617,18 @@ impl TranscriptionModel {
 
     pub fn load(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
         let m = Model::new(model_dir, device, dtype)?;
+        Ok(Self::new(m))
+    }
+
+    /// `quant` in-situ quantizes the transformer's linear projections —
+    /// see [`Model::new_with_options`].
+    pub fn load_with_options(
+        model_dir: &str,
+        device: &Device,
+        dtype: DType,
+        quant: Option<GgmlDType>,
+    ) -> Result<Self> {
+        let m = Model::new_with_options(model_dir, device, dtype, quant)?;
         Ok(Self::new(m))
     }
 

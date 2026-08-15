@@ -131,19 +131,59 @@ masking.
   `LayerState`/cache plumbing rather than a local tweak.
 * **Beam search** — greedy or sampled (temperature/top-k/top-p, via
   `candle_transformers::generation::LogitsProcessor`) decoding only.
-* **f16/bf16 compute** — the transformer path can in principle run in
-  half precision on CUDA/Metal (conditioners must stay fp32 — log-mel
-  of quiet passages underflows in fp16), but nothing wires a `--dtype`
-  flag through yet; the CLI hardcodes fp32.
+* **Dedicated int8/int4 KV-cache quantization** (the `CRANE_KV_QUANT`
+  scheme Qwen 3.5 has). Not implemented because it isn't the actual VRAM
+  driver here: weights dominate (≈5.1 GB of `large`'s ≈7.1 GB f32 peak),
+  and `--dtype f16` already halves the KV cache for free as a side effect
+  of the transformer's compute dtype — see below.
 
 None of these change the architecture; each is a plausible follow-up.
 
-## Performance notes (f32)
+## Precision / quantization
 
-* CPU: small (100M) model ≈ 7 minutes per 5-second chunk on a single
-  thread (no fused SDPA). Large (1.3B) is 30+ minutes per chunk.
-* CUDA (RTX 3090): small ≈ 0.5 s/chunk, large ≈ 3 s/chunk — a 48 s
-  piece (10 chunks) transcribes in ≈ 5 s (small) / ≈ 33 s (large).
+`Model::new_with_options(path, device, dtype, quant)` — the transformer
+(embedding table, attention/FFN projections, LM head, and therefore the KV
+cache, which is allocated at `dtype`) follows `dtype`; `quant`
+additionally in-situ-quantizes every big `Linear` to a GGML level (same
+levels as Qwen 3.5's `--quant`: `q4_0`, `q8_0`, `q4k`, `q6k`, …), stacking
+with `dtype`. The mel-spectrogram and class-embedding conditioners
+**always load and compute in F32 regardless of `dtype`/`quant`** — the
+conditioning pipeline is < 2M params either way, nothing worth quantizing,
+and log-mel of quiet passages genuinely underflows in fp16.
+`LMModel::forward` casts the conditioner's F32 output to the transformer's
+dtype right at the splice point, so this costs nothing at the seam.
+
+CLI: `--dtype f32|f16|bf16` (default `f32`) and `--quant q4k|q8_0|…`
+(default: unset, i.e. `dtype` precision).
+
+Measured on the RTX 3090, `large`, the 48 s / 10-chunk Toccata (see the
+root README's MuScriptor section for the exact command and output files):
+
+| Config             | Peak VRAM | Time     |
+|---------------------|----------:|---------:|
+| f32 (default)       |   ≈7.1 GB |   ≈27 s  |
+| f16                 |   ≈3.9 GB |   ≈24 s  |
+| f16 + `q4k`         |   ≈2.2 GB |   ≈51 s  |
+
+`--quant` trades VRAM for time, not just precision: `QMatMul`'s forward
+casts to F32, does the dequantized matmul, casts back — worthwhile
+bandwidth savings at prefill-sized batches, but at this model's
+single-token (`T_q == 1`) decode steps the per-step dequant/cast overhead
+dominates and generation gets *slower*, not faster (matches this repo's
+general decode-is-dispatch-bound finding for hybrid/quantized models — see
+the root README's `2026.08.02` update). Reach for `--quant` when VRAM is
+the hard constraint and you can tolerate the extra wall-clock; reach for
+plain `--dtype f16` when it isn't (smaller *and* mildly faster, no
+extra overhead).
+
+## Performance notes
+
+* CPU (f32): small (100M) model ≈ 7 minutes per 5-second chunk on a
+  single thread (no fused SDPA). Large (1.3B) is 30+ minutes per chunk.
+* CUDA (RTX 3090, f32): small ≈ 0.5 s/chunk, large ≈ 2.5-3 s/chunk — the
+  48 s / 10-chunk Toccata transcribes in ≈ 5 s (small) / ≈ 27-40 s
+  (large; run-to-run variance is real — see below). See the precision
+  table above for `--dtype`/`--quant` deltas.
 * Metal: not runtime-verified (no Apple hardware in this repo's dev
   environment), but the module has no CUDA-specific code paths — every
   op used (`slice_set`, `where_cond`, `matmul`, `softmax_last_dim`,
@@ -155,6 +195,22 @@ None of these change the architecture; each is a plausible follow-up.
   non-Apple target (`compile_error!` from the crate itself) — that's
   an Apple-toolchain requirement common to every model in this repo,
   not something specific to MuScriptor.
+* **VRAM does not grow with input length.** Each 5 s chunk gets an
+  independent forward pass with a freshly-allocated, fixed-size KV cache
+  (`prepend_total + 1 + max_gen_len` rows — constant across chunks,
+  since every chunk padded to `SEGMENT_DURATION` has ~the same mel-frame
+  count); nothing accumulates across chunks except the tiny open-notes
+  tracker. Verified by watching `nvidia-smi` per-process VRAM over a
+  live 4+ minute `large` transcription of a real ~4 minute song: flat at
+  ~7.1 GB the entire run, no upward trend. Wall-clock time *does* scale
+  linearly with length (more chunks, same per-chunk cost), which is the
+  expected, unavoidable kind of "grows with length."
+* **Greedy decoding is not bit-reproducible run-to-run on CUDA.**
+  Floating-point reduction order in CUDA kernels isn't fixed, so tiny
+  numerical differences between runs can flip an argmax tie at some
+  step deep in a ~2000-token chunk and cascade into a different (still
+  valid) transcription. Expect this, not a bug, when diffing two runs
+  of the same config.
 
 ## Layout
 

@@ -6,11 +6,10 @@
 //!   using a per-batch running offset counter so a decode step only adds
 //!   position `offset + [0]` before projection.
 //! * The KV cache is a [`LayerState`] holding one full K and one full V
-//!   tensor (rebuilt with `Tensor::cat` on each step; not in-place yet).
-//!   On a single-stream decode at the model's published sizes, the
-//!   `O(prefix_len)` cat cost is small relative to the actual attention
-//!   matmul, so the simpler logic wins over the in-place `slice_set`
-//!   dance in `models::modules::kv_cache`.
+//!   tensor, pre-allocated to `max_seq_len` and written in place via
+//!   `slice_set` (the same pattern as `models::modules::kv_cache`) — an
+//!   earlier `Tensor::cat`-per-step version grew the cache without bound
+//!   and both corrupted decoding and OOM'd at large `max_gen_len`.
 //! * Attention is bottom-right aligned. Two fast paths hit the simple
 //!   matmul/softmax kernel: `T_q == 1` (decode, no mask needed) and
 //!   `T_q == T_k` (prefill, full causal).
@@ -19,11 +18,13 @@
 //! * Feed-forward uses GELU.
 //! * Pre-norm LayerNorm, eps = `1e-5`.
 
+use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::layer_norm::LayerNorm;
-use candle_nn::{linear_no_bias, Linear, VarBuilder};
+use candle_nn::{Linear, VarBuilder};
 
 use crate::models::muscriptor::config::VariantConfig;
+use crate::ops::linear::{linear_layer, quantize_linear, LinearLayer};
 
 // ── Sinusoidal positions ────────────────────────────────────────────────
 
@@ -105,26 +106,33 @@ struct StreamingMultiheadAttention {
     /// `[3 * E, E]` projection — stored under the flattened key
     /// `in_proj_weight` in the upstream checkpoints (matches the
     /// upstream's `nn.Linear(..., bias=False).weight` exposed via
-    /// `weight` then aliased in `state_dict`). Pulled as a raw tensor,
-    /// not via `linear_no_bias`, because the key isn't `in_proj/weight`.
-    in_proj_weight: Tensor,
-    out_proj: Linear,
+    /// `weight` then aliased in `state_dict`). Fetched as a raw tensor and
+    /// wrapped in a bias-free `Linear` (not via `linear_layer`/
+    /// `linear_no_bias`'s `vb.pp("weight")` convention), because the key
+    /// isn't nested under `in_proj/weight`.
+    in_proj: LinearLayer,
+    out_proj: LinearLayer,
     num_heads: usize,
     head_dim: usize,
     embed_dim: usize,
 }
 
 impl StreamingMultiheadAttention {
-    fn new(vb: VarBuilder, config: &VariantConfig) -> Result<Self> {
+    fn new(vb: VarBuilder, config: &VariantConfig, quant: Option<GgmlDType>) -> Result<Self> {
         let embed_dim = config.dim;
         let head_dim = config.head_dim();
         let num_heads = config.num_heads;
         let in_proj_weight = vb
             .get((3 * embed_dim, embed_dim), "in_proj_weight")?
             .contiguous()?;
-        let out_proj = linear_no_bias(embed_dim, embed_dim, vb.pp("out_proj"))?;
+        let in_proj = Linear::new(in_proj_weight, None);
+        let in_proj = match quant {
+            Some(dt) => quantize_linear(in_proj, dt)?,
+            None => LinearLayer::Standard(in_proj),
+        };
+        let out_proj = linear_layer(embed_dim, embed_dim, vb.pp("out_proj"), quant)?;
         Ok(Self {
-            in_proj_weight,
+            in_proj,
             out_proj,
             num_heads,
             head_dim,
@@ -144,7 +152,7 @@ impl StreamingMultiheadAttention {
         // Tensor::matmul requires matching rank or rank-2 inputs;
         // rank-3 × rank-2 is rejected).
         let query_flat = query.reshape((b * q_len, self.embed_dim))?;
-        let projected = query_flat.matmul(&self.in_proj_weight.t()?)?;
+        let projected = self.in_proj.forward(&query_flat)?;
         let packed = projected.reshape((b, q_len, 3, h, d))?;
         let q = packed.narrow(2, 0, 1)?.squeeze(2)?;
         let k = packed.narrow(2, 1, 1)?.squeeze(2)?;
@@ -183,7 +191,10 @@ impl StreamingMultiheadAttention {
         let v_bhsd = v_view;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scale_t = Tensor::new(&[scale as f32], q_bhsd.device())?;
+        // Must match `scores`' dtype (== q/k's, i.e. the model's compute
+        // dtype) for `broadcast_mul` — under f16/bf16 an F32 constant here
+        // is a dtype-mismatch error, not a silent upcast.
+        let scale_t = Tensor::new(&[scale as f32], q_bhsd.device())?.to_dtype(q_bhsd.dtype())?;
 
         let attn_bhsd = if q_len == 1 {
             // Decode — bottom-right aligned, no masking.
@@ -263,7 +274,13 @@ fn bottom_right_causal_mask(t_q: usize, t_k: usize, device: &Device) -> Result<T
 }
 
 fn neg_inf_like(t: &Tensor) -> Result<Tensor> {
-    Tensor::full(f32::NEG_INFINITY, t.dims(), t.device())?.broadcast_as(t.shape())
+    // `where_cond`'s on_true/on_false must share a dtype (`scores`' dtype,
+    // i.e. the model's compute dtype) — an F32 literal built via
+    // `Tensor::full` is a dtype-mismatch error under f16/bf16, not a
+    // silent upcast.
+    Tensor::full(f32::NEG_INFINITY, t.dims(), t.device())?
+        .to_dtype(t.dtype())?
+        .broadcast_as(t.shape())
 }
 
 // ── Layer + Stack ───────────────────────────────────────────────────────
@@ -272,17 +289,17 @@ struct StreamingTransformerLayer {
     self_attn: StreamingMultiheadAttention,
     norm1: LayerNorm,
     norm2: LayerNorm,
-    linear1: Linear,
-    linear2: Linear,
+    linear1: LinearLayer,
+    linear2: LinearLayer,
 }
 
 impl StreamingTransformerLayer {
-    fn new(vb: VarBuilder, config: &VariantConfig) -> Result<Self> {
-        let self_attn = StreamingMultiheadAttention::new(vb.pp("self_attn"), config)?;
+    fn new(vb: VarBuilder, config: &VariantConfig, quant: Option<GgmlDType>) -> Result<Self> {
+        let self_attn = StreamingMultiheadAttention::new(vb.pp("self_attn"), config, quant)?;
         let norm1 = candle_nn::layer_norm(config.dim, 1e-5, vb.pp("norm1"))?;
         let norm2 = candle_nn::layer_norm(config.dim, 1e-5, vb.pp("norm2"))?;
-        let linear1 = linear_no_bias(config.dim, config.dim_feedforward(), vb.pp("linear1"))?;
-        let linear2 = linear_no_bias(config.dim_feedforward(), config.dim, vb.pp("linear2"))?;
+        let linear1 = linear_layer(config.dim, config.dim_feedforward(), vb.pp("linear1"), quant)?;
+        let linear2 = linear_layer(config.dim_feedforward(), config.dim, vb.pp("linear2"), quant)?;
         Ok(Self {
             self_attn,
             norm1,
@@ -314,11 +331,11 @@ pub(crate) struct StreamingTransformer {
 }
 
 impl StreamingTransformer {
-    pub(crate) fn new(vb: VarBuilder, config: &VariantConfig) -> Result<Self> {
+    pub(crate) fn new(vb: VarBuilder, config: &VariantConfig, quant: Option<GgmlDType>) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_layers);
         let layers_vb = vb.pp("layers");
         for i in 0..config.num_layers {
-            layers.push(StreamingTransformerLayer::new(layers_vb.pp(i), config)?);
+            layers.push(StreamingTransformerLayer::new(layers_vb.pp(i), config, quant)?);
         }
         Ok(Self {
             layers,

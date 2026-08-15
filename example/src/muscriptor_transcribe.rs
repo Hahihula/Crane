@@ -84,6 +84,19 @@ struct Args {
     /// chunk's transcription can be before it's cut off).
     #[arg(long, default_value_t = crane_core::models::muscriptor::Model::default_max_gen_len())]
     max_gen_len: usize,
+
+    /// Transformer compute dtype: f32 (default), f16, or bf16. Roughly
+    /// halves transformer weight + KV-cache VRAM at f16/bf16 vs f32. The
+    /// mel/class conditioners always stay f32 regardless (numerically
+    /// required, and a tiny fraction of total weights either way).
+    #[arg(long, default_value = "f32")]
+    dtype: String,
+
+    /// In-situ-quantize the transformer's linear projections (attention
+    /// in/out, FFN, LM head) to this GGML level — e.g. `q8_0`, `q4k`.
+    /// Stacks with `--dtype`. Omit to keep them at `--dtype` precision.
+    #[arg(long)]
+    quant: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -103,10 +116,20 @@ fn main() -> Result<()> {
         .context("--transcribe is required")?;
 
     let device = pick_device();
-    let dtype = candle_core::DType::F32;
+    let dtype = parse_dtype(&args.dtype)?;
+    let quant = args
+        .quant
+        .as_deref()
+        .map(crane_core::ops::linear::parse_ggml_dtype)
+        .transpose()?;
 
-    eprintln!("loading MuScriptor from {model_dir} on {device:?} (dtype={dtype:?})");
-    let transcription = crane_core::models::muscriptor::TranscriptionModel::load(model_dir, &device, dtype)?;
+    eprintln!(
+        "loading MuScriptor from {model_dir} on {device:?} (dtype={dtype:?}, quant={:?})",
+        args.quant
+    );
+    let transcription = crane_core::models::muscriptor::TranscriptionModel::load_with_options(
+        model_dir, &device, dtype, quant,
+    )?;
 
     let (raw_samples, sample_rate) = read_wav_mono_f32(wav_path, args.offset, args.duration)?;
     eprintln!(
@@ -198,6 +221,15 @@ fn pick_device() -> candle_core::Device {
         return d;
     }
     candle_core::Device::Cpu
+}
+
+fn parse_dtype(name: &str) -> Result<candle_core::DType> {
+    match name.to_lowercase().as_str() {
+        "f32" | "fp32" => Ok(candle_core::DType::F32),
+        "f16" | "fp16" | "half" => Ok(candle_core::DType::F16),
+        "bf16" => Ok(candle_core::DType::BF16),
+        other => anyhow::bail!("unsupported --dtype '{other}' (expected f32, f16 or bf16)"),
+    }
 }
 
 /// Read a mono-f32 PCM WAV (or any audio format ffmpeg can decode,
