@@ -60,10 +60,14 @@ impl ModelType {
             "minicpm5" | "minicpm-5" | "minicpm_5" | "minicpm" => Self::Minicpm5,
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
             "qwen3" => Self::Qwen3,
-            "qwen3_5" | "qwen3.5" | "qwen35" | "qwen3_5_dense" => Self::Qwen3_5,
-            "qwen3_5_vl" | "qwen3.5_vl" | "qwen3_5-vl" | "qwen3_5vl" | "qwen35_vl" => {
-                Self::Qwen3_5VL
-            }
+            // Qwen 3.6 / 3.8 are the same architecture as 3.5 (they even
+            // declare `model_type: "qwen3_5"`), so they alias onto it rather
+            // than getting their own `ModelType`.
+            "qwen3_5" | "qwen3.5" | "qwen35" | "qwen3_5_dense" | "qwen3_6" | "qwen3.6"
+            | "qwen36" | "qwen3_8" | "qwen3.8" | "qwen38" => Self::Qwen3_5,
+            "qwen3_5_vl" | "qwen3.5_vl" | "qwen3_5-vl" | "qwen3_5vl" | "qwen35_vl"
+            | "qwen3_6_vl" | "qwen3.6_vl" | "qwen36_vl" | "qwen3_8_vl" | "qwen3.8_vl"
+            | "qwen38_vl" => Self::Qwen3_5VL,
             "qwen3_tts" | "qwen3tts" | "qwen3-tts" | "tts" => Self::Qwen3TTS,
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
             "kokoro" | "kokoro_tts" | "kokoro-tts" | "kokoro-82m" => Self::Kokoro,
@@ -202,7 +206,9 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 "qwen2" | "qwen2.5" => return ModelType::Qwen25,
                 "qwen3" => return ModelType::Qwen3,
-                "qwen3_5" | "qwen3.5" => {
+                // Qwen 3.6 / 3.8 27B ship `model_type: "qwen3_5"`; the 3.6/3.8
+                // spellings are only here for retagged third-party repacks.
+                "qwen3_5" | "qwen3.5" | "qwen3_6" | "qwen3.6" | "qwen3_8" | "qwen3.8" => {
                     return if config.vision_config.is_some() {
                         ModelType::Qwen3_5VL
                     } else {
@@ -254,6 +260,22 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                     return ModelType::Qwen3_5VL;
                 }
                 if a.contains("qwen3_5") || a.contains("qwen3.5") {
+                    return ModelType::Qwen3_5;
+                }
+                // Qwen 3.6 / 3.8 reuse the Qwen3_5 classes upstream, so these
+                // only fire for repacks that renamed `architectures`.
+                if a.contains("qwen3_6forconditional")
+                    || a.contains("qwen3.6forconditional")
+                    || a.contains("qwen3_8forconditional")
+                    || a.contains("qwen3.8forconditional")
+                {
+                    return ModelType::Qwen3_5VL;
+                }
+                if a.contains("qwen3_6")
+                    || a.contains("qwen3.6")
+                    || a.contains("qwen3_8")
+                    || a.contains("qwen3.8")
+                {
                     return ModelType::Qwen3_5;
                 }
                 if a.contains("qwen3") {
@@ -320,10 +342,12 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::Qwen3TTS
     } else if path_lower.contains("qwen3-asr") || path_lower.contains("qwen3_asr") || path_lower.contains("qwen3asr") {
         ModelType::Qwen3ASR
-    } else if path_lower.contains("qwen3.5") || path_lower.contains("qwen3_5") || path_lower.contains("qwen35") {
-        ModelType::Qwen3_5
-    } else if path_lower.contains("qwen3_5_vl") || path_lower.contains("qwen3.5_vl") || path_lower.contains("qwen3.5-vl") || path_lower.contains("qwen35_vl") {
+    } else if QWEN3_5_FAMILY_VL_MARKERS.iter().any(|m| path_lower.contains(m)) {
+        // Checked before the text-only branch below: "Qwen3.5-VL" contains
+        // "qwen3.5" too, and would otherwise be claimed as text-only.
         ModelType::Qwen3_5VL
+    } else if QWEN3_5_FAMILY_MARKERS.iter().any(|m| path_lower.contains(m)) {
+        ModelType::Qwen3_5
     } else if path_lower.contains("qwen3") {
         ModelType::Qwen3
     } else if path_lower.contains("qwen2") || path_lower.contains("qwen25") {
@@ -335,6 +359,22 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::Qwen25
     }
 }
+
+/// Path-name markers for the Qwen 3.5 family. Qwen 3.6 and 3.8 are the same
+/// architecture (see `crane_core::models::qwen3_5`), so they route here too —
+/// without these, `Qwen3.8-27B-GGUF/` falls through to the bare `qwen3` branch
+/// and loads as a plain Qwen3.
+const QWEN3_5_FAMILY_MARKERS: &[&str] = &[
+    "qwen3.5", "qwen3_5", "qwen35", "qwen3.6", "qwen3_6", "qwen36", "qwen3.8", "qwen3_8", "qwen38",
+];
+
+/// VL spellings of [`QWEN3_5_FAMILY_MARKERS`], checked first since every one of
+/// these also contains its text-only marker as a substring.
+const QWEN3_5_FAMILY_VL_MARKERS: &[&str] = &[
+    "qwen3.5-vl", "qwen3.5_vl", "qwen3_5_vl", "qwen35_vl",
+    "qwen3.6-vl", "qwen3.6_vl", "qwen3_6_vl", "qwen36_vl",
+    "qwen3.8-vl", "qwen3.8_vl", "qwen3_8_vl", "qwen38_vl",
+];
 
 /// Read `general.architecture` from a `.gguf` file's header.
 fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
@@ -354,7 +394,10 @@ fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
         .ok()?
         .to_lowercase();
     match arch.as_str() {
-        "qwen35" | "qwen3_5" | "qwen3.5" => Some(ModelType::Qwen3_5),
+        // llama.cpp writes "qwen35" for Qwen 3.5, 3.6 and 3.8 alike; the
+        // 36/38 spellings guard against a future converter renaming it.
+        "qwen35" | "qwen3_5" | "qwen3.5" | "qwen36" | "qwen3_6" | "qwen3.6" | "qwen38"
+        | "qwen3_8" | "qwen3.8" => Some(ModelType::Qwen3_5),
         "qwen3" | "qwen3moe" => Some(ModelType::Qwen3),
         "qwen2" => Some(ModelType::Qwen25),
         a if a.starts_with("hunyuan") => Some(ModelType::HunyuanDense),
@@ -898,6 +941,60 @@ mod tests {
     fn detect_path_heuristic_qwen3_asr() {
         let result = detect_model_type("/models/Qwen3-ASR-0.6B-hf");
         assert_eq!(result, ModelType::Qwen3ASR);
+    }
+
+    /// Qwen 3.6 / 3.8 are the Qwen 3.5 architecture and must not fall through
+    /// to the bare `qwen3` branch of the path heuristic.
+    #[test]
+    fn detect_path_heuristic_qwen3_5_family() {
+        for path in [
+            "/models/Qwen3.5-4B-GGUF",
+            "/models/Qwen3.6-27B",
+            "/models/Qwen3.8-27B-GGUF",
+            "/models/Qwen3_8-27B",
+            "/models/qwen38-27b-q4_k_m",
+        ] {
+            assert_eq!(detect_model_type(path), ModelType::Qwen3_5, "path {path}");
+        }
+    }
+
+    /// The VL markers are substrings-plus of the text-only ones, so ordering
+    /// inside the heuristic decides these.
+    #[test]
+    fn detect_path_heuristic_qwen3_5_family_vl_beats_text() {
+        for path in [
+            "/models/Qwen3.5-VL-8B",
+            "/models/Qwen3.8-VL-27B",
+            "/models/qwen3_8_vl",
+        ] {
+            assert_eq!(detect_model_type(path), ModelType::Qwen3_5VL, "path {path}");
+        }
+    }
+
+    /// The real Qwen 3.8-27B `config.json`: `model_type` is literally
+    /// `qwen3_5`, and the vision block routes it to the VL backend.
+    #[test]
+    fn detect_from_config_json_qwen3_8_declares_qwen3_5() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "qwen3_5",
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "vision_config": {"depth": 27}}"#,
+        )
+        .unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Qwen3_5VL);
+    }
+
+    #[test]
+    fn model_type_from_str_qwen3_5_family_variants() {
+        for s in ["qwen3.5", "qwen35", "qwen3.6", "qwen36", "qwen3.8", "qwen3_8", "QWEN3.8"] {
+            assert_eq!(ModelType::from_str(s), ModelType::Qwen3_5, "spelling {s}");
+        }
+        for s in ["qwen3_5_vl", "qwen3.8_vl", "qwen38_vl"] {
+            assert_eq!(ModelType::from_str(s), ModelType::Qwen3_5VL, "spelling {s}");
+        }
     }
 
     #[test]

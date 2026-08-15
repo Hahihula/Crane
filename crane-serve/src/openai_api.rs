@@ -49,15 +49,47 @@ pub struct ChatCompletionRequest {
     pub n: Option<usize>,
     /// Response format constraint (e.g., `{"type": "json_object"}`).
     pub response_format: Option<ResponseFormat>,
+    /// Extra variables for the Jinja chat template (vLLM/SGLang convention).
+    /// Reasoning models read `enable_thinking` and `reasoning_effort` from
+    /// here; see [`crate::reasoning::ThinkingOptions`].
+    pub chat_template_kwargs: Option<serde_json::Value>,
+    /// OpenAI's top-level reasoning budget (`low` / `medium` / `xhigh` for the
+    /// Qwen 3.6+ templates). `chat_template_kwargs` takes precedence.
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: ChatMessageContent,
+    /// The model's `<think>` scratchpad, separated out of `content` so clients
+    /// can display or discard it independently. Only ever set on responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
+    /// An assistant reply with no reasoning block.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: ChatMessageContent::Text(content.into()),
+            reasoning_content: None,
+        }
+    }
+
+    /// An assistant reply whose scratchpad was split out of the raw output.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+    ) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: ChatMessageContent::Text(content.into()),
+            reasoning_content,
+        }
+    }
+
     /// Extract the plain text content from the message.
     /// For multimodal messages, concatenates all text parts.
     pub fn text_content(&self) -> String {
@@ -177,6 +209,25 @@ pub struct ChunkDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Streamed counterpart of [`ChatMessage::reasoning_content`]: deltas
+    /// generated inside a `<think>` block arrive here instead of `content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+impl ChunkDelta {
+    pub fn role(role: impl Into<String>) -> Self {
+        Self { role: Some(role.into()), content: None, reasoning_content: None }
+    }
+
+    pub fn content(text: impl Into<String>) -> Self {
+        Self { role: None, content: Some(text.into()), reasoning_content: None }
+    }
+
+    /// Empty delta, used by the terminal `finish_reason` chunk.
+    pub fn empty() -> Self {
+        Self { role: None, content: None, reasoning_content: None }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════

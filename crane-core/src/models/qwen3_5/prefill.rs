@@ -211,6 +211,7 @@ mod tests {
                 linear_num_value_heads: 4,
                 tie_word_embeddings: true,
                 attn_output_gate: true,
+                output_gate_type: None,
             },
             vision_config: None,
             image_token_id: None,

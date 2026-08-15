@@ -48,6 +48,20 @@ impl<R: Read + Seek> Gguf<R> {
         Ok(RmsNorm::new(weight, eps))
     }
 
+    /// Load an embedding table that stays quantized when it can, dequantizing
+    /// only the rows a forward pass gathers.
+    ///
+    /// Prefer this over [`Self::embedding`] for large vocabularies: a 248k-row
+    /// table costs ~2.4 GiB dense in BF16 versus ~0.7 GiB as Q4_K.
+    pub fn quantized_embedding(
+        &mut self,
+        name: &str,
+        hidden_size: usize,
+    ) -> Result<crate::models::modules::embedding::EmbeddingLayer> {
+        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
+        crate::models::modules::embedding::EmbeddingLayer::from_qtensor(ws, hidden_size, self.dtype)
+    }
+
     /// Load a tensor, dequantize, and create an Embedding.
     /// The weight is cast to the target `dtype` so lookups produce
     /// tensors in the expected compute precision.

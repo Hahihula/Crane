@@ -15,11 +15,15 @@ use crate::now_epoch;
 //  Chat completions SSE
 // ─────────────────────────────────────────────────────────────
 
+/// `splitter` routes each token delta to `content` or `reasoning_content`; its
+/// starting state comes from the rendered prompt (see
+/// [`crate::reasoning::ReasoningSplitter::for_prompt`]).
 pub fn make_chat_sse_stream(
     request_id: String,
     model_name: String,
     mut rx: mpsc::UnboundedReceiver<EngineResponse>,
     include_usage: bool,
+    mut splitter: crate::reasoning::ReasoningSplitter,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let created = now_epoch();
 
@@ -32,10 +36,7 @@ pub fn make_chat_sse_stream(
             model: model_name.clone(),
             choices: vec![ChunkChoice {
                 index: 0,
-                delta: ChunkDelta {
-                    role: Some("assistant".into()),
-                    content: None,
-                },
+                delta: ChunkDelta::role("assistant"),
                 finish_reason: None,
             }],
             usage: None,
@@ -45,26 +46,42 @@ pub fn make_chat_sse_stream(
         let mut _prompt_tokens = 0usize;
         let mut _completion_tokens = 0usize;
 
-        while let Some(resp) = rx.recv().await {
-            match resp {
-                EngineResponse::Token { text, .. } => {
-                    _completion_tokens += 1;
+        // A token may straddle a `</think>` tag, so one token can yield both a
+        // reasoning and a content delta — or neither, while a partial tag is
+        // buffered.
+        macro_rules! emit_deltas {
+            ($reasoning:expr, $content:expr) => {{
+                let (reasoning, content) = ($reasoning, $content);
+                for delta in [
+                    (!reasoning.is_empty()).then(|| ChunkDelta {
+                        role: None,
+                        content: None,
+                        reasoning_content: Some(reasoning),
+                    }),
+                    (!content.is_empty()).then(|| ChunkDelta::content(content)),
+                ]
+                .into_iter()
+                .flatten()
+                {
                     let chunk = ChatCompletionChunk {
                         id: request_id.clone(),
                         object: "chat.completion.chunk".into(),
                         created,
                         model: model_name.clone(),
-                        choices: vec![ChunkChoice {
-                            index: 0,
-                            delta: ChunkDelta {
-                                role: None,
-                                content: Some(text),
-                            },
-                            finish_reason: None,
-                        }],
+                        choices: vec![ChunkChoice { index: 0, delta, finish_reason: None }],
                         usage: None,
                     };
                     yield Ok(Event::default().json_data(&chunk).unwrap());
+                }
+            }};
+        }
+
+        while let Some(resp) = rx.recv().await {
+            match resp {
+                EngineResponse::Token { text, .. } => {
+                    _completion_tokens += 1;
+                    let (reasoning, content) = splitter.push(&text);
+                    emit_deltas!(reasoning, content);
                 }
                 EngineResponse::Finished {
                     finish_reason,
@@ -75,6 +92,10 @@ pub fn make_chat_sse_stream(
                     _prompt_tokens = pt;
                     _completion_tokens = ct;
 
+                    // Flush any text held back as a possible partial tag.
+                    let (reasoning, content) = splitter.finish();
+                    emit_deltas!(reasoning, content);
+
                     let chunk = ChatCompletionChunk {
                         id: request_id.clone(),
                         object: "chat.completion.chunk".into(),
@@ -82,10 +103,7 @@ pub fn make_chat_sse_stream(
                         model: model_name.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: ChunkDelta {
-                                role: None,
-                                content: None,
-                            },
+                            delta: ChunkDelta::empty(),
                             finish_reason: Some(finish_reason),
                         }],
                         usage: None,

@@ -391,6 +391,30 @@ impl AutoTokenizer {
         add_generation_prompt: bool,
         enable_thinking: Option<bool>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.apply_chat_template_full(ctx, tools, add_generation_prompt, enable_thinking, None)
+    }
+
+    /// Like [`Self::apply_chat_template_with_options`], plus the
+    /// `reasoning_effort` knob that the Qwen 3.6/3.8 templates read.
+    ///
+    /// Those templates accept `'xhigh'`, `'medium'` or `'low'` and
+    /// `raise_exception` on anything else — which surfaces here as a render
+    /// error, so pass a validated value or `None`. `None` leaves the variable
+    /// undefined and the template's own default applies; for Qwen 3.8 that
+    /// default is **`xhigh`**, i.e. the longest reasoning budget, so callers
+    /// that care about latency should pass `Some("low")` explicitly rather
+    /// than relying on the default.
+    ///
+    /// Has no effect on templates that never mention `reasoning_effort`
+    /// (Qwen 3.5 and earlier) — an unused context variable is inert.
+    pub fn apply_chat_template_full<S: serde::Serialize, T: serde::Serialize>(
+        &self,
+        ctx: S,
+        tools: Option<T>,
+        add_generation_prompt: bool,
+        enable_thinking: Option<bool>,
+        reasoning_effort: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let template_str = self.config.chat_template.as_deref().ok_or_else(|| {
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -517,6 +541,13 @@ impl AutoTokenizer {
             Some(v) => minijinja::Value::from(v),
             None => minijinja::Value::UNDEFINED,
         };
+        // Same undefined-vs-none reasoning as above: Qwen 3.6/3.8 resolve this
+        // with `reasoning_effort|default('xhigh')`, and an explicit `none`
+        // would slip past `default()` and hit their `raise_exception`.
+        let reasoning_effort = match reasoning_effort {
+            Some(v) => minijinja::Value::from(v),
+            None => minijinja::Value::UNDEFINED,
+        };
 
         match tmpl.render(context! {
             messages=> ctx,
@@ -526,7 +557,8 @@ impl AutoTokenizer {
             bos_token=> *bos,
             eos_token=> *eos,
             add_generation_prompt=> add_generation_prompt,
-            enable_thinking=> enable_thinking
+            enable_thinking=> enable_thinking,
+            reasoning_effort=> reasoning_effort
         }) {
             Ok(result) => Ok(result),
             Err(e) => Err(Box::new(std::io::Error::new(
@@ -549,7 +581,21 @@ mod tests {
     const OFFICIAL_TAIL: &str = "{%- if enable_thinking is defined and enable_thinking is false %}{{- 'OFF' }}{%- else %}{{- 'ON' }}{%- endif %}";
     const UNSLOTH_TAIL: &str = "{%- if enable_thinking is defined and enable_thinking is true %}{{- 'ON' }}{%- else %}{{- 'OFF' }}{%- endif %}";
 
+    /// The Qwen 3.6/3.8 `reasoning_effort` gate, reduced to its essentials:
+    /// `default()` on an undefined variable, then a hard failure on anything
+    /// outside the supported set.
+    const EFFORT_TAIL: &str = "{%- set e = reasoning_effort|default('xhigh') %}\
+{%- if e not in ('xhigh', 'medium', 'low') %}{{- raise_exception('bad effort') }}{%- endif %}{{- e }}";
+
     fn render_with(template: &str, enable_thinking: Option<bool>) -> String {
+        render_full(template, enable_thinking, None).expect("render")
+    }
+
+    fn render_full(
+        template: &str,
+        enable_thinking: Option<bool>,
+        reasoning_effort: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let config = AutoTokenizerConfig {
             add_bos_token: None,
             add_eos_token: None,
@@ -567,13 +613,13 @@ mod tests {
             config,
             tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
         };
-        tok.apply_chat_template_with_options(
+        tok.apply_chat_template_full(
             Vec::<serde_json::Value>::new(),
             Option::<&serde_json::Value>::None,
             true,
             enable_thinking,
+            reasoning_effort,
         )
-        .expect("render")
     }
 
     /// `None` must leave the variable UNDEFINED, not set it to `none` — Jinja
@@ -593,6 +639,37 @@ mod tests {
         assert_eq!(render_with(UNSLOTH_TAIL, Some(true)), "ON");
         assert_eq!(render_with(OFFICIAL_TAIL, Some(false)), "OFF");
         assert_eq!(render_with(UNSLOTH_TAIL, Some(false)), "OFF");
+    }
+
+    // ── reasoning_effort ─────────────────────────────────────────────────
+
+    /// `None` must reach `default('xhigh')`, which an explicit `none` would
+    /// slip past straight into `raise_exception`.
+    #[test]
+    fn reasoning_effort_none_falls_through_to_template_default() {
+        assert_eq!(render_full(EFFORT_TAIL, None, None).unwrap(), "xhigh");
+    }
+
+    #[test]
+    fn reasoning_effort_explicit_overrides_default() {
+        for effort in ["low", "medium", "xhigh"] {
+            assert_eq!(render_full(EFFORT_TAIL, None, Some(effort)).unwrap(), effort);
+        }
+    }
+
+    /// The template validates the value itself; an unsupported one must
+    /// surface as an error rather than a silently mis-prompted request.
+    #[test]
+    fn reasoning_effort_unsupported_value_errors() {
+        let err = render_full(EFFORT_TAIL, None, Some("high")).unwrap_err().to_string();
+        assert!(err.contains("bad effort"), "unexpected error: {err}");
+    }
+
+    /// Templates predating the knob (Qwen 3.5) must be unaffected by it.
+    #[test]
+    fn reasoning_effort_is_inert_for_templates_that_ignore_it() {
+        assert_eq!(render_full(OFFICIAL_TAIL, None, Some("low")).unwrap(), "ON");
+        assert_eq!(render_full(UNSLOTH_TAIL, Some(true), Some("low")).unwrap(), "ON");
     }
 
     // ── rewrite_split_index ──────────────────────────────────────────────

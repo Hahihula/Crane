@@ -8,6 +8,7 @@
 //! * **[`HunyuanChatTemplate`]** — hardcoded template for Hunyuan models.
 
 use crate::openai_api::ChatMessage;
+use crate::reasoning::ThinkingOptions;
 use crane_core::autotokenizer::AutoTokenizer;
 
 // ─────────────────────────────────────────────────────────────
@@ -17,6 +18,16 @@ use crane_core::autotokenizer::AutoTokenizer;
 /// Formats chat messages into a model-specific prompt string.
 pub trait ChatTemplateProcessor: Send + Sync {
     fn apply(&self, messages: &[ChatMessage]) -> Result<String, String>;
+
+    /// Render with reasoning controls. Defaults to ignoring them, which is
+    /// correct for templates that have no notion of thinking (Hunyuan).
+    fn apply_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        _opts: &ThinkingOptions,
+    ) -> Result<String, String> {
+        self.apply(messages)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -38,6 +49,14 @@ impl AutoChatTemplate {
 
 impl ChatTemplateProcessor for AutoChatTemplate {
     fn apply(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        self.apply_with_thinking(messages, &ThinkingOptions::default())
+    }
+
+    fn apply_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        opts: &ThinkingOptions,
+    ) -> Result<String, String> {
         // Build the list of {role, content} values expected by the Jinja template.
         let template_messages: Vec<serde_json::Value> = messages
             .iter()
@@ -50,7 +69,15 @@ impl ChatTemplateProcessor for AutoChatTemplate {
             .collect();
 
         self.tokenizer
-            .apply_chat_template(&template_messages, true)
+            .apply_chat_template_full(
+                &template_messages,
+                Option::<&serde_json::Value>::None,
+                true,
+                opts.enable_thinking,
+                opts.reasoning_effort.as_deref(),
+            )
+            // Qwen 3.6+ templates `raise_exception` on an unsupported
+            // reasoning_effort, so this is a user-input error, not a bug.
             .map_err(|e| format!("Chat template error: {e}"))
     }
 }

@@ -3,6 +3,11 @@
 //! Qwen 3.5 ships as `Qwen3_5ForConditionalGeneration` (multimodal class) but
 //! the dense text-only checkpoints have no vision weights — we deserialize the
 //! nested `text_config` and ignore the vision block when loading weights.
+//!
+//! The Qwen 3.6 / 3.8 27B dense checkpoints declare the *same*
+//! `model_type: "qwen3_5"` and are the same architecture scaled up (64 layers,
+//! `hidden_size` 5120, 48 GDN value heads, untied `lm_head`), so they load
+//! through these same types — every difference is a config value.
 
 use candle_core::Result;
 use serde::Deserialize;
@@ -69,6 +74,16 @@ pub struct TextConfig {
     // Qwen 3.5 attention uses gated output (sigmoid gate on softmax attention).
     #[serde(default = "default_true")]
     pub attn_output_gate: bool,
+
+    /// Activation of the **Gated Delta Net** output gate (HF `RMSNormGated`),
+    /// *not* the softmax-attention gate above — that one is always sigmoid.
+    ///
+    /// Absent in Qwen 3.5 (implicitly swish); the Qwen 3.6/3.8 27B configs
+    /// spell it out as `"swish"`. Only swish/silu is supported, which is what
+    /// [`crate::ops::gdn::RmsNormGated`] already computes, so a present-and-
+    /// swish value is a no-op. Validated by [`TextConfig::validate`].
+    #[serde(default)]
+    pub output_gate_type: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -173,6 +188,23 @@ pub enum HiddenAct {
 }
 
 impl TextConfig {
+    /// Reject configs whose semantics this implementation does not match.
+    ///
+    /// The only such knob today is [`Self::output_gate_type`]: the GDN gate is
+    /// hardwired to swish, so any other activation would silently produce
+    /// wrong activations rather than fail loudly.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(gate) = &self.output_gate_type
+            && !matches!(gate.as_str(), "swish" | "silu")
+        {
+            candle_core::bail!(
+                "[qwen3_5] unsupported output_gate_type {gate:?}: the GDN output gate is \
+                 implemented as swish (== silu) only"
+            );
+        }
+        Ok(())
+    }
+
     pub fn rope_theta(&self) -> f64 {
         self.rope_parameters.rope_theta
     }
@@ -254,5 +286,97 @@ pub fn load_config(path: &str) -> Result<Config> {
         .map_err(|e| candle_core::Error::Msg(format!("read config {path}: {e}")))?;
     let cfg: Config = serde_json::from_slice(&data)
         .map_err(|e| candle_core::Error::Msg(format!("parse config {path}: {e}")))?;
+    cfg.text_config.validate()?;
     Ok(cfg)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Qwen 3.8-27B (and, identically, Qwen 3.6-27B) `text_config`, minus
+    /// the keys this implementation ignores.
+    const QWEN3_8_27B_TEXT: &str = r#"{
+        "head_dim": 256,
+        "vocab_size": 248320,
+        "hidden_size": 5120,
+        "intermediate_size": 17408,
+        "num_hidden_layers": 64,
+        "num_attention_heads": 24,
+        "num_key_value_heads": 4,
+        "hidden_act": "silu",
+        "max_position_embeddings": 262144,
+        "rms_norm_eps": 1e-06,
+        "attn_output_gate": true,
+        "output_gate_type": "swish",
+        "full_attention_interval": 4,
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "tie_word_embeddings": false,
+        "rope_parameters": {
+            "mrope_interleaved": true,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10000000
+        }
+    }"#;
+
+    fn qwen3_8() -> TextConfig {
+        serde_json::from_str(QWEN3_8_27B_TEXT).expect("parse Qwen3.8-27B text_config")
+    }
+
+    /// Qwen 3.8 parses through the Qwen 3.5 types unchanged, and the derived
+    /// dimensions come out at the shapes the checkpoint actually ships.
+    #[test]
+    fn qwen3_8_27b_config_derives_checkpoint_shapes() {
+        let cfg = qwen3_8();
+        cfg.validate().unwrap();
+
+        // `q_proj` is [12288, 5120] on disk: 2 x heads x head_dim (gated).
+        assert!(cfg.attn_output_gate);
+        assert_eq!(2 * cfg.num_attention_heads * cfg.head_dim, 12288);
+        // `in_proj_qkv` is [10240, 5120], `in_proj_z` is [6144, 5120].
+        assert_eq!(cfg.linear_conv_dim(), 10240);
+        assert_eq!(cfg.linear_value_dim(), 6144);
+        assert_eq!(cfg.linear_key_dim(), 2048);
+        // rope.dimension_count 64 = head_dim * partial_rotary_factor, and the
+        // mrope sections tile half of it.
+        assert_eq!(cfg.rot_dim(), 64);
+        assert_eq!(cfg.mrope_section().iter().sum::<usize>(), cfg.rot_dim() / 2);
+        assert!(cfg.mrope_interleaved());
+        // 16 of 64 layers are full attention, the last of every group of 4.
+        let types = cfg.layer_types();
+        assert_eq!(types.len(), 64);
+        assert_eq!(types.iter().filter(|t| **t == LayerType::FullAttention).count(), 16);
+        assert_eq!(types[3], LayerType::FullAttention);
+        assert_eq!(types[2], LayerType::LinearAttention);
+        // Three value heads per key head — the case that never arises on the
+        // Qwen 3.5 0.8B (1) or 4B (2).
+        assert_eq!(cfg.linear_num_value_heads / cfg.linear_num_key_heads, 3);
+    }
+
+    /// `output_gate_type` names the GDN gate, which is swish-only here. Qwen
+    /// 3.5 omits the key entirely.
+    #[test]
+    fn output_gate_type_accepts_swish_and_absent() {
+        assert_eq!(qwen3_8().output_gate_type.as_deref(), Some("swish"));
+        qwen3_8().validate().unwrap();
+
+        let mut cfg = qwen3_8();
+        cfg.output_gate_type = Some("silu".into());
+        cfg.validate().unwrap();
+
+        cfg.output_gate_type = None;
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn output_gate_type_rejects_unimplemented_activation() {
+        let mut cfg = qwen3_8();
+        cfg.output_gate_type = Some("sigmoid".into());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("output_gate_type"), "unexpected error: {err}");
+    }
 }
