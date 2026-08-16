@@ -463,11 +463,22 @@ impl Qwen3_5TextModel {
         rope: RopeSlice<'_>,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
+        let debug = std::env::var_os("CRANE_QWEN35_DEBUG_LAYERS").is_some();
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
             let gdn_slot = self.gdn_caches[i].as_mut();
             let attn_slot = self.attn_caches[i].as_mut();
             xs = layer.forward(&xs, rope, attention_mask, gdn_slot, attn_slot)?;
+            if debug {
+                let last = xs.narrow(1, xs.dim(1)? - 1, 1)?.flatten_all()?.to_dtype(DType::F32)?;
+                let v = last.to_vec1::<f32>()?;
+                let n = v.len() as f32;
+                let mean = v.iter().sum::<f32>() / n;
+                let min = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let nonfinite = v.iter().filter(|x| !x.is_finite()).count();
+                eprintln!("[qwen3_5:debug] layer[{i}]: min={min:.4} max={max:.4} mean={mean:.4} non_finite={nonfinite}/{}", v.len());
+            }
         }
         Ok(xs)
     }
