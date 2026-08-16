@@ -178,7 +178,7 @@ impl ReasoningSplitter {
 ///
 /// This is what must stay buffered: `"...</"` could still become `"</think>"`,
 /// so it cannot be emitted as content yet.
-fn partial_tag_suffix_len(haystack: &str, tag: &str) -> usize {
+pub(crate) fn partial_tag_suffix_len(haystack: &str, tag: &str) -> usize {
     let max = tag.len().saturating_sub(1).min(haystack.len());
     (1..=max)
         .rev()

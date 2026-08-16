@@ -10,6 +10,8 @@ An OpenAI & SGLang compatible inference API server built on the [Crane](../READM
 - **Multi-model support** — Auto-detects and loads Hunyuan Dense, Qwen 2.5, Qwen 3, Qwen 3.5 (hybrid GDN + softmax), Qwen3-TTS, Voxtral TTS
 - **Qwen3-TTS** — Full two-level TTS inference (Talker + Code Predictor) with native Candle speech-tokenizer decoder (ONNX optional fallback); exposes OpenAI-compatible `/v1/audio/speech`
 - **Voxtral TTS** — 4B-parameter Mistral-based TTS with 20 multilingual voice embeddings, flow-matching acoustic model, and codec decoder; exposes OpenAI-compatible `/v1/audio/speech`
+- **Tool / function calling** — OpenAI-shaped `tools`, `tool_calls` and `finish_reason: "tool_calls"`, streaming included; the prompt syntax comes from the model's own chat template
+- **Reasoning control** — `enable_thinking` / `reasoning_effort` per request, with the `<think>` scratchpad separated out of `content` into `reasoning_content`
 - **Streaming** — SSE (Server-Sent Events) token streaming
 - **Cross-platform acceleration** — CPU / CUDA / Apple Metal, selected automatically
 
@@ -764,6 +766,124 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+Beyond the standard OpenAI fields, the chat endpoint accepts:
+
+| Field | Meaning |
+|:------|:--------|
+| `tools` | Function specs. Passed to the model's chat template verbatim, so the prompt syntax is whatever that model was trained on. |
+| `tool_choice` | `"none"` renders no tool block. Other values are accepted but **advisory** — forcing a particular call would need constrained decoding, which the engine does not implement. |
+| `chat_template_kwargs` | Extra template variables (vLLM/SGLang convention), e.g. `{"enable_thinking": false}`. |
+| `reasoning_effort` | OpenAI's top-level budget. `chat_template_kwargs` wins if both set it. |
+
+#### Tool / function calling
+
+Supported for any model whose chat template defines a tool protocol — the
+Qwen 3.5 / 3.6 / 3.8 and Ornith families all do, and share one syntax
+(`<tool_call><function=NAME><parameter=KEY>…`). crane-serve parses that back
+into OpenAI's `tool_calls`, so clients need no model-specific handling.
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.8-27b",
+    "messages": [{"role": "user", "content": "What is the weather in Paris right now?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }]
+  }'
+```
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [{
+        "id": "call_0",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}
+```
+
+Run the tool, then send the result back as a `tool` message. **Echo the
+assistant's `tool_calls` turn back too** — the template re-renders it into the
+transcript, and without it the model cannot see that it already called the tool
+and will call it again:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.8-27b",
+    "messages": [
+      {"role": "user", "content": "What is the weather in Paris right now?"},
+      {"role": "assistant", "content": null, "tool_calls": [
+        {"id": "call_0", "type": "function",
+         "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}
+      ]},
+      {"role": "tool", "tool_call_id": "call_0", "name": "get_weather",
+       "content": "{\"temperature_c\": 18, \"conditions\": \"cloudy\"}"}
+    ],
+    "tools": [{"type": "function", "function": {"name": "get_weather",
+      "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+      "required": ["city"]}}}]
+  }'
+# → "The current weather in Paris is: Temperature 18°C, Conditions: Cloudy"
+```
+
+Notes:
+
+- `arguments` is a **JSON-encoded string**, per the OpenAI wire format — parse
+  it client-side. Values that look like JSON scalars are recovered as such, so
+  a numeric argument arrives as `{"limit": 5}` rather than `{"limit": "5"}`.
+- Call `id`s are synthesized (`call_0`, `call_1`, …) because the template does
+  not emit them; they are stable within one response, which is all
+  `tool_call_id` correlation needs.
+- **Streaming**: tool-call markup never appears in `content` deltas. A complete
+  call is emitted as a single `tool_calls` delta before the terminal chunk,
+  because a partially-streamed call is not something a client can safely run.
+- If generation stops mid-call (token limit), the fragment is **discarded**
+  rather than half-parsed, and `finish_reason` stays `length`.
+
+#### Reasoning control (Qwen 3.5 / 3.6 / 3.8)
+
+Reasoning models emit a `<think>` scratchpad. crane-serve splits it out of
+`content` into `reasoning_content` (streaming too), so the answer alone is what
+a client displays.
+
+```bash
+# Thinking on (the family default) — answer in content, scratchpad separate
+curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "qwen3.8-27b", "messages": [{"role": "user", "content": "What is 2+2?"}]}'
+# → {"message": {"content": "4", "reasoning_content": "Two plus two is four."}}
+
+# Shorter thinking — much lower latency
+  -d '{..., "reasoning_effort": "low"}'
+
+# Off entirely
+  -d '{..., "chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+`reasoning_effort` takes `low`, `medium` or `xhigh`. Qwen 3.8 defaults to
+**`xhigh`**, the longest budget, so a modest `max_tokens` can be consumed
+entirely by the scratchpad. Note `medium` is the neutral baseline and injects
+no instruction — only `low` and `xhigh` add one.
+
 #### Multimodal / Vision (PaddleOCR-VL-1.5)
 
 For VLM requests, use an array in `content` to provide the image URL and the prompt text:
@@ -948,6 +1068,70 @@ for chunk in stream:
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
+### Tool calling (LLM)
+
+The standard OpenAI agentic loop works unmodified:
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
+
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+
+def get_weather(city):
+    return {"temperature_c": 18, "conditions": "cloudy"}
+
+messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+
+while True:
+    reply = client.chat.completions.create(
+        model="qwen3.8-27b", messages=messages, tools=TOOLS,
+    ).choices[0].message
+
+    if not reply.tool_calls:
+        print(reply.content)
+        break
+
+    # Append the assistant turn *including* tool_calls — the template replays
+    # it into the transcript, and dropping it makes the model call again.
+    messages.append(reply.model_dump(exclude_none=True))
+    for call in reply.tool_calls:
+        args = json.loads(call.function.arguments)   # arguments is a JSON string
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "name": call.function.name,
+            "content": json.dumps(get_weather(**args)),
+        })
+```
+
+Reasoning models additionally expose the scratchpad on the message:
+
+```python
+reply = client.chat.completions.create(
+    model="qwen3.8-27b",
+    messages=[{"role": "user", "content": "What is 2+2?"}],
+    reasoning_effort="low",                       # low | medium | xhigh
+    # or: extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+).choices[0].message
+
+print(reply.content)                              # "4"
+print(getattr(reply, "reasoning_content", None))  # the <think> scratchpad
+```
+
 ### Text-to-Speech
 
 #### Voxtral TTS
@@ -1095,6 +1279,8 @@ crane-serve/src/
 ├── openai_api.rs        # OpenAI request/response types (incl. SpeechRequest)
 ├── sglang_api.rs        # SGLang native API types
 ├── chat_template.rs     # Chat template rendering (Jinja / Hunyuan hard-coded)
+├── reasoning.rs         # Thinking control + <think> / content separation
+├── tools.rs             # Tool-call parsing (incl. streaming filter)
 ├── handlers/
 │   ├── common.rs        # /health, /v1/stats
 │   ├── openai.rs        # OpenAI endpoint handlers
@@ -1119,12 +1305,14 @@ crane-serve/src/
 |-------|-------------|---------|---------|-------|
 | Hunyuan Dense | ✅ | ✅ | Safetensors / GGUF | KV pre-alloc, GQA 4D matmul, RoPE cache growth |
 | Qwen 3 | ✅ | ✅ | Safetensors / GGUF | + QK Norm 4D, GGUF quantization |
-| Qwen 3.5 | ❌ | ❌ | Safetensors | Hybrid GDN + softmax attention; CUDA fused recurrence kernel; `max_concurrent=1` |
+| Qwen 3.5 / 3.6 / 3.8 | ❌ | ❌ | Safetensors / GGUF | Hybrid GDN + softmax attention; CUDA fused recurrence kernel; `max_concurrent=1`. Qwen 3.6-27B and 3.8-27B are the same architecture scaled up and load on this path (they declare `model_type: "qwen3_5"`). Tool calling and reasoning control supported. |
 | Qwen 2.5 | sequential | ❌ | Safetensors | — |
 | **Qwen3-TTS** | N/A | N/A | Safetensors (ONNX fallback optional) | Dedicated thread; no continuous batching; voice cloning supported |
 | **Voxtral TTS** | N/A | N/A | Safetensors | Dedicated thread; 37-codebook codec; no voice cloning |
 
-Model type is auto-detected from `config.json` / `params.json` (`model_type` / `architectures`) or can be set explicitly with `--model-type`.
+Model type is auto-detected from `config.json` / `params.json` (`model_type` / `architectures`), from a `.gguf` header's `general.architecture`, or can be set explicitly with `--model-type`.
+
+Tool calling and reasoning control are **template-driven**, not model-type-driven: any checkpoint whose chat template defines a tool protocol and/or a `<think>` block gets them, and a template that defines neither simply ignores the corresponding request fields.
 
 ## Environment Variables
 
@@ -1134,6 +1322,9 @@ Model type is auto-detected from `config.json` / `params.json` (`model_type` / `
 | `CRANE_TOPP_FALLBACK_TOPK` | `64` | k value for GPU top-k fallback |
 | `CRANE_TOPK_SAMPLE_ON_CPU` | `0` | Sample on CPU after GPU top-k |
 | `CRANE_SAMPLE_TRACE` | `0` | Verbose sampling timing logs |
+| `CRANE_KV_QUANT` | unset | Qwen 3.5 family K/V cache: `int8` (~2x smaller) or `int4` (~4x smaller) |
+| `CRANE_EMBED_DENSE` | `0` | GGUF: dequantize the whole embedding table at load instead of gathering rows (pre-optimization behaviour; costs ~1.7 GiB on Qwen 3.8-27B) |
+| `CRANE_PROF` | `0` | Per-forward-pass profiler: splits kernel *submission* time from wall time after a device sync |
 
 ## Notes
 
@@ -1159,8 +1350,25 @@ cargo test -p crane-core
 cargo test -p crane-serve engine::scheduler
 cargo test -p crane-serve openai_api::tests
 cargo test -p crane-serve sglang_api::tests
+cargo test -p crane-serve tools          # tool-call parsing + streaming filter
+cargo test -p crane-serve reasoning      # <think> separation, thinking options
 cargo test -p crane-core autotokenizer
 ```
+
+Tool calling and reasoning control are additionally checked against a real
+checkpoint's own chat template. These need a local model, so they are
+`#[ignore]`d and read it from an env var:
+
+```bash
+CRANE_QWEN38_MODEL=/path/to/Qwen3.8-27B-Q4_K_M.gguf \
+  cargo test -p crane-serve --test tool_calling -- --ignored --nocapture
+CRANE_QWEN38_MODEL=/path/to/Qwen3.8-27B-Q4_K_M.gguf \
+  cargo test -p crane-serve --test thinking_control -- --ignored --nocapture
+```
+
+`tool_calling` renders a full agentic turn (tools out, assistant `tool_calls`
+replayed, `<tool_response>` back in) through the model's template, which is
+what catches a template contract change that unit tests with a mock cannot.
 
 ## License
 

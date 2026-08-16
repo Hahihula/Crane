@@ -56,16 +56,93 @@ pub struct ChatCompletionRequest {
     /// OpenAI's top-level reasoning budget (`low` / `medium` / `xhigh` for the
     /// Qwen 3.6+ templates). `chat_template_kwargs` takes precedence.
     pub reasoning_effort: Option<String>,
+    /// Function/tool specs, passed to the chat template verbatim — the
+    /// template owns the prompt syntax (`tool | tojson` for the Qwen family).
+    pub tools: Option<Vec<Tool>>,
+    /// Accepted for OpenAI compatibility. `"none"` suppresses the tool block;
+    /// anything else is advisory, since forcing a specific call would require
+    /// constrained decoding the engine does not implement.
+    pub tool_choice: Option<serde_json::Value>,
+}
+
+/// A tool the model may call. Only `type: "function"` exists today, and the
+/// body is passed through to the template untouched, so an unusual `parameters`
+/// schema needs no support here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    #[serde(rename = "type", default = "default_function_type")]
+    pub kind: String,
+    pub function: FunctionDef,
+}
+
+fn default_function_type() -> String {
+    "function".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionDef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSON Schema for the arguments. Free-form so any schema round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+/// One call the model decided to make.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "default_function_type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FunctionCall {
+    pub name: String,
+    /// JSON-encoded arguments, per the OpenAI wire format — a *string*, not an
+    /// object, so clients must parse it themselves.
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
+    /// Assistant messages that only call tools carry `content: null`, which is
+    /// why this tolerates both a missing field and an explicit null.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub content: ChatMessageContent,
     /// The model's `<think>` scratchpad, separated out of `content` so clients
     /// can display or discard it independently. Only ever set on responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Calls the model chose to make. Set on responses, and echoed back by the
+    /// client on the follow-up turn so the template can re-render them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// On a `role: "tool"` message, the `id` of the call being answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Tool name on a `role: "tool"` message (pre-`tool_call_id` clients).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Treat an explicit JSON `null` like a missing field. `#[serde(default)]`
+/// alone does not: it covers absence, not null.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+impl Default for ChatMessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
 }
 
 impl ChatMessage {
@@ -75,6 +152,9 @@ impl ChatMessage {
             role: "assistant".into(),
             content: ChatMessageContent::Text(content.into()),
             reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 
@@ -87,6 +167,26 @@ impl ChatMessage {
             role: "assistant".into(),
             content: ChatMessageContent::Text(content.into()),
             reasoning_content,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// An assistant reply that calls tools. `content` may be empty — the
+    /// template allows prose before a call but does not require it.
+    pub fn assistant_with_tools(
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: ChatMessageContent::Text(content.into()),
+            reasoning_content,
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+            tool_call_id: None,
+            name: None,
         }
     }
 
@@ -213,20 +313,28 @@ pub struct ChunkDelta {
     /// generated inside a `<think>` block arrive here instead of `content`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Tool calls, emitted once complete rather than incrementally — see
+    /// [`crate::tools`] for why a partial call must never reach the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl ChunkDelta {
     pub fn role(role: impl Into<String>) -> Self {
-        Self { role: Some(role.into()), content: None, reasoning_content: None }
+        Self { role: Some(role.into()), content: None, reasoning_content: None, tool_calls: None }
     }
 
     pub fn content(text: impl Into<String>) -> Self {
-        Self { role: None, content: Some(text.into()), reasoning_content: None }
+        Self { role: None, content: Some(text.into()), reasoning_content: None, tool_calls: None }
     }
 
     /// Empty delta, used by the terminal `finish_reason` chunk.
     pub fn empty() -> Self {
-        Self { role: None, content: None, reasoning_content: None }
+        Self { role: None, content: None, reasoning_content: None, tool_calls: None }
+    }
+
+    pub fn tool_calls(calls: Vec<ToolCall>) -> Self {
+        Self { role: None, content: None, reasoning_content: None, tool_calls: Some(calls) }
     }
 }
 
