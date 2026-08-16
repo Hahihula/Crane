@@ -15,12 +15,12 @@
 //! layer), so that continuous-batching can save/restore state per request.
 
 use candle_core::quantized::GgmlDType;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::io::{Read, Seek};
 
 use crate::models::hunyuan_dense::modeling::Gguf;
-use crate::ops::linear::{linear_layer, LinearLayer};
+use crate::ops::linear::{LinearLayer, linear_layer};
 
 // ── Qwen 3.5 RMSNorm (unit-offset) ───────────────────────────────────────
 
@@ -59,7 +59,10 @@ impl Qwen35RmsNorm {
     /// (GGUF layout).
     #[allow(clippy::cast_possible_truncation)]
     pub fn from_folded(alpha: Tensor, eps: f64) -> Self {
-        Self { alpha, eps: eps as f32 }
+        Self {
+            alpha,
+            eps: eps as f32,
+        }
     }
 }
 
@@ -128,8 +131,12 @@ impl MRotaryEmbedding {
         let cos_table = freqs.cos()?.contiguous()?;
         let sin_table = freqs.sin()?.contiguous()?;
 
-        let mrope_section_doubled: Vec<usize> =
-            cfg.rope_parameters.mrope_section.iter().map(|s| s * 2).collect();
+        let mrope_section_doubled: Vec<usize> = cfg
+            .rope_parameters
+            .mrope_section
+            .iter()
+            .map(|s| s * 2)
+            .collect();
 
         Ok(Self {
             cos_table,
@@ -162,10 +169,7 @@ impl MRotaryEmbedding {
     /// its `i + rot_dim/2` counterpart inside the rotary slice, matching the
     /// HF behavior of the `q * cos + rotate_half(q) * sin` formulation when
     /// the cos/sin tables are not pair-duplicated).
-    pub fn cos_sin_with_position_ids(
-        &self,
-        position_ids: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+    pub fn cos_sin_with_position_ids(&self, position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
         let (_three, seq_len) = position_ids.dims2()?;
         let half_rot = self.rot_dim / 2;
 
@@ -256,12 +260,7 @@ impl MRotaryEmbedding {
 /// variant — it pairs component `i` with `i + rot_dim/2` *within the slice we
 /// hand it*, which matches HF's `rotate_half` over the rotary slice. We must
 /// slice first; rotating the full head would pair `i` with `i + head_dim/2`.
-pub fn apply_mrope(
-    x: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    rot_dim: usize,
-) -> Result<Tensor> {
+pub fn apply_mrope(x: &Tensor, cos: &Tensor, sin: &Tensor, rot_dim: usize) -> Result<Tensor> {
     let (_b, _h, _seq_len, head_dim) = x.dims4()?;
     let dtype = x.dtype();
     // `cos`/`sin` are kept in f32; the rope op requires its inputs to share a
@@ -326,9 +325,24 @@ impl FullAttention {
             num_heads * head_dim
         };
         let q_proj = linear_layer(cfg.hidden_size, q_out, vb.pp("q_proj"), quant)?;
-        let k_proj = linear_layer(cfg.hidden_size, num_kv_heads * head_dim, vb.pp("k_proj"), quant)?;
-        let v_proj = linear_layer(cfg.hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"), quant)?;
-        let o_proj = linear_layer(num_heads * head_dim, cfg.hidden_size, vb.pp("o_proj"), quant)?;
+        let k_proj = linear_layer(
+            cfg.hidden_size,
+            num_kv_heads * head_dim,
+            vb.pp("k_proj"),
+            quant,
+        )?;
+        let v_proj = linear_layer(
+            cfg.hidden_size,
+            num_kv_heads * head_dim,
+            vb.pp("v_proj"),
+            quant,
+        )?;
+        let o_proj = linear_layer(
+            num_heads * head_dim,
+            cfg.hidden_size,
+            vb.pp("o_proj"),
+            quant,
+        )?;
 
         let q_norm = Qwen35RmsNorm::load(head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?;
         let k_norm = Qwen35RmsNorm::load(head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?;
@@ -394,7 +408,6 @@ impl FullAttention {
         kv_cache: Option<&mut KvCache>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
-
 
         let q_out = self.q_proj.forward(x)?;
         let k_proj_out = self.k_proj.forward(x)?;
@@ -496,10 +509,7 @@ impl FullAttention {
     }
 }
 
-fn attn_weights_with_mask(
-    attn_logits: &Tensor,
-    mask: &Tensor,
-) -> Result<Tensor> {
+fn attn_weights_with_mask(attn_logits: &Tensor, mask: &Tensor) -> Result<Tensor> {
     // HF applies the mask (shape `[B, 1, S_q, S_k]` for additive causal mask)
     // via `attn_weights + mask` and softmax. We do the same.
     attn_logits.broadcast_add(mask)
@@ -516,10 +526,29 @@ pub struct Mlp {
 
 impl Mlp {
     pub fn load(cfg: &TextConfig, vb: VarBuilder, quant: Option<GgmlDType>) -> Result<Self> {
-        let gate_proj = linear_layer(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"), quant)?;
-        let up_proj = linear_layer(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"), quant)?;
-        let down_proj = linear_layer(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"), quant)?;
-        Ok(Self { gate_proj, up_proj, down_proj })
+        let gate_proj = linear_layer(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            vb.pp("gate_proj"),
+            quant,
+        )?;
+        let up_proj = linear_layer(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            vb.pp("up_proj"),
+            quant,
+        )?;
+        let down_proj = linear_layer(
+            cfg.intermediate_size,
+            cfg.hidden_size,
+            vb.pp("down_proj"),
+            quant,
+        )?;
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+        })
     }
 
     /// Construct from GGUF quantized weights.
@@ -528,7 +557,11 @@ impl Mlp {
         let gate_proj = gg.linear(&format!("{prefix}.ffn_gate.weight"))?;
         let up_proj = gg.linear(&format!("{prefix}.ffn_up.weight"))?;
         let down_proj = gg.linear(&format!("{prefix}.ffn_down.weight"))?;
-        Ok(Self { gate_proj, up_proj, down_proj })
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+        })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -567,7 +600,8 @@ impl DecoderLayer {
         vb: VarBuilder,
         quant: Option<GgmlDType>,
     ) -> Result<Self> {
-        let input_layernorm = Qwen35RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let input_layernorm =
+            Qwen35RmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
         let post_attention_layernorm = Qwen35RmsNorm::load(
             cfg.hidden_size,
             cfg.rms_norm_eps,
@@ -584,7 +618,7 @@ impl DecoderLayer {
                 let dims = GdnDims::new(cfg);
                 let gdn = GatedDeltaNet::load(vb, cfg, GdnInputProjectionKind::Split, quant)?;
                 (LayerImpl::LinearAttention(gdn), Some(dims))
-            }
+            },
         };
 
         Ok(Self {
@@ -634,11 +668,19 @@ impl DecoderLayer {
             ),
             LayerType::LinearAttention => {
                 let dims = GdnDims::new(cfg).with_v_head_order(VHeadOrder::Chunked);
+                let in_proj_b = LinearLayer::Standard(candle_nn::Linear::new(
+                    gg.dequant_tensor(&format!("{prefix}.ssm_beta.weight"))?,
+                    None,
+                ));
+                let in_proj_a = LinearLayer::Standard(candle_nn::Linear::new(
+                    gg.dequant_tensor(&format!("{prefix}.ssm_alpha.weight"))?,
+                    None,
+                ));
                 let input_proj = GdnInputProjection::Split {
                     in_proj_qkv: gg.linear(&format!("{prefix}.attn_qkv.weight"))?,
                     in_proj_z: gg.linear(&format!("{prefix}.attn_gate.weight"))?,
-                    in_proj_b: gg.linear(&format!("{prefix}.ssm_beta.weight"))?,
-                    in_proj_a: gg.linear(&format!("{prefix}.ssm_alpha.weight"))?,
+                    in_proj_b,
+                    in_proj_a,
                 };
                 // GGUF stores the conv kernel 2-D; crane expects HF's
                 // `[conv_dim, 1, kernel]`.
@@ -646,7 +688,10 @@ impl DecoderLayer {
                     .dequant_tensor(&format!("{prefix}.ssm_conv1d.weight"))?
                     .unsqueeze(1)?;
                 let dt_bias = gg.dequant_tensor(&format!("{prefix}.ssm_dt.bias"))?;
-                let a_log = gg.dequant_tensor(&format!("{prefix}.ssm_a"))?;
+                let a_log = gg
+                    .dequant_tensor(&format!("{prefix}.ssm_a"))?
+                    .neg()?
+                    .log()?;
                 let norm = RmsNormGated::from_weight(
                     gg.dequant_tensor(&format!("{prefix}.ssm_norm.weight"))?,
                     cfg.rms_norm_eps,
@@ -662,7 +707,7 @@ impl DecoderLayer {
                     &dims,
                 )?;
                 (LayerImpl::LinearAttention(gdn), Some(dims))
-            }
+            },
         };
 
         Ok(Self {
@@ -689,20 +734,26 @@ impl DecoderLayer {
         gdn_cache: Option<&mut GdnLayerCache>,
         attn_cache: Option<&mut KvCache>,
     ) -> Result<Tensor> {
-        use crate::ops::prof::{timed, Span};
+        use crate::ops::prof::{Span, timed};
 
         let residual = x;
         let normed = timed(Span::BlockNorm, || self.input_layernorm.forward(x))?;
 
         let attn_out = match &self.layer_impl {
             LayerImpl::FullAttention(attn) => {
-                debug_assert!(gdn_cache.is_none(), "full-attention layer should not receive a GDN cache");
+                debug_assert!(
+                    gdn_cache.is_none(),
+                    "full-attention layer should not receive a GDN cache"
+                );
                 timed(Span::Attn, || {
                     attn.forward(&normed, rope, attention_mask, attn_cache)
                 })?
-            }
+            },
             LayerImpl::LinearAttention(gdn) => {
-                debug_assert!(attn_cache.is_none(), "linear-attention layer should not receive a KV cache");
+                debug_assert!(
+                    attn_cache.is_none(),
+                    "linear-attention layer should not receive a KV cache"
+                );
                 let cache = gdn_cache.ok_or_else(|| {
                     candle_core::Error::Msg("GDN cache missing for linear-attention layer".into())
                 })?;
@@ -710,13 +761,15 @@ impl DecoderLayer {
                     candle_core::Error::Msg("GDN dims missing for linear-attention layer".into())
                 })?;
                 timed(Span::Gdn, || gdn.forward(&normed, dims, cache))?
-            }
+            },
         };
 
         let x = timed(Span::Resid, || residual + attn_out)?;
 
         let residual2 = &x;
-        let normed2 = timed(Span::BlockNorm, || self.post_attention_layernorm.forward(&x))?;
+        let normed2 = timed(Span::BlockNorm, || {
+            self.post_attention_layernorm.forward(&x)
+        })?;
 
         let mlp_out = timed(Span::Mlp, || self.mlp.forward(&normed2))?;
 
