@@ -101,6 +101,13 @@ MODELS = {
         "quant_template": "Qwen3.5-9B-{quant}.gguf",
         "description": "Qwen 3.5 9B, hybrid GDN + attention, GGUF quant (Apache-2.0)",
     },
+    "qwen3.8-27b-gguf": {
+        "repo_id": "unsloth/Qwen3.8-27B-GGUF",
+        "dirname": "Qwen3.8-27B-GGUF",
+        "kind": "llm",
+        "quant_template": "Qwen3.8-27B-{quant}.gguf",
+        "description": "Qwen 3.8 27B, same arch as Qwen 3.5 scaled up, GGUF quant (Apache-2.0)",
+    },
     "moonshine-g2p-en-us": {
         "repo_id": "moonshine-ai/moonshine",
         "dirname": "moonshine-g2p/en_us",

@@ -232,10 +232,7 @@ pub async fn vlm_chat_completions(
                 model: model_name.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: ChunkDelta {
-                        role: Some("assistant".into()),
-                        content: None,
-                    },
+                    delta: ChunkDelta::role("assistant"),
                     finish_reason: None,
                 }],
                 usage: None,
@@ -251,10 +248,7 @@ pub async fn vlm_chat_completions(
                     model: model_name.clone(),
                     choices: vec![ChunkChoice {
                         index: 0,
-                        delta: ChunkDelta {
-                            role: None,
-                            content: Some(text),
-                        },
+                        delta: ChunkDelta::content(text),
                         finish_reason: None,
                     }],
                     usage: None,
@@ -270,10 +264,7 @@ pub async fn vlm_chat_completions(
                 model: model_name.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: ChunkDelta {
-                        role: None,
-                        content: None,
-                    },
+                    delta: ChunkDelta::empty(),
                     finish_reason: Some("stop".into()),
                 }],
                 usage: None,
@@ -308,10 +299,7 @@ pub async fn vlm_chat_completions(
             model: state.model_name.clone(),
             choices: vec![ChatChoice {
                 index: 0,
-                message: ChatMessage {
-                    role: "assistant".into(),
-                    content: ChatMessageContent::Text(result),
-                },
+                message: ChatMessage::assistant(result),
                 finish_reason: Some("stop".into()),
             }],
             usage: Usage {
@@ -494,10 +482,7 @@ pub async fn qwen3_5_vlm_chat_completions(
         model: state.model_name.clone(),
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatMessage {
-                role: "assistant".into(),
-                content: ChatMessageContent::Text(text),
-            },
+            message: ChatMessage::assistant(text),
             finish_reason: Some("stop".into()),
         }],
         usage: Usage {
@@ -563,10 +548,7 @@ pub async fn minicpm_v_vlm_chat_completions(
         model: state.model_name.clone(),
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatMessage {
-                role: "assistant".into(),
-                content: ChatMessageContent::Text(text),
-            },
+            message: ChatMessage::assistant(text),
             finish_reason: Some("stop".into()),
         }],
         usage: Usage {
@@ -623,10 +605,7 @@ pub async fn gemma4_vlm_chat_completions(
         model: state.model_name.clone(),
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatMessage {
-                role: "assistant".into(),
-                content: ChatMessageContent::Text(result),
-            },
+            message: ChatMessage::assistant(result),
             finish_reason: Some("stop".into()),
         }],
         usage: Usage {

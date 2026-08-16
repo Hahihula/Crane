@@ -6,7 +6,7 @@ use std::io::Write;
 use anyhow::{Context, Error as E, Result};
 use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device, Module, Tensor};
-use candle_nn::{embedding, Embedding, Linear, VarBuilder};
+use candle_nn::{embedding, Linear, VarBuilder};
 
 use crate::utils::DeviceExt;
 use crate::ops::linear::{parse_ggml_dtype, quantize_linear, LinearLayer};
@@ -20,6 +20,7 @@ use super::modeling::{DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm, RopeSlice};
 use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
 use crate::models::hunyuan_dense::modeling::Gguf;
+use crate::models::modules::embedding::EmbeddingLayer;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 
@@ -30,7 +31,7 @@ use crate::utils::utils;
 /// these caches across context switches (continuous batching).
 pub struct Qwen3_5TextModel {
     cfg: TextConfig,
-    embed_tokens: Embedding,
+    embed_tokens: EmbeddingLayer,
     layers: Vec<DecoderLayer>,
     norm: Qwen35RmsNorm,
     lm_head: LinearLayer,
@@ -77,6 +78,8 @@ impl Qwen3_5TextModel {
             text_cfg.hidden_size,
             vb_lm.pp("embed_tokens"),
         )?;
+        let embed_weight = embed_tokens.embeddings().clone();
+        let embed_tokens = EmbeddingLayer::Dense(embed_tokens);
 
         let layer_types = text_cfg.layer_types();
         let mut layers = Vec::with_capacity(text_cfg.num_hidden_layers);
@@ -95,7 +98,6 @@ impl Qwen3_5TextModel {
         // ship a dedicated `lm_head.weight` of shape `[vocab, hidden]`. That
         // tensor lives at the checkpoint ROOT, not under the `language_model`
         // prefix, so probe `vb` first and fall back to `vb_lm`.
-        let embed_weight = embed_tokens.embeddings().clone();
         let (lm_head_raw, is_tied) = if cfg.tie_word_embeddings {
             (embed_weight, true)
         } else {
@@ -273,9 +275,14 @@ impl Qwen3_5TextModel {
             linear_num_value_heads: num_v_heads,
             tie_word_embeddings,
             attn_output_gate,
+            // GGUF carries no gate-activation key; the conversion only ever
+            // targets the swish gate this code implements.
+            output_gate_type: None,
         };
 
-        let embed_tokens = gg.embedding("token_embd.weight", hidden_size)?;
+        // The 248k-row table is the single largest dequantization in the
+        // checkpoint; keep it in its GGUF format and gather rows on demand.
+        let embed_tokens = gg.quantized_embedding("token_embd.weight", hidden_size)?;
 
         let mut layers = Vec::with_capacity(num_hidden_layers);
         for (idx, &layer_type) in layer_types.iter().enumerate() {
@@ -287,7 +294,9 @@ impl Qwen3_5TextModel {
             rms_norm_eps,
         );
         let lm_head = if tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            // Tied: the output projection is this very table, so it reuses the
+            // same buffer rather than materializing a dense copy.
+            embed_tokens.tied_output()?
         } else {
             gg.linear("output.weight")?
         };

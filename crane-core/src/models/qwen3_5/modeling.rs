@@ -300,6 +300,16 @@ pub struct RopeSlice<'a> {
 ///   gate applied to the attention output.
 /// - Per-head QK-norm is always present (`q_norm`, `k_norm` of size `head_dim`).
 /// - RoPE is MRoPE-interleaved applied only to the first `rot_dim` components.
+/// `CRANE_ATTN_EXPAND=1` forces the legacy GQA-expansion path at decode
+/// instead of the grouped matmul. The two are mathematically identical, so
+/// this exists to A/B them: same binary, same weights, one variable.
+fn legacy_attn_expand() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("CRANE_ATTN_EXPAND").is_ok_and(|v| !matches!(v.trim(), "" | "0"))
+    })
+}
+
 pub struct FullAttention {
     q_proj: LinearLayer,
     k_proj: LinearLayer,
@@ -467,6 +477,51 @@ impl FullAttention {
 
         let n_rep = self.num_heads / self.num_kv_heads;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
+
+        if n_rep > 1 && seq_len == 1 && !legacy_attn_expand() {
+            // ── GQA-grouped SDPA for decode ──
+            //
+            // The expansion below materializes `k_rep`, `v_rep` and `k_t`, each
+            // `[B, num_heads, S, D]`, i.e. three O(context) copies per layer per
+            // token. On Qwen3.8-27B (24 q / 4 KV heads, 16 full-attn layers)
+            // that is 1.7 GB of traffic per token at 2912 tokens of context and
+            // it grows linearly with depth — the sole cause of decode falling
+            // from 16.9 t/s to 8.6 t/s between 512 and 4096 tokens.
+            //
+            // Instead fold the `n_rep` query heads sharing a KV head into the
+            // matmul's row dimension, so K/V are read once at their stored
+            // 4-head width. Ported from `models/qwen3/modeling.rs`, which has
+            // carried this since its own GQA work; `k_t` deliberately stays a
+            // view so matmul flattens it in one pass rather than us paying an
+            // explicit `contiguous()`.
+            let q_g = (q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))? * scale)?;
+            let k_t = k.transpose(2, 3)?; // [B, kv_heads, D, S] — view only
+            let attn_weights = q_g.matmul(&k_t)?; // [B, kv_heads, n_rep, S]
+
+            let attn_weights = match attention_mask {
+                // mask [B, 1, 1, S] broadcasts over kv_heads and n_rep
+                Some(mask) => attn_weights.broadcast_add(mask)?,
+                None => attn_weights,
+            };
+            let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+            let y = attn_weights.matmul(&v)?; // [B, kv_heads, n_rep, D]
+
+            // Back to `[B, 1, num_heads * head_dim]`. Head order is preserved:
+            // `q` was reshaped from `[B, H, 1, D]` with H == kv_heads * n_rep in
+            // that order, so flattening the two group dims restores it.
+            let y = y.reshape((b_sz, seq_len, self.num_heads * self.head_dim))?;
+
+            // Qwen 3.5 gates the attention output before `o_proj` — the one
+            // adaptation this path needs versus the qwen3 original.
+            let y = match gate {
+                Some(g) => {
+                    let gate = candle_nn::ops::sigmoid(&g.to_dtype(y.dtype())?)?;
+                    y.broadcast_mul(&gate)?
+                }
+                None => y,
+            };
+            return self.o_proj.forward(&y);
+        }
 
         let k_rep = if n_rep > 1 {
             let (b, kv_heads, s, d) = k.dims4()?;

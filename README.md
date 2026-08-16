@@ -24,6 +24,7 @@ A high-performance inference framework leveraging Rust's Candle for maximum spee
 - [ ] Qwen3.5-VLA, Qwen3.5-GR00T, Pi0.5;
 - [ ] Audio8-TTS;
 - [x] PaddleOCR-v6;
+- [x] Qwen 3.6 / Qwen 3.8 (27B dense, text + vision, thinking control) — same architecture as Qwen 3.5, scaled up
 - [x] Qwen 3.5 (0.8B; hybrid Gated Delta Net + softmax attention, CPU/CUDA/Metal) + Ornith-1.0-9B (agentic, tool calling)
 - [x] Hunyuan Dense
 - [x] Gemma 4 (text and vision; no audio)
@@ -77,6 +78,7 @@ We include:
 
 ## 🔥 Updates
 
+- **`2026.08.16`**: 🧠 **Qwen 3.8 / Qwen 3.6 (27B) support + flexible thinking control.** Both declare `model_type: "qwen3_5"` and convert to GGUF as `qwen35`, so they are the Qwen 3.5 architecture scaled up (64 layers, 24 q / 4 KV heads, 48 GDN value heads, untied `lm_head`) and need **no new modeling code** — every difference is a config value. Thinking is now controllable per request via `chat_template_kwargs: {"enable_thinking": …, "reasoning_effort": "low|medium|xhigh"}` (or OpenAI's top-level `reasoning_effort`), and the `<think>` scratchpad is separated out of `content` into **`reasoning_content`**, streaming included. 🗜️ GGUF embedding tables now stay quantized and dequantize only the rows a forward pass gathers, instead of expanding all 248320 of them at load: **1772 MiB saved** on Qwen 3.8-27B Q4_K_M (peak 22007 → 20235 MiB), bit-exact on untied checkpoints (prefill logits cosine `1.000000000`). Qwen 3.8-27B Q4_K_M runs text-only on a single 24 GB RTX 3090.
 - **`2026.08.06`**: 🗣️ **Kokoro-82M TTS support** — from-scratch Rust G2P + `candle-onnx` synthesis pipeline, currently English only, wired into `/v1/audio/speech` in crane-serve. Benchmarked against Moonshine-TTS's reference C++ implementation on the same Kokoro-82M ONNX model: **1.6-4.3x faster synthesis** across short/medium/long text.
 - **`2026.08.02`**: ⏱️ Decode is dispatch-bound, not kernel-bound — and now isn't. New `CRANE_PROF=1` forward-pass profiler measures *submission* time against wall-clock time after a device sync, which `rocm-smi`'s busy counter cannot distinguish. It showed the CPU spending **21.8 ms of a 26.9 ms token** merely enqueueing ~2000 kernel launches. Collapsing `Qwen35RmsNorm` and the GDN gated norm into single fused `rms_norm` launches, rewriting the Q/K L2 norm as one (`x/√(Σx²+ε) ≡ rms_norm(x, 1/√K, ε/K)` — an identity, not an approximation), and hoisting `-exp(A_log)`/`dt_bias` to load time cut submission to **6.9 ms**; decode is now GPU-bound. On an RX 7800 XT with Qwen3.5-2B-Q8_0: decode **35.7 → 63.0 t/s** @ depth 0, **31.7 → 55.6** @ 2048, **28.8 → 49.2** @ 4096; prefill **2257 → 2726 t/s**. Gap to llama.cpp: 3.0× → ~1.7×.
 - **`2026.08.01`**: 🔴 AMD ROCm kernels — Crane's own `kernels/cuda/*.cu` now run on AMD too (the ROCm build compiles them with `hipcc` on first use and caches the code object), so the fused GDN recurrence, GPU top-k sampling and `fused_silu_mul` are no longer CUDA-only. The causal Conv1D also became `kernel` shifted multiply-accumulates instead of one windowed reduction per timestep, which helps every backend. Qwen 3.5's GGUF loader also stops forcing F32 side tensors (embeddings, norms, attention scores) on ROCm — F16 like Metal. On an RX 7800 XT with Qwen3.5-2B-Q8_0: prefill **183 → ~1600 t/s**, decode @ depth 2048 **15.4 → 30.6 t/s**, and peak VRAM on a 3800-token prompt drops from 99% to 69% of 16 GB.
@@ -418,6 +420,54 @@ cargo run -p crane-examples --bin ornith_tools --release --features cuda \
   -- --model-path /path/to/Ornith-1.0-9B
 # or:  MODEL_PATH=/path/to/Ornith-1.0-9B cargo run --bin ornith_tools ...
 ```
+
+### Qwen 3.6 / Qwen 3.8 (27B dense)
+
+Both 27B checkpoints declare `model_type: "qwen3_5"` /
+`architectures: ["Qwen3_5ForConditionalGeneration"]`, and their GGUF
+conversions carry `general.architecture = "qwen35"` — they are the Qwen 3.5
+architecture scaled up (64 layers, `hidden_size` 5120, 24 query / 4 KV heads,
+48 GDN value heads, untied `lm_head`, ViT depth 27), so they run on the same
+code path and are auto-detected. Qwen 3.6-27B and Qwen 3.8-27B have identical
+text configs.
+
+```bash
+# GGUF (recommended): ~16 GB for Q4_K_M, fits a 24 GB card text-only
+./target/release/crane-serve --text-only -m /path/to/Qwen3.8-27B-Q4_K_M.gguf
+
+# or fetch one
+./data/crane-model-download --model qwen3.8-27b-gguf --path ~/models --quant Q4_K_M
+```
+
+**Flexible thinking control.** These models reason by default, and their chat
+template ends the prompt with an open `<think>` block. Crane splits the
+scratchpad out of the answer into `reasoning_content` (streaming too), so
+`content` holds only the reply:
+
+```bash
+# default: thinking on at 'xhigh' — the longest reasoning budget
+curl localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "qwen3.8", "messages": [{"role": "user", "content": "What is 2+2?"}]}'
+# → {"message": {"content": "4", "reasoning_content": "Two plus two is four."}}
+
+# short thinking (much lower latency)
+  -d '{..., "reasoning_effort": "low"}'
+
+# thinking off entirely
+  -d '{..., "chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+`reasoning_effort` accepts `low`, `medium` and `xhigh` (default). Note that
+`medium` is the neutral baseline and injects no instruction — only `low` and
+`xhigh` add one.
+
+**Memory.** GGUF is the better choice at this size, not just the convenient
+one: Q4_K_M is 15.40 GiB and spends 4.14 GiB of that putting Q6_K on the
+quantization-sensitive tensors (`ffn_down`, `output`), whereas `--quant q4k`
+in-situ quantization lands at ~15.8 GiB with one dtype for everything and a
+dense embedding table. The 248320-row embedding stays quantized on the GGUF
+path and is gathered row-by-row (`CRANE_EMBED_DENSE=1` reverts to the old
+dequantize-everything behaviour).
 
 **K/V cache compression (CUDA):** the full-attention K/V cache dominates
 memory at long context (the GDN layers carry a constant recurrent state).

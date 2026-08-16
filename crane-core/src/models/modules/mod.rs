@@ -1,5 +1,6 @@
 // pub mod conn_ve_llm;
 pub mod attention;
+pub mod embedding;
 pub mod ffn;
 pub mod flash_attn;
 pub(crate) mod kv_cache;

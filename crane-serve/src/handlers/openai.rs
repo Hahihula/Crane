@@ -49,10 +49,14 @@ pub async fn chat_completions(
         return vlm::vlm_chat_completions(state, req).await;
     }
 
-    // Apply chat template.
+    // Apply chat template, forwarding the request's reasoning controls.
+    let thinking = crate::reasoning::ThinkingOptions::from_request(
+        req.chat_template_kwargs.as_ref(),
+        req.reasoning_effort.as_deref(),
+    );
     let formatted = state
         .chat_template
-        .apply(&req.messages)
+        .apply_with_thinking(&req.messages, &thinking)
         .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Chat template failed: {e}")))?;
 
     // Tokenize.
@@ -92,14 +96,24 @@ pub async fn chat_completions(
 
     if req.stream {
         let model_name = state.model_name.clone();
-        let stream =
-            sse::make_chat_sse_stream(request_id, model_name, response_rx, include_usage);
+        let stream = sse::make_chat_sse_stream(
+            request_id,
+            model_name,
+            response_rx,
+            include_usage,
+            crate::reasoning::ReasoningSplitter::for_prompt(&formatted),
+        );
         Ok(Sse::new(stream)
             .keep_alive(KeepAlive::default())
             .into_response())
     } else {
         let (full_text, prompt_tokens, completion_tokens, finish_reason) =
             collect_response(response_rx).await?;
+
+        // The opening `<think>` lives in the prompt, not the output, so the
+        // split is decided from `formatted`.
+        let (reasoning_content, content) =
+            crate::reasoning::split_complete(&formatted, &full_text);
 
         let response = ChatCompletionResponse {
             id: request_id,
@@ -108,10 +122,7 @@ pub async fn chat_completions(
             model: state.model_name.clone(),
             choices: vec![ChatChoice {
                 index: 0,
-                message: ChatMessage {
-                    role: "assistant".into(),
-                    content: ChatMessageContent::Text(full_text),
-                },
+                message: ChatMessage::assistant_with_reasoning(content, reasoning_content),
                 finish_reason: Some(finish_reason),
             }],
             usage: Usage {

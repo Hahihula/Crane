@@ -2,6 +2,7 @@ pub mod chat_template;
 pub mod engine;
 pub mod handlers;
 pub mod openai_api;
+pub mod reasoning;
 pub mod sglang_api;
 
 use std::sync::Arc;
@@ -76,12 +77,12 @@ pub struct Args {
     #[arg(long)]
     pub llm_gguf: Option<String>,
     /// Qwen 3.5-VL / Ornith only: load the checkpoint as a plain text model
-    /// instead of a VLM, even though `config.json` declares a
-    /// `vision_config` (and `--model-type` is `auto` or `qwen3_5_vl`). The
-    /// vision tower's weights are simply never read — same checkpoint
-    /// directory, no extra VRAM for the ~600M-param ViT — and this path also
-    /// unlocks `--quant`, which the VLM load path does not support. Models
-    /// are vision-capable by default; this is an opt-out, not the default.
+    /// instead of a VLM, even though `config.json` declares a `vision_config`
+    /// (and `--model-type` is `auto` or `qwen3_5_vl`). The vision tower's
+    /// weights are simply never read — same checkpoint directory, no extra
+    /// VRAM for the ~600M-param ViT — and this path also unlocks `--quant`,
+    /// which the VLM load path does not support. Models are vision-capable by
+    /// default; this is an opt-out, not the default.
     #[arg(long)]
     pub text_only: bool,
 }
