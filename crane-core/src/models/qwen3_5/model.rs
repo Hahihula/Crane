@@ -296,7 +296,7 @@ impl Qwen3_5TextModel {
         let lm_head = if tie_word_embeddings {
             // Tied: the output projection is this very table, so it reuses the
             // same buffer rather than materializing a dense copy.
-            LinearLayer::Quantized(embed_tokens.tied_output()?)
+            embed_tokens.tied_output()?
         } else {
             gg.linear("output.weight")?
         };

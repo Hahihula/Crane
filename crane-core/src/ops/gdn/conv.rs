@@ -27,6 +27,9 @@ pub fn causal_conv1d(
     cache: &mut GdnLayerCache,
 ) -> Result<Tensor> {
     let (_, seq_len, _) = x.dims3()?;
+    if seq_len == 1 {
+        return decode_conv1d(x, conv1d_weight, cache);
+    }
     let x_t = x.transpose(1, 2)?.contiguous()?;
     // `conv_state` is shape `[1, conv_dim, kernel_size]` — the kernel-size
     // dim is the LAST (matches mistral.rs).
@@ -52,6 +55,52 @@ pub fn causal_conv1d(
             ))
         })?;
     let out = shift_accumulate(&hidden, &weight, seq_len, offset)?;
+    candle_nn::ops::silu(&out)?.transpose(1, 2)
+}
+
+/// Single-token specialization of [`causal_conv1d`], for decode.
+///
+/// Identical arithmetic, far fewer kernel launches. Decode is dispatch-bound —
+/// the CPU spends ~41 ms of a 53 ms token merely submitting work on
+/// Qwen3.8-27B — and the general path costs ~12 launches per GDN layer, so
+/// ~576 across that model's 48 GDN layers. Three things collapse at
+/// `seq_len == 1`:
+///
+/// * the `kernel` shifted multiply-accumulates become one broadcast multiply
+///   plus one reduction (7 launches → 2),
+/// * the `[B,1,C] → [B,C,1]` transpose is a pure reshape, so no copy, and
+/// * the convolution window and the next call's `conv_state` are the *same*
+///   `kernel`-wide slice, so it is materialized once instead of twice.
+///
+/// Verified against the general path by `decode_matches_general_path`.
+fn decode_conv1d(
+    x: &Tensor,
+    conv1d_weight: &Tensor,
+    cache: &mut GdnLayerCache,
+) -> Result<Tensor> {
+    let (b, _, c) = x.dims3()?;
+    let kernel = cache.conv_state.dim(2)?;
+
+    // `[B, 1, C] → [B, C, 1]` moves no data when the source is contiguous —
+    // both layouts enumerate the same C values in the same order.
+    let x_t = if x.is_contiguous() {
+        x.reshape((b, c, 1))?
+    } else {
+        x.transpose(1, 2)?.contiguous()?
+    };
+
+    let hidden = Tensor::cat(&[&cache.conv_state, &x_t], 2)?; // [B, C, kernel + 1]
+    // Positions `1..=kernel` are simultaneously the window this token
+    // convolves over and the state the next token starts from, so one copy
+    // serves both.
+    let window = hidden.narrow(2, 1, kernel)?.contiguous()?;
+    cache.conv_state = window.clone();
+
+    let w = conv1d_weight
+        .squeeze(1)?
+        .to_dtype(window.dtype())?
+        .unsqueeze(0)?; // [1, C, kernel]
+    let out = window.broadcast_mul(&w)?.sum_keepdim(2)?; // [B, C, 1]
     candle_nn::ops::silu(&out)?.transpose(1, 2)
 }
 
@@ -166,6 +215,75 @@ mod tests {
             .unwrap();
         for (a, b) in ws.iter().zip(&cs) {
             assert!((a - b).abs() < 1e-6, "conv state {a} != {b}");
+        }
+    }
+
+    /// Token-at-a-time decode must reproduce the whole-sequence result exactly.
+    ///
+    /// `causal_conv1d` routes every `seq_len == 1` call to `decode_conv1d`,
+    /// which fuses the shifted multiply-accumulates into one broadcast multiply
+    /// plus a reduction and shares a single copy between the convolution window
+    /// and the next `conv_state`. That is a different expression of the same
+    /// arithmetic, so it is pinned here rather than assumed — a drift would
+    /// only show up as slightly-wrong generations.
+    #[test]
+    fn decode_matches_general_path() {
+        let dev = Device::Cpu;
+        let (conv_dim, kernel, seq_len) = (6usize, 4usize, 9usize);
+        let d = dims(conv_dim, kernel);
+        let x = Tensor::rand(-1f32, 1.0, (1, seq_len, conv_dim), &dev).unwrap();
+        let w = Tensor::rand(-1f32, 1.0, (conv_dim, 1, kernel), &dev).unwrap();
+
+        let mut whole_cache = empty_cache(conv_dim, kernel, &dev);
+        let whole = causal_conv1d(&x, &w, &d, &mut whole_cache).unwrap();
+
+        // One token at a time — every call takes the decode path.
+        let mut step_cache = empty_cache(conv_dim, kernel, &dev);
+        let mut steps = Vec::with_capacity(seq_len);
+        for t in 0..seq_len {
+            let tok = x.narrow(1, t, 1).unwrap().contiguous().unwrap();
+            steps.push(causal_conv1d(&tok, &w, &d, &mut step_cache).unwrap());
+        }
+        let stepped = Tensor::cat(&steps, 1).unwrap();
+
+        assert_eq!(whole.dims(), stepped.dims());
+        let whole_v = whole.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let step_v = stepped.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (a, b) in whole_v.iter().zip(&step_v) {
+            assert!((a - b).abs() < 1e-6, "decode output {a} != whole-pass {b}");
+        }
+
+        // And the carried state, or the *next* token diverges silently.
+        let ws = whole_cache.conv_state.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let ss = step_cache.conv_state.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (a, b) in ws.iter().zip(&ss) {
+            assert!((a - b).abs() < 1e-6, "decode conv state {a} != {b}");
+        }
+    }
+
+    /// A non-contiguous single token must still work: the decode path reshapes
+    /// instead of transposing only when the source is contiguous.
+    #[test]
+    fn decode_handles_non_contiguous_input() {
+        let dev = Device::Cpu;
+        let (conv_dim, kernel) = (6usize, 4usize);
+        let d = dims(conv_dim, kernel);
+        let w = Tensor::rand(-1f32, 1.0, (conv_dim, 1, kernel), &dev).unwrap();
+
+        // Slice a token out of a wider buffer without compacting it.
+        let wide = Tensor::rand(-1f32, 1.0, (1, 3, conv_dim), &dev).unwrap();
+        let strided = wide.narrow(1, 1, 1).unwrap();
+        let compact = strided.contiguous().unwrap();
+
+        let mut c1 = empty_cache(conv_dim, kernel, &dev);
+        let mut c2 = empty_cache(conv_dim, kernel, &dev);
+        let a = causal_conv1d(&strided, &w, &d, &mut c1).unwrap();
+        let b = causal_conv1d(&compact, &w, &d, &mut c2).unwrap();
+
+        let a = a.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = b.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).abs() < 1e-6, "{x} != {y}");
         }
     }
 

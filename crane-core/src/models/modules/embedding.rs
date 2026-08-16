@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
+
+use crate::ops::linear::LinearLayer;
 use candle_core::{DType, Device, Module, Result, Tensor};
 
 /// `CRANE_EMBED_DENSE=1` restores the old behaviour — dequantize the whole
@@ -100,10 +102,22 @@ impl EmbeddingLayer {
     /// Tying means the lm_head *is* this table, so a quantized table yields a
     /// quantized `QMatMul` over the very same buffer — no second copy, which
     /// is the other half of the memory saving on tied models.
-    pub fn tied_output(&self) -> Result<QMatMul> {
+    ///
+    /// Returns a [`LinearLayer`] rather than a bare `QMatMul` on purpose: a
+    /// dense table must become `LinearLayer::Standard`, because
+    /// `LinearLayer::Quantized` up-casts its input to F32 for candle's
+    /// dequantizing matmul, and `QMatMul::Tensor` is a plain matmul that does
+    /// no such casting — pairing them fails with "dtype mismatch in matmul,
+    /// lhs: F32, rhs: BF16" on the first forward.
+    pub fn tied_output(&self) -> Result<LinearLayer> {
         match self {
-            Self::Dense(e) => Ok(QMatMul::Tensor(e.embeddings().clone())),
-            Self::Quantized { weight, .. } => QMatMul::from_arc(weight.clone()),
+            Self::Dense(e) => Ok(LinearLayer::Standard(candle_nn::Linear::new(
+                e.embeddings().clone(),
+                None,
+            ))),
+            Self::Quantized { weight, .. } => {
+                Ok(LinearLayer::Quantized(QMatMul::from_arc(weight.clone())?))
+            }
         }
     }
 
@@ -160,6 +174,31 @@ mod tests {
         Ok(())
     }
 
+    /// A *dense* tied table must still work with non-F32 activations.
+    ///
+    /// Wrapping it as `LinearLayer::Quantized` type-checks but fails on the
+    /// first forward with "dtype mismatch in matmul, lhs: F32, rhs: BF16",
+    /// because that variant up-casts its input for candle's dequantizing
+    /// matmul while `QMatMul::Tensor` does no casting of its own. That is how
+    /// `CRANE_EMBED_DENSE=1` broke on tied checkpoints.
+    #[test]
+    fn dense_tied_output_accepts_non_f32_activations() -> Result<()> {
+        let dev = Device::Cpu;
+        let (vocab, hidden) = (16usize, 32usize);
+        // Non-F32 activations are the trigger; the loader uses BF16 on CUDA
+        // and F16 on Metal/ROCm. F16 here because candle's CPU matmul has no
+        // BF16 kernel, and the distinction that matters is only "not F32".
+        let w = Tensor::zeros((vocab, hidden), DType::F16, &dev)?;
+        let layer = EmbeddingLayer::dense_from_tensor(w, hidden);
+
+        assert!(matches!(layer.tied_output()?, LinearLayer::Standard(_)));
+
+        let x = Tensor::zeros((1, 1, hidden), DType::F16, &dev)?;
+        let y = layer.tied_output()?.forward(&x)?;
+        assert_eq!(y.dims(), &[1, 1, vocab]);
+        Ok(())
+    }
+
     /// The quantized table must be markedly smaller — that is the whole point.
     #[test]
     fn quantized_table_is_smaller_than_dense() -> Result<()> {
@@ -188,7 +227,7 @@ mod tests {
         let w = Tensor::zeros((vocab, hidden), DType::F32, &dev)?;
         let layer = EmbeddingLayer::from_qtensor(QTensor::quantize(&w, GgmlDType::Q4K)?, hidden, DType::F32)?;
 
-        assert!(matches!(layer.tied_output()?, QMatMul::QTensor(_)));
+        assert!(matches!(layer.tied_output()?, LinearLayer::Quantized(QMatMul::QTensor(_))));
 
         // …and it projects to vocab logits, i.e. it is the transposed matmul
         // a tied lm_head needs.
