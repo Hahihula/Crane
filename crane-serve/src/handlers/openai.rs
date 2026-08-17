@@ -49,14 +49,24 @@ pub async fn chat_completions(
         return vlm::vlm_chat_completions(state, req).await;
     }
 
-    // Apply chat template, forwarding the request's reasoning controls.
+    // Apply chat template, forwarding the request's reasoning controls and
+    // any tool specs.
     let thinking = crate::reasoning::ThinkingOptions::from_request(
         req.chat_template_kwargs.as_ref(),
         req.reasoning_effort.as_deref(),
     );
+    // `tool_choice: "none"` means "expose no tools this turn", which for a
+    // template-driven prompt is exactly the same as sending none.
+    let suppressed = req
+        .tool_choice
+        .as_ref()
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c == "none");
+    let tools = req.tools.as_deref().filter(|_| !suppressed);
+    let opts = crate::chat_template::RenderOptions { thinking, tools };
     let formatted = state
         .chat_template
-        .apply_with_thinking(&req.messages, &thinking)
+        .apply_with(&req.messages, &opts)
         .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Chat template failed: {e}")))?;
 
     // Tokenize.
@@ -115,6 +125,17 @@ pub async fn chat_completions(
         let (reasoning_content, content) =
             crate::reasoning::split_complete(&formatted, &full_text);
 
+        // Tool calls are parsed out of what remains after the scratchpad, so a
+        // call the model merely *considered* while thinking is not executed.
+        let parsed = crate::tools::parse_output(&content);
+        // OpenAI signals a tool turn with `finish_reason: "tool_calls"`, which
+        // is how clients know to run the tools rather than show the text.
+        let finish_reason = if parsed.has_calls() {
+            "tool_calls".to_string()
+        } else {
+            finish_reason
+        };
+
         let response = ChatCompletionResponse {
             id: request_id,
             object: "chat.completion".into(),
@@ -122,7 +143,11 @@ pub async fn chat_completions(
             model: state.model_name.clone(),
             choices: vec![ChatChoice {
                 index: 0,
-                message: ChatMessage::assistant_with_reasoning(content, reasoning_content),
+                message: ChatMessage::assistant_with_tools(
+                    parsed.content,
+                    reasoning_content,
+                    parsed.tool_calls,
+                ),
                 finish_reason: Some(finish_reason),
             }],
             usage: Usage {

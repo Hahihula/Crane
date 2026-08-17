@@ -3,6 +3,7 @@ pub mod engine;
 pub mod handlers;
 pub mod openai_api;
 pub mod reasoning;
+pub mod tools;
 pub mod sglang_api;
 
 use std::sync::Arc;

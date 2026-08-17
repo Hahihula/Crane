@@ -49,14 +49,20 @@ pub fn make_chat_sse_stream(
         // A token may straddle a `</think>` tag, so one token can yield both a
         // reasoning and a content delta — or neither, while a partial tag is
         // buffered.
+        // Tool-call markup is withheld from `content` and released as a single
+        // `tool_calls` delta at the end — see `crate::tools::ToolCallStream`.
+        let mut tool_stream = crate::tools::ToolCallStream::default();
+
         macro_rules! emit_deltas {
             ($reasoning:expr, $content:expr) => {{
                 let (reasoning, content) = ($reasoning, $content);
+                let content = tool_stream.push(&content);
                 for delta in [
                     (!reasoning.is_empty()).then(|| ChunkDelta {
                         role: None,
                         content: None,
                         reasoning_content: Some(reasoning),
+                        tool_calls: None,
                     }),
                     (!content.is_empty()).then(|| ChunkDelta::content(content)),
                 ]
@@ -96,6 +102,35 @@ pub fn make_chat_sse_stream(
                     let (reasoning, content) = splitter.finish();
                     emit_deltas!(reasoning, content);
 
+                    // Then release whatever the tool filter withheld: trailing
+                    // prose first, then the completed calls.
+                    let (tail, calls) = tool_stream.finish();
+                    let has_calls = !calls.is_empty();
+                    for delta in [
+                        (!tail.trim().is_empty()).then(|| ChunkDelta::content(tail)),
+                        has_calls.then(|| ChunkDelta::tool_calls(calls)),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let chunk = ChatCompletionChunk {
+                            id: request_id.clone(),
+                            object: "chat.completion.chunk".into(),
+                            created,
+                            model: model_name.clone(),
+                            choices: vec![ChunkChoice { index: 0, delta, finish_reason: None }],
+                            usage: None,
+                        };
+                        yield Ok(Event::default().json_data(&chunk).unwrap());
+                    }
+
+                    // A tool turn ends as `tool_calls`, not `stop`, so clients
+                    // know to run the tools instead of showing the text.
+                    let finish_reason = if has_calls {
+                        "tool_calls".to_string()
+                    } else {
+                        finish_reason
+                    };
                     let chunk = ChatCompletionChunk {
                         id: request_id.clone(),
                         object: "chat.completion.chunk".into(),
