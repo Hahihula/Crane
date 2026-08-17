@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 crane = { path = "../crane" }
 crane-core = { path = "../crane-core" }
+candle-core = "0.11"
 anyhow = "1.0.100"
 image = "0.25.9"
 rustyline = "14.0.0"
@@ -90,6 +91,10 @@ path = "src/onnx_probe.rs"
 [[bin]]
 name = "minicpmo_duplex_simple"
 path = "src/minicpmo_duplex_simple.rs"
+
+[[bin]]
+name = "muscriptor_transcribe"
+path = "src/muscriptor_transcribe.rs"
 
 [features]
 default = []
