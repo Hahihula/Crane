@@ -172,7 +172,9 @@ fn syllabify_segment(w: &[char]) -> Vec<(usize, usize)> {
 /// boundaries `st`/`sp` palatalization checks against. Each hyphen-delimited
 /// segment of `word` is syllabified independently so a vowel nucleus never
 /// spans a hyphen boundary.
-fn build_syllables_and_morpheme_starts(word: &[char]) -> (Vec<char>, Vec<(usize, usize)>, Vec<bool>) {
+fn build_syllables_and_morpheme_starts(
+    word: &[char],
+) -> (Vec<char>, Vec<(usize, usize)>, Vec<bool>) {
     let compact_len = word.iter().filter(|&&c| c != '-').count();
     let mut compact = Vec::with_capacity(compact_len);
     let mut morpheme_starts = vec![false; compact_len];
@@ -213,7 +215,10 @@ fn default_stress_syllable_index(syllables: &[(usize, usize)], full_word: &[char
     if n <= 1 {
         return 0;
     }
-    if STRESSED_SUFFIXES.iter().any(|suf| ends_with_str(full_word, suf)) {
+    if STRESSED_SUFFIXES
+        .iter()
+        .any(|suf| ends_with_str(full_word, suf))
+    {
         return n - 1;
     }
     let plen = unstressed_prefix_len(full_word);
@@ -490,7 +495,10 @@ fn try_vowel(
         out.push_str("aʊ̯");
         return Some(2);
     }
-    if slice_eq_str(syllable, i, "ei") || slice_eq_str(syllable, i, "ai") || slice_eq_str(syllable, i, "ey") {
+    if slice_eq_str(syllable, i, "ei")
+        || slice_eq_str(syllable, i, "ai")
+        || slice_eq_str(syllable, i, "ey")
+    {
         out.push_str("aɪ̯");
         return Some(2);
     }
@@ -506,7 +514,11 @@ fn try_vowel(
         out.push_str("iː");
         return Some(2);
     }
-    if i + 1 < n && is_vowel(ch) && syllable[i + 1] == ch && matches!(ch, 'a' | 'o' | 'e' | 'i' | 'u') {
+    if i + 1 < n
+        && is_vowel(ch)
+        && syllable[i + 1] == ch
+        && matches!(ch, 'a' | 'o' | 'e' | 'i' | 'u')
+    {
         out.push_str(long_vowel_ipa(ch));
         return Some(2);
     }
@@ -560,14 +572,14 @@ fn try_vowel(
                 let is_schwa = i == n - 1
                     || (i + 2 == n && matches!(syllable[i + 1], 'n' | 'l' | 'm' | 'r' | 's'));
                 out.push_str(if is_schwa { "ə" } else { "ɛ" });
-            }
+            },
             'i' => out.push('ɪ'),
             'o' => out.push('ɔ'),
             'u' => out.push('ʊ'),
             'ä' => out.push('ɛ'),
             'ö' => out.push('ø'),
             'ü' | 'y' => out.push('ʏ'),
-            _ => {}
+            _ => {},
         }
         return Some(1);
     }
@@ -592,7 +604,9 @@ fn syllable_to_ipa(
     while i < n {
         let gi = span_start + i;
 
-        if let Some(consumed) = try_context_grapheme(syllable, i, full_word, gi, morpheme_starts, &mut out) {
+        if let Some(consumed) =
+            try_context_grapheme(syllable, i, full_word, gi, morpheme_starts, &mut out)
+        {
             i += consumed;
             continue;
         }
@@ -634,7 +648,7 @@ fn syllable_to_ipa(
             'n' => out.push('n'),
             'p' => out.push('p'),
             't' => out.push('t'),
-            _ => {}
+            _ => {},
         }
         i += 1;
     }
@@ -673,7 +687,12 @@ pub fn hand_rules_ipa(word: &str) -> String {
 
     let mut syllable_ipas: Vec<String> = Vec::with_capacity(syllables.len());
     for &(start, end) in &syllables {
-        syllable_ipas.push(syllable_to_ipa(&full_word[start..end], &full_word, &morpheme_starts, start));
+        syllable_ipas.push(syllable_to_ipa(
+            &full_word[start..end],
+            &full_word,
+            &morpheme_starts,
+            start,
+        ));
     }
 
     insert_primary_stress(&mut syllable_ipas, stress_idx);
@@ -1051,7 +1070,9 @@ mod tests {
         let chars: Vec<char> = "königlich".chars().collect();
         let (full_word, syllables, _) = build_syllables_and_morpheme_starts(&chars);
         assert!(
-            syllables.iter().all(|&(s, e)| !ends_with_str(&full_word[s..e], "ig")),
+            syllables
+                .iter()
+                .all(|&(s, e)| !ends_with_str(&full_word[s..e], "ig")),
             "{syllables:?}"
         );
     }

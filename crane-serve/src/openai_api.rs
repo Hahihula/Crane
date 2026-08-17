@@ -321,20 +321,40 @@ pub struct ChunkDelta {
 
 impl ChunkDelta {
     pub fn role(role: impl Into<String>) -> Self {
-        Self { role: Some(role.into()), content: None, reasoning_content: None, tool_calls: None }
+        Self {
+            role: Some(role.into()),
+            content: None,
+            reasoning_content: None,
+            tool_calls: None,
+        }
     }
 
     pub fn content(text: impl Into<String>) -> Self {
-        Self { role: None, content: Some(text.into()), reasoning_content: None, tool_calls: None }
+        Self {
+            role: None,
+            content: Some(text.into()),
+            reasoning_content: None,
+            tool_calls: None,
+        }
     }
 
     /// Empty delta, used by the terminal `finish_reason` chunk.
     pub fn empty() -> Self {
-        Self { role: None, content: None, reasoning_content: None, tool_calls: None }
+        Self {
+            role: None,
+            content: None,
+            reasoning_content: None,
+            tool_calls: None,
+        }
     }
 
     pub fn tool_calls(calls: Vec<ToolCall>) -> Self {
-        Self { role: None, content: None, reasoning_content: None, tool_calls: Some(calls) }
+        Self {
+            role: None,
+            content: None,
+            reasoning_content: None,
+            tool_calls: Some(calls),
+        }
     }
 }
 
@@ -516,7 +536,6 @@ pub struct SpeechRequest {
     pub max_tokens: usize,
 
     // ── Voice-clone fields (Base model only) ──────────────────
-
     /// URL or local path to reference audio for voice cloning.
     /// When set, triggers voice-clone mode (requires Base model).
     #[serde(default)]

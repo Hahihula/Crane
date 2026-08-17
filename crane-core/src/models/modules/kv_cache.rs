@@ -135,8 +135,7 @@ mod tests {
     fn in_place_write_appends_within_room() {
         let (batch, heads, dim) = (1, 2, 4);
         let prefill = bhsd(batch, heads, 3, dim, 0.0);
-        let prefill_update =
-            update_kv_cache(None, 0, &prefill, &prefill).expect("prefill");
+        let prefill_update = update_kv_cache(None, 0, &prefill, &prefill).expect("prefill");
 
         let step = bhsd(batch, heads, 1, dim, 1000.0);
         let step_update = update_kv_cache(

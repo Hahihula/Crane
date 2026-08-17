@@ -24,12 +24,11 @@
 //! ```
 
 use candle_core::{DType, Device, Tensor};
-use crane_core::generation::based::ModelForCausalLM;
 use crane_core::generation::GenerationConfig;
+use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::{Model, ModelFormat};
 
-const PROMPT: &str =
-    "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
+const PROMPT: &str = "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
 const MAX_NEW_TOKENS: usize = 32;
 
 fn device_and_dtype() -> (Device, DType) {
@@ -88,7 +87,11 @@ fn to_f32(t: &Tensor) -> Vec<f32> {
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
-    let dot: f64 = a.iter().zip(b).map(|(x, y)| f64::from(*x) * f64::from(*y)).sum();
+    let dot: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| f64::from(*x) * f64::from(*y))
+        .sum();
     let na: f64 = a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
     let nb: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum::<f64>().sqrt();
     dot / (na * nb)
@@ -117,7 +120,10 @@ fn quantized_embedding_matches_dense_embedding() {
     println!("prefill logits cosine : {cos:.9}");
     println!("prefill logits max|Δ| : {max_abs:.6}");
     match first_diff {
-        None => println!("greedy tokens         : identical for all {} tokens", q_tokens.len()),
+        None => println!(
+            "greedy tokens         : identical for all {} tokens",
+            q_tokens.len()
+        ),
         Some(i) => println!(
             "greedy tokens         : diverge at {i}/{} ({} vs {})",
             q_tokens.len(),

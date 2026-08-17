@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::{embedding, linear_no_bias, Activation, Embedding, Linear, VarBuilder};
+use candle_nn::{Activation, Embedding, Linear, VarBuilder, embedding, linear_no_bias};
 
 use crate::models::modules::attention::{AttentionConfig, RopeMode};
 use crate::models::modules::rotary::RotaryEmbedding;
@@ -604,7 +604,10 @@ impl AcousticTransformer {
         for step in 0u8..FLOW_INTERVALS {
             let t = f32::from(step) * dt;
             let emb = self.compute_time_embedding(t, device)?.to_dtype(dtype)?;
-            let tok = self.time_projection.forward(&emb.unsqueeze(0)?)?.squeeze(0)?;
+            let tok = self
+                .time_projection
+                .forward(&emb.unsqueeze(0)?)?
+                .squeeze(0)?;
             time_tokens.push(tok);
         }
 

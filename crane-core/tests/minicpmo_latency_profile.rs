@@ -20,14 +20,18 @@
 #[ignore = "needs a local MiniCPM-o-4.5 checkpoint (CRANE_MINICPMO_DIR); profiling only, no assertions"]
 fn minicpmo_profile_llm_and_tts_latency() {
     use candle_core::Tensor;
-    use crane_core::models::minicpmo::{load_config, MiniCpmOLlm, MiniCpmTts, TtsGenerationConfig};
+    use crane_core::models::minicpmo::{MiniCpmOLlm, MiniCpmTts, TtsGenerationConfig, load_config};
     use std::time::Instant;
 
-    let dir = std::env::var("CRANE_MINICPMO_DIR").expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");
+    let dir = std::env::var("CRANE_MINICPMO_DIR")
+        .expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");
 
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
-        (candle_core::Device::new_cuda(0).unwrap(), candle_core::DType::BF16)
+        (
+            candle_core::Device::new_cuda(0).unwrap(),
+            candle_core::DType::BF16,
+        )
     } else {
         (candle_core::Device::Cpu, candle_core::DType::F32)
     };
@@ -38,10 +42,15 @@ fn minicpmo_profile_llm_and_tts_latency() {
     let mut llm = MiniCpmOLlm::new(&dir, &device, &dtype).expect("load llm");
     let config = load_config(&format!("{dir}/config.json")).expect("load config");
     let vb = unsafe {
-        candle_nn::VarBuilder::from_mmaped_safetensors(&crane_core::utils::utils::get_safetensors_files(&dir).unwrap(), dtype, &device)
+        candle_nn::VarBuilder::from_mmaped_safetensors(
+            &crane_core::utils::utils::get_safetensors_files(&dir).unwrap(),
+            dtype,
+            &device,
+        )
     }
     .unwrap();
-    let mut tts = MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts");
+    let mut tts =
+        MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts");
     println!("[load] llm + tts: {:?}", t0.elapsed());
 
     // ── LLM: prefill + per-token decode ──
@@ -55,7 +64,11 @@ fn minicpmo_profile_llm_and_tts_latency() {
     llm.clear_kv_cache();
     let t0 = Instant::now();
     let mut logits = llm.forward_step(&prompt_ids, 0).unwrap();
-    println!("[llm] prefill ({} tokens): {:?}", prompt_ids.len(), t0.elapsed());
+    println!(
+        "[llm] prefill ({} tokens): {:?}",
+        prompt_ids.len(),
+        t0.elapsed()
+    );
 
     let max_new_tokens = 80;
     let mut response_tokens: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -63,7 +76,17 @@ fn minicpmo_profile_llm_and_tts_latency() {
     let mut cur_pos = prompt_ids.len();
     let mut llm_decode_times = Vec::with_capacity(max_new_tokens);
     for _ in 0..max_new_tokens {
-        let next = logits.squeeze(0).unwrap().squeeze(0).unwrap().to_dtype(candle_core::DType::F32).unwrap().argmax(candle_core::D::Minus1).unwrap().to_scalar::<u32>().unwrap();
+        let next = logits
+            .squeeze(0)
+            .unwrap()
+            .squeeze(0)
+            .unwrap()
+            .to_dtype(candle_core::DType::F32)
+            .unwrap()
+            .argmax(candle_core::D::Minus1)
+            .unwrap()
+            .to_scalar::<u32>()
+            .unwrap();
         if next == im_end || Some(next) == tts_eos {
             break;
         }
@@ -74,22 +97,47 @@ fn minicpmo_profile_llm_and_tts_latency() {
         hidden_rows.push(llm.last_hidden_states().unwrap().clone());
         cur_pos += 1;
     }
-    let response_text = llm.tokenizer.tokenizer.decode(&response_tokens, true).unwrap();
-    let avg_llm_decode: f64 = llm_decode_times.iter().map(std::time::Duration::as_secs_f64).sum::<f64>() / llm_decode_times.len() as f64;
-    println!("[llm] response: {response_text:?} ({} tokens)", response_tokens.len());
-    println!("[llm] avg decode step: {:.2}ms ({:.1} tok/s)", avg_llm_decode * 1000.0, 1.0 / avg_llm_decode);
+    let response_text = llm
+        .tokenizer
+        .tokenizer
+        .decode(&response_tokens, true)
+        .unwrap();
+    let avg_llm_decode: f64 = llm_decode_times
+        .iter()
+        .map(std::time::Duration::as_secs_f64)
+        .sum::<f64>()
+        / llm_decode_times.len() as f64;
+    println!(
+        "[llm] response: {response_text:?} ({} tokens)",
+        response_tokens.len()
+    );
+    println!(
+        "[llm] avg decode step: {:.2}ms ({:.1} tok/s)",
+        avg_llm_decode * 1000.0,
+        1.0 / avg_llm_decode
+    );
 
     // ── TTS: condition + prefill + per-token decode ──
     let hidden_states = Tensor::cat(&hidden_rows, 1).unwrap().squeeze(0).unwrap();
     let t0 = Instant::now();
-    let condition_embeds = tts.build_condition_embeds(&response_tokens, &hidden_states).unwrap();
-    let text_eos_embed = tts.embed_special_token(tts.config.text_eos_token_id).unwrap();
-    let audio_bos_embed = tts.embed_special_token(tts.config.audio_bos_token_id).unwrap();
-    let inputs_embeds = Tensor::cat(&[&condition_embeds, &text_eos_embed, &audio_bos_embed], 1).unwrap();
+    let condition_embeds = tts
+        .build_condition_embeds(&response_tokens, &hidden_states)
+        .unwrap();
+    let text_eos_embed = tts
+        .embed_special_token(tts.config.text_eos_token_id)
+        .unwrap();
+    let audio_bos_embed = tts
+        .embed_special_token(tts.config.audio_bos_token_id)
+        .unwrap();
+    let inputs_embeds =
+        Tensor::cat(&[&condition_embeds, &text_eos_embed, &audio_bos_embed], 1).unwrap();
     println!("[tts] condition build: {:?}", t0.elapsed());
 
     let t0 = Instant::now();
-    let tts_cfg = TtsGenerationConfig { max_new_tokens: 150, ..Default::default() };
+    let tts_cfg = TtsGenerationConfig {
+        max_new_tokens: 150,
+        ..Default::default()
+    };
     let codes = tts.generate(&inputs_embeds, &tts_cfg).unwrap();
     let tts_elapsed = t0.elapsed();
     println!(
@@ -99,7 +147,10 @@ fn minicpmo_profile_llm_and_tts_latency() {
         tts_elapsed.as_secs_f64() * 1000.0 / codes.len() as f64,
         codes.len() as f64 / tts_elapsed.as_secs_f64()
     );
-    println!("[tts] audio duration represented: {:.2}s (25Hz speech tokens)", codes.len() as f64 / 25.0);
+    println!(
+        "[tts] audio duration represented: {:.2}s (25Hz speech tokens)",
+        codes.len() as f64 / 25.0
+    );
 }
 
 #[test]
@@ -108,11 +159,15 @@ fn minicpmo_profile_token2wav_latency() {
     use crane_core::models::minicpmo::Token2Wav;
     use std::time::Instant;
 
-    let dir = std::env::var("CRANE_MINICPMO_DIR").expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");
+    let dir = std::env::var("CRANE_MINICPMO_DIR")
+        .expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");
 
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
-        (candle_core::Device::new_cuda(0).unwrap(), candle_core::DType::BF16)
+        (
+            candle_core::Device::new_cuda(0).unwrap(),
+            candle_core::DType::BF16,
+        )
     } else {
         (candle_core::Device::Cpu, candle_core::DType::F32)
     };

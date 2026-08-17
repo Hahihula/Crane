@@ -21,7 +21,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor};
-use candle_nn::{linear, linear_no_bias, Activation, Linear, VarBuilder};
+use candle_nn::{Activation, Linear, VarBuilder, linear, linear_no_bias};
 use serde::Deserialize;
 
 use super::audio_vae::{AudioVaeDecoder, AudioVaeEncoder};
@@ -69,7 +69,12 @@ pub struct VoxCpm2GenerationConfig {
 
 impl Default for VoxCpm2GenerationConfig {
     fn default() -> Self {
-        Self { min_len: 2, max_len: 2000, inference_timesteps: 10, cfg_value: 2.0 }
+        Self {
+            min_len: 2,
+            max_len: 2000,
+            inference_timesteps: 10,
+            cfg_value: 2.0,
+        }
     }
 }
 
@@ -140,14 +145,22 @@ impl VoxCpm2Model {
 
         let table_len = cfg.max_length;
         let base_lm = MiniCpm4Model::new(&cfg.lm_config, table_len, vb.pp("base_lm"))?;
-        let residual_cfg = cfg.lm_config.derive_residual_lm(cfg.residual_lm_num_layers, cfg.residual_lm_no_rope);
+        let residual_cfg = cfg
+            .lm_config
+            .derive_residual_lm(cfg.residual_lm_num_layers, cfg.residual_lm_no_rope);
         let residual_lm = MiniCpm4Model::new(&residual_cfg, table_len, vb.pp("residual_lm"))?;
 
         let encoder_cfg = cfg.lm_config.derive(&cfg.encoder_config);
-        let feat_encoder = VoxCpmLocEnc::new(&encoder_cfg, cfg.feat_dim, table_len, vb.pp("feat_encoder"))?;
+        let feat_encoder =
+            VoxCpmLocEnc::new(&encoder_cfg, cfg.feat_dim, table_len, vb.pp("feat_encoder"))?;
 
         let dit_cfg = cfg.lm_config.derive(&cfg.dit_config.shape);
-        let estimator = VoxCpmLocDit::new(&dit_cfg, cfg.feat_dim, table_len, vb.pp("feat_decoder").pp("estimator"))?;
+        let estimator = VoxCpmLocDit::new(
+            &dit_cfg,
+            cfg.feat_dim,
+            table_len,
+            vb.pp("feat_decoder").pp("estimator"),
+        )?;
         let feat_decoder = UnifiedCfm::new(estimator, cfg.dit_config.mean_mode);
 
         let hidden = cfg.lm_config.hidden_size;
@@ -158,18 +171,33 @@ impl VoxCpm2Model {
             cfg.scalar_quantization_scale,
             vb.pp("fsq_layer"),
         )?;
-        let enc_to_lm_proj = linear(cfg.encoder_config.hidden_dim, hidden, vb.pp("enc_to_lm_proj"))?;
-        let lm_to_dit_proj = linear(hidden, cfg.dit_config.shape.hidden_dim, vb.pp("lm_to_dit_proj"))?;
-        let res_to_dit_proj = linear(hidden, cfg.dit_config.shape.hidden_dim, vb.pp("res_to_dit_proj"))?;
+        let enc_to_lm_proj = linear(
+            cfg.encoder_config.hidden_dim,
+            hidden,
+            vb.pp("enc_to_lm_proj"),
+        )?;
+        let lm_to_dit_proj = linear(
+            hidden,
+            cfg.dit_config.shape.hidden_dim,
+            vb.pp("lm_to_dit_proj"),
+        )?;
+        let res_to_dit_proj = linear(
+            hidden,
+            cfg.dit_config.shape.hidden_dim,
+            vb.pp("res_to_dit_proj"),
+        )?;
         let fusion_concat_proj = linear(hidden * 2, hidden, vb.pp("fusion_concat_proj"))?;
         let stop_proj = linear(hidden, hidden, vb.pp("stop_proj"))?;
         let stop_head = linear_no_bias(hidden, 2, vb.pp("stop_head"))?;
 
-        let avc: AudioVaeShapeConfig =
-            serde_json::from_value(cfg.audio_vae_config.clone()).context("parse audio_vae_config")?;
+        let avc: AudioVaeShapeConfig = serde_json::from_value(cfg.audio_vae_config.clone())
+            .context("parse audio_vae_config")?;
         let vae_weights_path = format!("{model_path}/audiovae.safetensors");
-        let vae_vb = unsafe { VarBuilder::from_mmaped_safetensors(&[vae_weights_path], DType::F32, device) }
-            .context("mmap audiovae.safetensors (run the .pth -> safetensors conversion first)")?;
+        let vae_vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[vae_weights_path], DType::F32, device) }
+                .context(
+                    "mmap audiovae.safetensors (run the .pth -> safetensors conversion first)",
+                )?;
         let audio_vae = AudioVaeDecoder::new(
             avc.latent_dim,
             avc.decoder_dim,
@@ -178,8 +206,12 @@ impl VoxCpm2Model {
             avc.out_sample_rate,
             vae_vb.pp("decoder"),
         )?;
-        let audio_vae_encoder =
-            AudioVaeEncoder::new(avc.encoder_dim, avc.latent_dim, &avc.encoder_rates, vae_vb.pp("encoder"))?;
+        let audio_vae_encoder = AudioVaeEncoder::new(
+            avc.encoder_dim,
+            avc.latent_dim,
+            &avc.encoder_rates,
+            vae_vb.pp("encoder"),
+        )?;
 
         Ok(Self {
             tokenizer,
@@ -229,7 +261,9 @@ impl VoxCpm2Model {
         conditioning: &VoxCpm2Conditioning,
         cfg: &VoxCpm2GenerationConfig,
     ) -> Result<Tensor> {
-        Ok(self.generate_conditioned_retrying(target_text, conditioning, cfg)?.0)
+        Ok(self
+            .generate_conditioned_retrying(target_text, conditioning, cfg)?
+            .0)
     }
 
     /// CFM/flow-matching sampling can, for a given random noise draw,
@@ -319,25 +353,37 @@ impl VoxCpm2Model {
     ) -> Result<(Tensor, Tensor)> {
         let total_len = ids.len();
         let ids_tensor = Tensor::new(ids, &self.device)?.unsqueeze(0)?; // [1, T]
-        let embed_tokens = self.base_lm.embed_tokens.as_ref().context("base_lm has no embed_tokens")?;
+        let embed_tokens = self
+            .base_lm
+            .embed_tokens
+            .as_ref()
+            .context("base_lm has no embed_tokens")?;
         let text_embed = embed_tokens.forward(&ids_tensor)?.to_dtype(self.dtype)?; // [1, T, H]
-        let text_embed = if self.lm_use_mup { (text_embed * self.lm_scale_emb)? } else { text_embed };
+        let text_embed = if self.lm_use_mup {
+            (text_embed * self.lm_scale_emb)?
+        } else {
+            text_embed
+        };
 
         let text_mask_t = mask_to_tensor(text_mask, &self.device, self.dtype)?;
         let audio_mask_t = mask_to_tensor(audio_mask, &self.device, self.dtype)?;
 
-        let feat_embed = self.enc_to_lm_proj.forward(&self.feat_encoder.forward(audio_feat)?)?; // [1, T, H]
+        let feat_embed = self
+            .enc_to_lm_proj
+            .forward(&self.feat_encoder.forward(audio_feat)?)?; // [1, T, H]
         let combined_embed =
             (text_embed.broadcast_mul(&text_mask_t)? + feat_embed.broadcast_mul(&audio_mask_t)?)?;
 
         let enc_outputs_raw = self.base_lm.forward(&combined_embed, true)?; // [1, T, H]
         let fsq_out = self.fsq_layer.forward(&enc_outputs_raw)?;
-        let enc_outputs =
-            (fsq_out.broadcast_mul(&audio_mask_t)? + enc_outputs_raw.broadcast_mul(&text_mask_t)?)?;
+        let enc_outputs = (fsq_out.broadcast_mul(&audio_mask_t)?
+            + enc_outputs_raw.broadcast_mul(&text_mask_t)?)?;
         let lm_hidden = enc_outputs.narrow(1, total_len - 1, 1)?.squeeze(1)?; // [1, H]
 
         let masked_feat_embed = feat_embed.broadcast_mul(&audio_mask_t)?;
-        let residual_in = self.fusion_concat_proj.forward(&Tensor::cat(&[&enc_outputs, &masked_feat_embed], 2)?)?;
+        let residual_in = self
+            .fusion_concat_proj
+            .forward(&Tensor::cat(&[&enc_outputs, &masked_feat_embed], 2)?)?;
         let residual_outputs = self.residual_lm.forward(&residual_in, true)?;
         let residual_hidden = residual_outputs.narrow(1, total_len - 1, 1)?.squeeze(1)?; // [1, H]
 
@@ -357,7 +403,8 @@ impl VoxCpm2Model {
         let total_len = ids.len();
         anyhow::ensure!(total_len > 0, "empty conditioning sequence");
 
-        let (mut lm_hidden, mut residual_hidden) = self.prefill(&ids, &audio_feat, &text_mask, &audio_mask)?;
+        let (mut lm_hidden, mut residual_hidden) =
+            self.prefill(&ids, &audio_feat, &text_mask, &audio_mask)?;
 
         // `feat[:, -1, ...]`: the real last position of the full input —
         // an all-zero patch for zero-shot/reference-only (text-terminated
@@ -369,8 +416,12 @@ impl VoxCpm2Model {
         // patches (continuation modes only) — see this method's doc comment.
         let mut generated: Vec<Tensor> = Vec::new();
         if context_len > 0 {
-            let audio_positions: Vec<usize> =
-                audio_mask.iter().enumerate().filter(|&(_, &m)| m == 1).map(|(i, _)| i).collect();
+            let audio_positions: Vec<usize> = audio_mask
+                .iter()
+                .enumerate()
+                .filter(|&(_, &m)| m == 1)
+                .map(|(i, _)| i)
+                .collect();
             let seed_positions = &audio_positions[audio_positions.len() - context_len..];
             for &pos in seed_positions {
                 generated.push(audio_feat.narrow(1, pos, 1)?.squeeze(1)?);
@@ -412,24 +463,38 @@ impl VoxCpm2Model {
             let position = total_len + step;
             let next_lm_hidden = self.base_lm.forward_step(&step_embed, position)?; // [1, H]
             lm_hidden = self.fsq_layer.forward(&next_lm_hidden)?; // FSQ applied for every generated step.
-            let residual_input = self.fusion_concat_proj.forward(&Tensor::cat(&[&lm_hidden, &step_embed], 1)?)?;
+            let residual_input = self
+                .fusion_concat_proj
+                .forward(&Tensor::cat(&[&lm_hidden, &step_embed], 1)?)?;
             residual_hidden = self.residual_lm.forward_step(&residual_input, position)?;
         }
 
-        anyhow::ensure!(generated.len() > context_len, "generated zero new audio patches");
+        anyhow::ensure!(
+            generated.len() > context_len,
+            "generated zero new audio patches"
+        );
 
         let stack = |patches: &[Tensor]| -> Result<Tensor> {
             // "b t p d -> b d (t p)": stack the per-step patches into a time
             // axis, then permute+flatten so channels lead and (step,
             // within-patch) collapse into one axis, step outer / within-patch inner.
-            let terms: Vec<Tensor> = patches.iter().map(|p| p.unsqueeze(1)).collect::<candle_core::Result<_>>()?;
+            let terms: Vec<Tensor> = patches
+                .iter()
+                .map(|p| p.unsqueeze(1))
+                .collect::<candle_core::Result<_>>()?;
             let stacked = Tensor::cat(&terms, 1)?; // [1, n, P, D]
             let (_b, n, p, d) = stacked.dims4()?;
-            Ok(stacked.permute((0, 3, 1, 2))?.contiguous()?.reshape((1, d, n * p))?)
+            Ok(stacked
+                .permute((0, 3, 1, 2))?
+                .contiguous()?
+                .reshape((1, d, n * p))?)
         };
 
         let latent = stack(&generated)?;
-        let wav = self.audio_vae.decode(&latent.to_dtype(DType::F32)?).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let wav = self
+            .audio_vae
+            .decode(&latent.to_dtype(DType::F32)?)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let wav = if context_len > 0 {
             let trim = self.patch_size * self.decoder_chunk_size * context_len;
             let total = wav.dim(2)?;
@@ -443,8 +508,10 @@ impl VoxCpm2Model {
         // `stack()`/`audio_vae.decode()` use), so `merge_prompt_cache` can
         // `Tensor::cat` this directly with an existing `prompt_feat`/round-trip
         // it back through `Continuation`/`RefContinuation` conditioning later.
-        let new_patches: Vec<Tensor> =
-            generated[context_len..].iter().map(|p| p.unsqueeze(1)).collect::<candle_core::Result<_>>()?;
+        let new_patches: Vec<Tensor> = generated[context_len..]
+            .iter()
+            .map(|p| p.unsqueeze(1))
+            .collect::<candle_core::Result<_>>()?;
         let generated_feat = Tensor::cat(&new_patches, 1)?;
         Ok((wav, generated_feat))
     }
@@ -455,7 +522,11 @@ impl VoxCpm2Model {
     /// `(tokens, feats, text_mask, audio_mask)`.
     fn make_ref_prefix(&self, ref_feat: &Tensor) -> Result<(Vec<u32>, Tensor, Vec<u32>, Vec<u32>)> {
         let ref_len = ref_feat.dim(1)?;
-        let zero_patch = Tensor::zeros((1, 1, self.patch_size, self.feat_dim), self.dtype, &self.device)?;
+        let zero_patch = Tensor::zeros(
+            (1, 1, self.patch_size, self.feat_dim),
+            self.dtype,
+            &self.device,
+        )?;
 
         let mut tokens = vec![REF_AUDIO_START_TOKEN];
         tokens.extend(std::iter::repeat_n(0u32, ref_len));
@@ -490,7 +561,11 @@ impl VoxCpm2Model {
             Ok(ids)
         };
         let text_pad_feat = |len: usize| -> Result<Tensor> {
-            Ok(Tensor::zeros((1, len, self.patch_size, self.feat_dim), self.dtype, &self.device)?)
+            Ok(Tensor::zeros(
+                (1, len, self.patch_size, self.feat_dim),
+                self.dtype,
+                &self.device,
+            )?)
         };
 
         match conditioning {
@@ -498,10 +573,17 @@ impl VoxCpm2Model {
                 let ids = text_suffix_ids(target_text)?;
                 let text_len = ids.len();
                 let audio_feat = text_pad_feat(text_len)?;
-                Ok((ids, audio_feat, vec![1u32; text_len], vec![0u32; text_len], 0))
-            }
+                Ok((
+                    ids,
+                    audio_feat,
+                    vec![1u32; text_len],
+                    vec![0u32; text_len],
+                    0,
+                ))
+            },
             VoxCpm2Conditioning::Reference(ref_feat) => {
-                let (mut tokens, ref_feats, mut text_mask, mut audio_mask) = self.make_ref_prefix(ref_feat)?;
+                let (mut tokens, ref_feats, mut text_mask, mut audio_mask) =
+                    self.make_ref_prefix(ref_feat)?;
                 let ids = text_suffix_ids(target_text)?;
                 let text_len = ids.len();
                 tokens.extend(ids);
@@ -509,8 +591,11 @@ impl VoxCpm2Model {
                 text_mask.extend(std::iter::repeat_n(1u32, text_len));
                 audio_mask.extend(std::iter::repeat_n(0u32, text_len));
                 Ok((tokens, feats, text_mask, audio_mask, 0))
-            }
-            VoxCpm2Conditioning::Continuation { prompt_text, prompt_feat } => {
+            },
+            VoxCpm2Conditioning::Continuation {
+                prompt_text,
+                prompt_feat,
+            } => {
                 let full_text = format!("{prompt_text}{target_text}");
                 let mut ids = text_suffix_ids(&full_text)?;
                 let text_len = ids.len();
@@ -523,9 +608,14 @@ impl VoxCpm2Model {
                 audio_mask.extend(std::iter::repeat_n(1u32, prompt_len));
                 let context_len = (STREAMING_PREFIX_LEN - 1).min(prompt_len);
                 Ok((ids, feats, text_mask, audio_mask, context_len))
-            }
-            VoxCpm2Conditioning::RefContinuation { ref_feat, prompt_text, prompt_feat } => {
-                let (mut tokens, ref_feats, mut text_mask, mut audio_mask) = self.make_ref_prefix(ref_feat)?;
+            },
+            VoxCpm2Conditioning::RefContinuation {
+                ref_feat,
+                prompt_text,
+                prompt_feat,
+            } => {
+                let (mut tokens, ref_feats, mut text_mask, mut audio_mask) =
+                    self.make_ref_prefix(ref_feat)?;
                 let full_text = format!("{prompt_text}{target_text}");
                 let mut ids = text_suffix_ids(&full_text)?;
                 let text_len = ids.len();
@@ -539,7 +629,7 @@ impl VoxCpm2Model {
                 audio_mask.extend(std::iter::repeat_n(1u32, prompt_len));
                 let context_len = (STREAMING_PREFIX_LEN - 1).min(prompt_len);
                 Ok((tokens, feats, text_mask, audio_mask, context_len))
-            }
+            },
         }
     }
 
@@ -571,7 +661,10 @@ impl VoxCpm2Model {
         let audio = Tensor::from_vec(padded, (1, 1, padded_len), &self.device)?;
         let mu = self.audio_vae_encoder.encode(&audio)?; // [1, latent_dim, T'], F32 (the VAE always runs in F32)
         let t_prime = mu.dim(2)?;
-        anyhow::ensure!(t_prime % self.patch_size == 0, "encoder output length not a multiple of patch_size");
+        anyhow::ensure!(
+            t_prime % self.patch_size == 0,
+            "encoder output length not a multiple of patch_size"
+        );
         let n_patches = t_prime / self.patch_size;
         // [1, D, T'] -> [1, D, n_patches, P] -> [1, n_patches, P, D], cast to
         // the model's runtime dtype so it can be concatenated/blended with
@@ -598,7 +691,10 @@ impl VoxCpm2Model {
         cache: Option<&VoxCpm2PromptCache>,
         cfg: &VoxCpm2GenerationConfig,
     ) -> Result<(Tensor, Tensor)> {
-        let conditioning = cache.map_or(VoxCpm2Conditioning::ZeroShot, VoxCpm2PromptCache::to_conditioning);
+        let conditioning = cache.map_or(
+            VoxCpm2Conditioning::ZeroShot,
+            VoxCpm2PromptCache::to_conditioning,
+        );
         self.generate_conditioned_retrying(target_text, &conditioning, cfg)
     }
 
@@ -623,7 +719,11 @@ impl VoxCpm2Model {
             Some(old) => Tensor::cat(&[old, new_audio_feat], 1)?,
             None => new_audio_feat.clone(),
         };
-        Ok(VoxCpm2PromptCache { ref_audio_feat: original.ref_audio_feat.clone(), prompt_text, audio_feat: Some(audio_feat) })
+        Ok(VoxCpm2PromptCache {
+            ref_audio_feat: original.ref_audio_feat.clone(),
+            prompt_text,
+            audio_feat: Some(audio_feat),
+        })
     }
 }
 
@@ -652,10 +752,17 @@ pub enum VoxCpm2Conditioning {
     /// reproduced, per the checkpoint's own docs. This is the mode
     /// `crane::audio::Tts::generate_voice_clone` maps onto (its `ref_audio`+
     /// `ref_text` shape matches exactly).
-    Continuation { prompt_text: String, prompt_feat: Tensor },
+    Continuation {
+        prompt_text: String,
+        prompt_feat: Tensor,
+    },
     /// Both: an isolated reference-audio prefix for timbre, *and* a
     /// continuation suffix for content/prosody.
-    RefContinuation { ref_feat: Tensor, prompt_text: String, prompt_feat: Tensor },
+    RefContinuation {
+        ref_feat: Tensor,
+        prompt_text: String,
+        prompt_feat: Tensor,
+    },
 }
 
 /// Precomputed reference/prompt audio + transcript, reusable across many
@@ -683,7 +790,11 @@ impl VoxCpm2PromptCache {
             Some((text, feat)) => (text, Some(feat)),
             None => (String::new(), None),
         };
-        Ok(Self { ref_audio_feat, prompt_text, audio_feat })
+        Ok(Self {
+            ref_audio_feat,
+            prompt_text,
+            audio_feat,
+        })
     }
 
     fn to_conditioning(&self) -> VoxCpm2Conditioning {
@@ -694,9 +805,10 @@ impl VoxCpm2PromptCache {
                 prompt_feat: p.clone(),
             },
             (Some(r), None) => VoxCpm2Conditioning::Reference(r.clone()),
-            (None, Some(p)) => {
-                VoxCpm2Conditioning::Continuation { prompt_text: self.prompt_text.clone(), prompt_feat: p.clone() }
-            }
+            (None, Some(p)) => VoxCpm2Conditioning::Continuation {
+                prompt_text: self.prompt_text.clone(),
+                prompt_feat: p.clone(),
+            },
             (None, None) => VoxCpm2Conditioning::ZeroShot,
         }
     }
@@ -727,8 +839,10 @@ mod hf_diff {
 
         let mut model = VoxCpm2Model::new(model_path, &device, &dtype).expect("load VoxCPM2");
 
-        let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap()).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap(),
+        )
+        .unwrap();
         let total_len = meta["total_len"].as_u64().unwrap() as usize;
         let hidden_size = meta["hidden_size"].as_u64().unwrap() as usize;
         let patch_size = meta["patch_size"].as_u64().unwrap() as usize;
@@ -736,12 +850,17 @@ mod hf_diff {
 
         let load_f32 = |name: &str, n: usize| -> Vec<f32> {
             let raw = std::fs::read(format!("{diff_dir}/{name}.bin")).unwrap();
-            raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).take(n).collect()
+            raw.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .take(n)
+                .collect()
         };
         let load_i64_as_u32 = |name: &str, n: usize| -> Vec<u32> {
             let raw = std::fs::read(format!("{diff_dir}/{name}.bin")).unwrap();
             raw.chunks_exact(8)
-                .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as u32)
+                .map(|c| {
+                    i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as u32
+                })
                 .take(n)
                 .collect()
         };
@@ -750,33 +869,50 @@ mod hf_diff {
         let text_mask = load_i64_as_u32("text_mask", total_len);
         let audio_mask = load_i64_as_u32("audio_mask", total_len);
         let audio_feat_flat = load_f32("audio_feat", total_len * patch_size * latent_dim);
-        let audio_feat = Tensor::from_vec(audio_feat_flat, (1, total_len, patch_size, latent_dim), &device).unwrap();
+        let audio_feat = Tensor::from_vec(
+            audio_feat_flat,
+            (1, total_len, patch_size, latent_dim),
+            &device,
+        )
+        .unwrap();
 
         model.clear_kv_cache();
-        let (lm_hidden, residual_hidden) = model.prefill(&ids, &audio_feat, &text_mask, &audio_mask).unwrap();
+        let (lm_hidden, residual_hidden) = model
+            .prefill(&ids, &audio_feat, &text_mask, &audio_mask)
+            .unwrap();
 
         let hf_lm_hidden = load_f32("lm_hidden", hidden_size);
         let hf_residual_hidden = load_f32("residual_hidden", hidden_size);
 
         let cosine = |a: &[f32], b: &[f32]| -> f64 {
-            let dot: f64 = a.iter().zip(b).map(|(x, y)| f64::from(*x) * f64::from(*y)).sum();
+            let dot: f64 = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| f64::from(*x) * f64::from(*y))
+                .sum();
             let na: f64 = a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
             let nb: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum::<f64>().sqrt();
             dot / (na * nb)
         };
 
         let rust_lm_hidden: Vec<f32> = lm_hidden.flatten_all().unwrap().to_vec1().unwrap();
-        let rust_residual_hidden: Vec<f32> = residual_hidden.flatten_all().unwrap().to_vec1().unwrap();
+        let rust_residual_hidden: Vec<f32> =
+            residual_hidden.flatten_all().unwrap().to_vec1().unwrap();
 
         let cos_lm = cosine(&rust_lm_hidden, &hf_lm_hidden);
         let cos_residual = cosine(&rust_residual_hidden, &hf_residual_hidden);
         println!("lm_hidden cosine: {cos_lm}");
         println!("residual_hidden cosine: {cos_residual}");
 
-        assert!(cos_lm > 0.999, "lm_hidden diverged from Python: cosine={cos_lm}");
-        assert!(cos_residual > 0.999, "residual_hidden diverged from Python: cosine={cos_residual}");
+        assert!(
+            cos_lm > 0.999,
+            "lm_hidden diverged from Python: cosine={cos_lm}"
+        );
+        assert!(
+            cos_residual > 0.999,
+            "residual_hidden diverged from Python: cosine={cos_residual}"
+        );
     }
-
 
     /// Pure Rust-internal consistency check (no Python involved): does
     /// `base_lm`'s incremental `forward_step` decode, run for *several*
@@ -817,18 +953,36 @@ mod hf_diff {
 
         let mut incr_outputs = Vec::with_capacity(n_incremental);
         for step in 0..n_incremental {
-            let pos_input = full_input.narrow(1, prefix_len + step, 1).unwrap().squeeze(1).unwrap(); // [1, H]
-            let out = model.base_lm.forward_step(&pos_input, prefix_len + step).unwrap(); // [1, H]
+            let pos_input = full_input
+                .narrow(1, prefix_len + step, 1)
+                .unwrap()
+                .squeeze(1)
+                .unwrap(); // [1, H]
+            let out = model
+                .base_lm
+                .forward_step(&pos_input, prefix_len + step)
+                .unwrap(); // [1, H]
             incr_outputs.push(out);
         }
 
         let cosine = |a: &[f32], b: &[f32]| -> f64 {
-            let dot: f64 = a.iter().zip(b).map(|(x, y)| f64::from(*x) * f64::from(*y)).sum();
+            let dot: f64 = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| f64::from(*x) * f64::from(*y))
+                .sum();
             let na: f64 = a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
             let nb: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum::<f64>().sqrt();
             dot / (na * nb)
         };
-        let to_f32_vec = |t: &Tensor| -> Vec<f32> { t.to_dtype(DType::F32).unwrap().flatten_all().unwrap().to_vec1().unwrap() };
+        let to_f32_vec = |t: &Tensor| -> Vec<f32> {
+            t.to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap()
+        };
 
         for step in 0..n_incremental {
             let full_step = full_tail.narrow(1, step, 1).unwrap().squeeze(1).unwrap();
@@ -838,7 +992,10 @@ mod hf_diff {
                 .zip(to_f32_vec(&incr_outputs[step]))
                 .map(|(a, b)| (a - b).abs())
                 .fold(0f32, f32::max);
-            println!("position {}: cosine={cos}, max_abs_diff={max_diff}", prefix_len + step);
+            println!(
+                "position {}: cosine={cos}, max_abs_diff={max_diff}",
+                prefix_len + step
+            );
         }
     }
 }

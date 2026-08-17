@@ -50,7 +50,10 @@ const IPA_SECONDARY_STRESS: char = 'ˌ';
 /// a trailing sentinel, so `positions[k]` is always a valid char-boundary
 /// byte offset for `0 <= k <= s.chars().count()`.
 fn char_byte_positions(s: &str) -> Vec<usize> {
-    s.char_indices().map(|(i, _)| i).chain(std::iter::once(s.len())).collect()
+    s.char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(s.len()))
+        .collect()
 }
 
 /// Recursively finds a run of lexicon-hitting components that together
@@ -115,7 +118,11 @@ fn assemble_ipa(components: &[(&str, &str)]) -> String {
             ipa.push_str(component_ipa);
         } else {
             for c in component_ipa.chars() {
-                ipa.push(if c == IPA_PRIMARY_STRESS { IPA_SECONDARY_STRESS } else { c });
+                ipa.push(if c == IPA_PRIMARY_STRESS {
+                    IPA_SECONDARY_STRESS
+                } else {
+                    c
+                });
             }
         }
     }
@@ -175,10 +182,8 @@ mod tests {
         // (4 chars < 2 * MIN_COMPONENT_LEN), so find_split backtracks to
         // the shorter "hand" (4 chars) prefix, whose remainder
         // "schuhfach" (9 chars) hits the lexicon directly.
-        let lexicon = Lexicon::from_tsv(
-            "handschuh\thantʃuː\nhand\thant\nschuhfach\tʃuːfax\n",
-        )
-        .unwrap();
+        let lexicon =
+            Lexicon::from_tsv("handschuh\thantʃuː\nhand\thant\nschuhfach\tʃuːfax\n").unwrap();
         let ipa = decompose(&lexicon, "handschuhfach").unwrap();
         assert_eq!(ipa, "hantʃuːfax");
     }
@@ -226,8 +231,7 @@ mod tests {
         // "a" and "utobahnhofstrasse" would technically cover the word, but
         // a 1-char component is below MIN_COMPONENT_LEN, so the search must
         // not accept it as a split point.
-        let lexicon =
-            Lexicon::from_tsv("a\ta\nutobahnhofstrasse\tuːtoːbaːnhoːfʃtraːsə\n").unwrap();
+        let lexicon = Lexicon::from_tsv("a\ta\nutobahnhofstrasse\tuːtoːbaːnhoːfʃtraːsə\n").unwrap();
         assert_eq!(decompose(&lexicon, "autobahnhofstrasse"), None);
     }
 
@@ -236,10 +240,9 @@ mod tests {
         // A 5-component split ("auto"+"bahn"+"turm"+"haus"+"gang") exceeds
         // MAX_COMPONENTS (4), so no split should be found even though every
         // individual component is in the lexicon.
-        let lexicon = Lexicon::from_tsv(
-            "auto\taʊto\nbahn\tban\nturm\ttʊʁm\nhaus\thaʊ̯s\ngang\tɡaŋ\n",
-        )
-        .unwrap();
+        let lexicon =
+            Lexicon::from_tsv("auto\taʊto\nbahn\tban\nturm\ttʊʁm\nhaus\thaʊ̯s\ngang\tɡaŋ\n")
+                .unwrap();
         assert_eq!(decompose(&lexicon, "autobahnturmhausgang"), None);
     }
 
@@ -247,8 +250,7 @@ mod tests {
     fn first_component_keeps_primary_stress_later_components_downgrade() {
         // Verifies assemble_ipa downgrades every component after the first
         // from primary (ˈ) to secondary (ˌ) stress.
-        let lexicon =
-            Lexicon::from_tsv("hand\tˈhant\nschuhfach\tˈʃuːfax\n").unwrap();
+        let lexicon = Lexicon::from_tsv("hand\tˈhant\nschuhfach\tˈʃuːfax\n").unwrap();
         let ipa = decompose(&lexicon, "handschuhfach").unwrap();
         assert_eq!(ipa, "ˈhantˌʃuːfax");
     }

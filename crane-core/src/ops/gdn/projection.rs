@@ -13,10 +13,10 @@
 //! [`GdnInputProjection::forward`].
 
 use candle_core::quantized::GgmlDType;
-use candle_core::{Module, Result, Tensor, D};
+use candle_core::{D, Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use crate::ops::linear::{linear_layer, LinearLayer};
+use crate::ops::linear::{LinearLayer, linear_layer};
 
 /// Whether the source checkpoint stores projections as 4 separate matrices
 /// (`Split`, used by Qwen 3.5) or 2 fused matrices (`Grouped`).
@@ -69,7 +69,7 @@ impl GdnInputProjection {
                     in_proj_qkvz,
                     in_proj_ba,
                 })
-            }
+            },
             GdnInputProjectionKind::Split => {
                 let in_proj_qkv =
                     linear_layer(dims.hidden_size, dims.conv_dim, vb.pp("in_proj_qkv"), quant)?;
@@ -87,7 +87,7 @@ impl GdnInputProjection {
                     in_proj_b,
                     in_proj_a,
                 })
-            }
+            },
         }
     }
 
@@ -153,8 +153,10 @@ impl GdnProjection {
         seq_len: usize,
     ) -> Result<Self> {
         let group_size_qkvz = 2 * dims.head_k_dim + 2 * dims.v_per_group * dims.head_v_dim;
-        let mixed_qkvz = mixed_qkvz.reshape((batch_size, seq_len, dims.num_k_heads, group_size_qkvz))?;
-        let mixed_ba = mixed_ba.reshape((batch_size, seq_len, dims.num_k_heads, 2 * dims.v_per_group))?;
+        let mixed_qkvz =
+            mixed_qkvz.reshape((batch_size, seq_len, dims.num_k_heads, group_size_qkvz))?;
+        let mixed_ba =
+            mixed_ba.reshape((batch_size, seq_len, dims.num_k_heads, 2 * dims.v_per_group))?;
 
         let mut offset = 0;
         let q = mixed_qkvz.narrow(D::Minus1, offset, dims.head_k_dim)?;

@@ -1,4 +1,4 @@
-use crate::generation::{streamer::TokenStreamer, GenerationConfig};
+use crate::generation::{GenerationConfig, streamer::TokenStreamer};
 use anyhow::Result;
 use candle_core::Device;
 
@@ -77,11 +77,11 @@ mod tests {
         let mut end_seen = false;
         for _ in 0..8 {
             match receiver.recv_timeout(Duration::from_millis(200))? {
-                StreamerMessage::Token(_) => {}
+                StreamerMessage::Token(_) => {},
                 StreamerMessage::End => {
                     end_seen = true;
                     break;
-                }
+                },
             }
         }
 

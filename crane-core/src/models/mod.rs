@@ -1,15 +1,15 @@
-pub mod modules;
 #[cfg(feature = "onnx")]
 pub mod g2p;
 #[cfg(feature = "onnx")]
 pub mod kokoro_tts;
+pub mod modules;
 #[cfg(feature = "onnx")]
 pub mod moonshine_asr;
-pub mod orpheus;
 pub mod muscriptor;
-pub mod paddleocr_vl;
+pub mod orpheus;
 #[cfg(feature = "onnx")]
 pub mod paddleocr_v6;
+pub mod paddleocr_vl;
 pub mod qwen25;
 pub mod qwen25_vit;
 pub mod qwen3;
@@ -34,6 +34,6 @@ pub use candle_core;
 pub use candle_core::Tensor;
 pub use candle_core::{DType, Device};
 
-pub mod with_tracing;
-pub mod utils;
 pub mod quantized_var_builder;
+pub mod utils;
+pub mod with_tracing;

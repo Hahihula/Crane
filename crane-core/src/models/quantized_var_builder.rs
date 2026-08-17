@@ -70,7 +70,7 @@ impl VarBuilder {
         match self.data.get(&path) {
             None => {
                 candle_core::bail!("cannot find tensor {path}")
-            }
+            },
             Some(qtensor) => {
                 let shape = s.into();
                 if qtensor.shape() != &shape {
@@ -80,7 +80,7 @@ impl VarBuilder {
                     )
                 }
                 Ok(qtensor.clone())
-            }
+            },
         }
     }
 
@@ -89,7 +89,7 @@ impl VarBuilder {
         match self.data.get(&path) {
             None => {
                 candle_core::bail!("cannot find tensor {name}")
-            }
+            },
             Some(qtensor) => Ok(qtensor.clone()),
         }
     }

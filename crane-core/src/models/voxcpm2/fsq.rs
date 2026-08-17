@@ -6,7 +6,7 @@
 //! trains).
 
 use candle_core::{Result, Tensor};
-use candle_nn::{linear, Linear, Module, VarBuilder};
+use candle_nn::{Linear, Module, VarBuilder, linear};
 
 pub struct ScalarQuantizationLayer {
     in_proj: Linear,
@@ -15,7 +15,13 @@ pub struct ScalarQuantizationLayer {
 }
 
 impl ScalarQuantizationLayer {
-    pub fn new(in_dim: usize, out_dim: usize, latent_dim: usize, scale: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        in_dim: usize,
+        out_dim: usize,
+        latent_dim: usize,
+        scale: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
             in_proj: linear(in_dim, latent_dim, vb.pp("in_proj"))?,
             out_proj: linear(latent_dim, out_dim, vb.pp("out_proj"))?,
@@ -74,17 +80,25 @@ mod tests {
         // in the tie-detection mask would show up as *these* breaking, not
         // just the ties).
         let input = Tensor::new(
-            &[0.5f32, 1.5, 2.5, 3.5, 4.5, -0.5, -1.5, -2.5, -3.5, -4.5, 2.3, 2.7, -2.3, -2.7, 0.0, 3.0],
+            &[
+                0.5f32, 1.5, 2.5, 3.5, 4.5, -0.5, -1.5, -2.5, -3.5, -4.5, 2.3, 2.7, -2.3, -2.7,
+                0.0, 3.0,
+            ],
             &device,
         )
         .unwrap();
         // `torch.round()` on this exact input (verified live against PyTorch).
         let expected = [
-            0.0f32, 2.0, 2.0, 4.0, 4.0, -0.0, -2.0, -2.0, -4.0, -4.0, 2.0, 3.0, -2.0, -3.0, 0.0, 3.0,
+            0.0f32, 2.0, 2.0, 4.0, 4.0, -0.0, -2.0, -2.0, -4.0, -4.0, 2.0, 3.0, -2.0, -3.0, 0.0,
+            3.0,
         ];
         let got: Vec<f32> = round_half_to_even(&input).unwrap().to_vec1().unwrap();
         for (i, (&g, &e)) in got.iter().zip(&expected).enumerate() {
-            assert!((g - e).abs() < 1e-6, "index {i}: got {g}, expected {e} (input {})", got[i]);
+            assert!(
+                (g - e).abs() < 1e-6,
+                "index {i}: got {g}, expected {e} (input {})",
+                got[i]
+            );
         }
     }
 

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use axum::{
     http::StatusCode,
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Json, Response,
+        sse::{Event, KeepAlive, Sse},
     },
 };
 
@@ -17,7 +17,7 @@ use crane_core::models::paddleocr_vl::OcrTask;
 
 use crate::openai_api::*;
 use crate::sglang_api::*;
-use crate::{make_error, now_epoch, AppState};
+use crate::{AppState, make_error, now_epoch};
 
 // ─────────────────────────────────────────────────────────────
 //  PaddleOCR-VL Request Channel
@@ -49,8 +49,7 @@ pub enum VlmRequest {
 /// inline URI to a temporary file. Returns the path to the temp file (the
 /// file persists until the TempDir is dropped).
 async fn download_image(url: &str) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
-    let dir = tempfile::TempDir::new()
-        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+    let dir = tempfile::TempDir::new().map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
     // Handle inline `data:image/<mime>;base64,<payload>` URIs by decoding
     // the base64 payload directly to a temp file.
@@ -67,7 +66,7 @@ async fn download_image(url: &str) -> Result<(tempfile::TempDir, std::path::Path
             "bmp" => "bmp",
             other => {
                 return Err(format!("Unsupported image MIME in data URI: {other}"));
-            }
+            },
         };
         // Standard base64 (no URL-safe alphabet).
         use base64::Engine;
@@ -189,9 +188,10 @@ pub async fn vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let vlm_tx = state.vlm_tx.as_ref().ok_or_else(|| {
-        make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM model not loaded")
-    })?;
+    let vlm_tx = state
+        .vlm_tx
+        .as_ref()
+        .ok_or_else(|| make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM model not loaded"))?;
 
     let (image_url, text_prompt) = extract_image_and_text(&req.messages, "PaddleOCR-VL")?;
     let image_url = &image_url;
@@ -210,14 +210,20 @@ pub async fn vlm_chat_completions(
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let (done_tx, _done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
-        if vlm_tx.send(VlmRequest::RecognizeStream {
-            img_path,
-            task,
-            max_tokens,
-            token_tx: tx,
-            done_tx,
-        }).is_err() {
-            return Err(make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM engine thread crashed"));
+        if vlm_tx
+            .send(VlmRequest::RecognizeStream {
+                img_path,
+                task,
+                max_tokens,
+                token_tx: tx,
+                done_tx,
+            })
+            .is_err()
+        {
+            return Err(make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VLM engine thread crashed",
+            ));
         }
 
         let model_name = state.model_name.clone();
@@ -279,18 +285,35 @@ pub async fn vlm_chat_completions(
     } else {
         // Non-streaming mode
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if vlm_tx.send(VlmRequest::Recognize {
-            img_path,
-            task,
-            max_tokens,
-            tx,
-        }).is_err() {
-            return Err(make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM engine thread crashed"));
+        if vlm_tx
+            .send(VlmRequest::Recognize {
+                img_path,
+                task,
+                max_tokens,
+                tx,
+            })
+            .is_err()
+        {
+            return Err(make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VLM engine thread crashed",
+            ));
         }
 
-        let result = rx.await
-            .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("VLM task dropped: {e}")))?
-            .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("VLM inference failed: {e}")))?;
+        let result = rx
+            .await
+            .map_err(|e| {
+                make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("VLM task dropped: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("VLM inference failed: {e}"),
+                )
+            })?;
 
         let response = ChatCompletionResponse {
             id: request_id,
@@ -321,9 +344,10 @@ pub async fn vlm_generate(
     state: Arc<AppState>,
     req: GenerateRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let vlm_tx = state.vlm_tx.as_ref().ok_or_else(|| {
-        make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM model not loaded")
-    })?;
+    let vlm_tx = state
+        .vlm_tx
+        .as_ref()
+        .ok_or_else(|| make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM model not loaded"))?;
 
     let image_url = req.image_url.as_deref().ok_or_else(|| {
         make_error(
@@ -348,14 +372,20 @@ pub async fn vlm_generate(
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let (done_tx, _done_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
-        if vlm_tx.send(VlmRequest::RecognizeStream {
-            img_path,
-            task,
-            max_tokens,
-            token_tx: tx,
-            done_tx,
-        }).is_err() {
-            return Err(make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM engine thread crashed"));
+        if vlm_tx
+            .send(VlmRequest::RecognizeStream {
+                img_path,
+                task,
+                max_tokens,
+                token_tx: tx,
+                done_tx,
+            })
+            .is_err()
+        {
+            return Err(make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VLM engine thread crashed",
+            ));
         }
 
         let rid = request_id.clone();
@@ -387,18 +417,35 @@ pub async fn vlm_generate(
             .into_response())
     } else {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if vlm_tx.send(VlmRequest::Recognize {
-            img_path,
-            task,
-            max_tokens,
-            tx,
-        }).is_err() {
-            return Err(make_error(StatusCode::INTERNAL_SERVER_ERROR, "VLM engine thread crashed"));
+        if vlm_tx
+            .send(VlmRequest::Recognize {
+                img_path,
+                task,
+                max_tokens,
+                tx,
+            })
+            .is_err()
+        {
+            return Err(make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VLM engine thread crashed",
+            ));
         }
 
-        let result = rx.await
-            .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("VLM task dropped: {e}")))?
-            .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("VLM inference failed: {e}")))?;
+        let result = rx
+            .await
+            .map_err(|e| {
+                make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("VLM task dropped: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("VLM inference failed: {e}"),
+                )
+            })?;
 
         let response = GenerateResponse {
             text: result,
@@ -442,7 +489,10 @@ pub async fn qwen3_5_vlm_chat_completions(
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let q35vlm_tx = state.qwen3_5_vlm_tx.as_ref().ok_or_else(|| {
-        make_error(StatusCode::INTERNAL_SERVER_ERROR, "Qwen 3.5 VL model not loaded")
+        make_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Qwen 3.5 VL model not loaded",
+        )
     })?;
 
     let (image_url, text_prompt) = extract_image_and_text(&req.messages, "Qwen3_5-VL")?;
@@ -513,7 +563,10 @@ pub async fn minicpm_v_vlm_chat_completions(
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let mcpv_tx = state.minicpm_v_vlm_tx.as_ref().ok_or_else(|| {
-        make_error(StatusCode::INTERNAL_SERVER_ERROR, "MiniCPM-V-4.6 model not loaded")
+        make_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "MiniCPM-V-4.6 model not loaded",
+        )
     })?;
 
     let (image_url, text_prompt) = extract_image_and_text(&req.messages, "MiniCPM-V-4.6")?;
@@ -526,7 +579,12 @@ pub async fn minicpm_v_vlm_chat_completions(
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     if mcpv_tx
-        .send(MinicpmVVlmRequest { img_path, text_prompt, max_tokens, tx })
+        .send(MinicpmVVlmRequest {
+            img_path,
+            text_prompt,
+            max_tokens,
+            tx,
+        })
         .is_err()
     {
         return Err(make_error(
@@ -566,7 +624,10 @@ pub async fn gemma4_vlm_chat_completions(
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let g4vlm_tx = state.gemma4_vlm_tx.as_ref().ok_or_else(|| {
-        make_error(StatusCode::INTERNAL_SERVER_ERROR, "Gemma4 VLM model not loaded")
+        make_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Gemma4 VLM model not loaded",
+        )
     })?;
 
     let (image_url, text_prompt) = extract_image_and_text(&req.messages, "Gemma4-VL")?;
@@ -595,8 +656,18 @@ pub async fn gemma4_vlm_chat_completions(
 
     let result = rx
         .await
-        .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Gemma4 VLM task dropped: {e}")))?
-        .map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Gemma4 VLM inference failed: {e}")))?;
+        .map_err(|e| {
+            make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Gemma4 VLM task dropped: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Gemma4 VLM inference failed: {e}"),
+            )
+        })?;
 
     let response = ChatCompletionResponse {
         id: request_id,

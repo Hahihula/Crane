@@ -12,7 +12,7 @@
 //! embedding at all).
 
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{embedding, rms_norm, Activation, Embedding, RmsNorm, VarBuilder};
+use candle_nn::{Activation, Embedding, RmsNorm, VarBuilder, embedding, rms_norm};
 
 use super::config::MiniCpm4Config;
 use crate::models::modules::attention::{AttentionConfig, GqaAttention, RopeMode};
@@ -51,12 +51,17 @@ impl LongRoPE {
         let scaling = &cfg.rope_scaling;
         let orig_max = scaling.original_max_position_embeddings as f64;
 
-        let ext_factors: &[f64] = if cfg.max_position_embeddings > scaling.original_max_position_embeddings {
-            &scaling.long_factor
-        } else {
-            &scaling.short_factor
-        };
-        assert_eq!(ext_factors.len(), half, "rope_scaling factor length must equal head_dim/2");
+        let ext_factors: &[f64] =
+            if cfg.max_position_embeddings > scaling.original_max_position_embeddings {
+                &scaling.long_factor
+            } else {
+                &scaling.short_factor
+            };
+        assert_eq!(
+            ext_factors.len(),
+            half,
+            "rope_scaling factor length must equal head_dim/2"
+        );
 
         // Matches `MiniCPMLongRoPE.__init__` exactly: computed unconditionally
         // (no `if scale > 1` guard) — `scale == 1.0` for this checkpoint makes
@@ -80,7 +85,10 @@ impl LongRoPE {
         let cos_table = (freqs.cos()?.contiguous()? * scaling_factor)?;
         let sin_table = (freqs.sin()?.contiguous()? * scaling_factor)?;
 
-        Ok(Self { cos_table, sin_table })
+        Ok(Self {
+            cos_table,
+            sin_table,
+        })
     }
 
     /// cos/sin for positions `[start, start+seq_len)`.
@@ -112,25 +120,49 @@ impl DecoderLayer {
             head_dim: cfg.head_dim(),
             qkv_bias: false,
             o_bias: false,
-            rope_mode: if cfg.no_rope { RopeMode::None } else { RopeMode::HalfSplit },
+            rope_mode: if cfg.no_rope {
+                RopeMode::None
+            } else {
+                RopeMode::HalfSplit
+            },
             use_qk_norm: false,
             norm_eps: cfg.rms_norm_eps,
         };
         let self_attn = GqaAttention::new(attn_cfg, vb.pp("self_attn"))?;
-        let mlp = SwiGluFfn::new(cfg.hidden_size, cfg.intermediate_size, Activation::Silu, vb.pp("mlp"))?;
-        let input_layernorm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm =
-            rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
+        let mlp = SwiGluFfn::new(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            Activation::Silu,
+            vb.pp("mlp"),
+        )?;
+        let input_layernorm =
+            rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let post_attention_layernorm = rms_norm(
+            cfg.hidden_size,
+            cfg.rms_norm_eps,
+            vb.pp("post_attention_layernorm"),
+        )?;
         #[allow(clippy::cast_precision_loss)]
         let residual_scale = if cfg.use_mup {
             cfg.scale_depth / (cfg.num_hidden_layers as f64).sqrt()
         } else {
             1.0
         };
-        Ok(Self { self_attn, mlp, input_layernorm, post_attention_layernorm, residual_scale })
+        Ok(Self {
+            self_attn,
+            mlp,
+            input_layernorm,
+            post_attention_layernorm,
+            residual_scale,
+        })
     }
 
-    fn forward(&mut self, xs: &Tensor, cos_sin: Option<(&Tensor, &Tensor)>, mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(
+        &mut self,
+        xs: &Tensor,
+        cos_sin: Option<(&Tensor, &Tensor)>,
+        mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let residual = xs;
         let hidden = self.input_layernorm.forward(xs)?;
         let hidden = self.self_attn.forward(&hidden, cos_sin, mask)?;
@@ -161,7 +193,11 @@ impl MiniCpm4Model {
     /// checkpoint's `max_length`) — ignored when `cfg.no_rope`.
     pub fn new(cfg: &MiniCpm4Config, rope_table_len: usize, vb: VarBuilder) -> Result<Self> {
         let embed_tokens = if cfg.vocab_size > 0 {
-            Some(embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))?)
+            Some(embedding(
+                cfg.vocab_size,
+                cfg.hidden_size,
+                vb.pp("embed_tokens"),
+            )?)
         } else {
             None
         };
@@ -173,10 +209,18 @@ impl MiniCpm4Model {
         }
 
         let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))?;
-        let rotary =
-            if cfg.no_rope { None } else { Some(LongRoPE::new(cfg, rope_table_len, vb.device())?) };
+        let rotary = if cfg.no_rope {
+            None
+        } else {
+            Some(LongRoPE::new(cfg, rope_table_len, vb.device())?)
+        };
 
-        Ok(Self { embed_tokens, layers, norm, rotary })
+        Ok(Self {
+            embed_tokens,
+            layers,
+            norm,
+            rotary,
+        })
     }
 
     /// Full-sequence forward. `inputs_embeds`: `[B, S, H]`. `is_causal`
@@ -188,13 +232,17 @@ impl MiniCpm4Model {
             Some(r) => {
                 let (cos, sin) = r.forward(0, seq_len)?;
                 Some((cos, sin))
-            }
+            },
             None => None,
         };
         let cos_sin_ref = cos_sin.as_ref().map(|(c, s)| (c, s));
 
         let mask = if is_causal && seq_len > 1 {
-            Some(build_causal_mask(seq_len, inputs_embeds.device(), inputs_embeds.dtype())?)
+            Some(build_causal_mask(
+                seq_len,
+                inputs_embeds.device(),
+                inputs_embeds.dtype(),
+            )?)
         } else {
             None
         };
@@ -218,7 +266,7 @@ impl MiniCpm4Model {
             Some(r) => {
                 let (cos, sin) = r.forward(position_id, 1)?;
                 Some((cos, sin))
-            }
+            },
             None => None,
         };
         let cos_sin_ref = cos_sin.as_ref().map(|(c, s)| (c, s));
@@ -297,8 +345,16 @@ mod tests {
         let sin: Vec<f32> = sin.flatten_all().unwrap().to_vec1().unwrap();
 
         let check = |i: usize, exp_cos: f32, exp_sin: f32| {
-            assert!((cos[i] - exp_cos).abs() < 1e-4, "cos[{i}]: got {}, expected {exp_cos}", cos[i]);
-            assert!((sin[i] - exp_sin).abs() < 1e-4, "sin[{i}]: got {}, expected {exp_sin}", sin[i]);
+            assert!(
+                (cos[i] - exp_cos).abs() < 1e-4,
+                "cos[{i}]: got {}, expected {exp_cos}",
+                cos[i]
+            );
+            assert!(
+                (sin[i] - exp_sin).abs() < 1e-4,
+                "sin[{i}]: got {}, expected {exp_sin}",
+                sin[i]
+            );
         };
         check(0, 0.2942175, -0.9557385);
         check(1, -0.4305646, -0.9025597);

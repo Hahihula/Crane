@@ -1,12 +1,12 @@
 pub mod image_utils;
-pub mod tokenizer_utils;
 pub mod token_output_stream;
+pub mod tokenizer_utils;
 pub mod utils;
 
 use anyhow::Result;
 use candle_core::{
-    utils::{cuda_is_available as candle_cuda_is_available, metal_is_available},
     Device,
+    utils::{cuda_is_available as candle_cuda_is_available, metal_is_available},
 };
 
 pub fn select_device(force_cpu: bool) -> Result<Device> {

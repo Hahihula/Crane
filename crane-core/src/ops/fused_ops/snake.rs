@@ -14,13 +14,13 @@
 //! matching shapes before calling `snake()`.
 
 #[cfg(feature = "cuda")]
+use candle_core::DType;
+#[cfg(feature = "cuda")]
 use candle_core::backend::BackendStorage;
 #[cfg(feature = "cuda")]
 use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 #[cfg(feature = "cuda")]
 use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
-#[cfg(feature = "cuda")]
-use candle_core::DType;
 use candle_core::{CpuStorage, CustomOp2, Layout, Result, Shape, Tensor, WithDType};
 
 // PTX compiled from kernels/cuda/snake.cu — embedded at build time.
@@ -53,12 +53,13 @@ impl CustomOp2 for SnakeOp {
             alpha: &[T],
             l_alpha: &Layout,
         ) -> (CpuStorage, Shape) {
-            let dst = candle_core::cpu_backend::binary_map(l_x, l_alpha, x, alpha, |x_val, a_val| {
-                let x = x_val.to_f64();
-                let a = a_val.to_f64();
-                let sin_ax = (a * x).sin();
-                T::from_f64(x + sin_ax * sin_ax / a)
-            });
+            let dst =
+                candle_core::cpu_backend::binary_map(l_x, l_alpha, x, alpha, |x_val, a_val| {
+                    let x = x_val.to_f64();
+                    let a = a_val.to_f64();
+                    let sin_ax = (a * x).sin();
+                    T::from_f64(x + sin_ax * sin_ax / a)
+                });
             (T::to_cpu_storage_owned(dst), l_x.shape().clone())
         }
 
@@ -121,7 +122,7 @@ impl CustomOp2 for SnakeOp {
                 builder.arg(&n_u32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::BF16(dst)
-            }
+            },
             (CudaStorageSlice::F16(x), CudaStorageSlice::F16(alpha)) => {
                 let x = x.slice(xo1..xo2);
                 let alpha = alpha.slice(ao1..ao2);
@@ -133,7 +134,7 @@ impl CustomOp2 for SnakeOp {
                 builder.arg(&n_u32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::F16(dst)
-            }
+            },
             (CudaStorageSlice::F32(x), CudaStorageSlice::F32(alpha)) => {
                 let x = x.slice(xo1..xo2);
                 let alpha = alpha.slice(ao1..ao2);
@@ -145,7 +146,7 @@ impl CustomOp2 for SnakeOp {
                 builder.arg(&n_u32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::F32(dst)
-            }
+            },
             _ => candle_core::bail!("snake: unsupported or mismatched CUDA storage types"),
         };
 
@@ -315,7 +316,9 @@ mod tests {
         let alpha = Tensor::new(&[1.0f32, 2.0, 0.5, 3.0], &device)?.to_dtype(DType::BF16)?;
 
         let got = snake(&x, &alpha)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        let expected = naive_snake(&x, &alpha)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let expected = naive_snake(&x, &alpha)?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
 
         for (g, e) in got.iter().zip(expected.iter()) {
             assert!((g - e).abs() < 1e-2, "got {g}, expected {e}");
@@ -332,7 +335,9 @@ mod tests {
         let alpha = Tensor::new(&[1.0f32, 2.0, 0.5, 3.0], &device)?.to_dtype(DType::F16)?;
 
         let got = snake(&x, &alpha)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        let expected = naive_snake(&x, &alpha)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let expected = naive_snake(&x, &alpha)?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
 
         for (g, e) in got.iter().zip(expected.iter()) {
             assert!((g - e).abs() < 1e-3, "got {g}, expected {e}");

@@ -19,12 +19,12 @@
 //! * Pre-norm LayerNorm, eps = `1e-5`.
 
 use candle_core::quantized::GgmlDType;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::layer_norm::LayerNorm;
 use candle_nn::{Linear, VarBuilder};
 
 use crate::models::muscriptor::config::VariantConfig;
-use crate::ops::linear::{linear_layer, quantize_linear, LinearLayer};
+use crate::ops::linear::{LinearLayer, linear_layer, quantize_linear};
 
 // ── Sinusoidal positions ────────────────────────────────────────────────
 
@@ -186,7 +186,10 @@ impl StreamingMultiheadAttention {
 
         // Q for the attention matmul — flatten (B, T) the same way.
         let q_bhsd = q.reshape((b * q_len, h, d))?; // [B*T, H, D]
-        let q_bhsd = q_bhsd.reshape((b, q_len, h, d))?.permute((0, 2, 1, 3))?.contiguous()?;
+        let q_bhsd = q_bhsd
+            .reshape((b, q_len, h, d))?
+            .permute((0, 2, 1, 3))?
+            .contiguous()?;
         let k_bhsd = k_view;
         let v_bhsd = v_view;
 
@@ -235,7 +238,9 @@ impl StreamingMultiheadAttention {
         };
 
         // BHSD → BSHD → flatten H*D → out_proj (out_proj expects 2D).
-        let attn = attn_bhsd.permute((0, 2, 1, 3))?.reshape((b * q_len, h * d))?;
+        let attn = attn_bhsd
+            .permute((0, 2, 1, 3))?
+            .reshape((b * q_len, h * d))?;
         let out_flat = self.out_proj.forward(&attn)?;
         let out = out_flat.reshape((b, q_len, self.embed_dim))?;
         Ok(out)
@@ -298,8 +303,18 @@ impl StreamingTransformerLayer {
         let self_attn = StreamingMultiheadAttention::new(vb.pp("self_attn"), config, quant)?;
         let norm1 = candle_nn::layer_norm(config.dim, 1e-5, vb.pp("norm1"))?;
         let norm2 = candle_nn::layer_norm(config.dim, 1e-5, vb.pp("norm2"))?;
-        let linear1 = linear_layer(config.dim, config.dim_feedforward(), vb.pp("linear1"), quant)?;
-        let linear2 = linear_layer(config.dim_feedforward(), config.dim, vb.pp("linear2"), quant)?;
+        let linear1 = linear_layer(
+            config.dim,
+            config.dim_feedforward(),
+            vb.pp("linear1"),
+            quant,
+        )?;
+        let linear2 = linear_layer(
+            config.dim_feedforward(),
+            config.dim,
+            vb.pp("linear2"),
+            quant,
+        )?;
         Ok(Self {
             self_attn,
             norm1,
@@ -331,11 +346,19 @@ pub(crate) struct StreamingTransformer {
 }
 
 impl StreamingTransformer {
-    pub(crate) fn new(vb: VarBuilder, config: &VariantConfig, quant: Option<GgmlDType>) -> Result<Self> {
+    pub(crate) fn new(
+        vb: VarBuilder,
+        config: &VariantConfig,
+        quant: Option<GgmlDType>,
+    ) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_layers);
         let layers_vb = vb.pp("layers");
         for i in 0..config.num_layers {
-            layers.push(StreamingTransformerLayer::new(layers_vb.pp(i), config, quant)?);
+            layers.push(StreamingTransformerLayer::new(
+                layers_vb.pp(i),
+                config,
+                quant,
+            )?);
         }
         Ok(Self {
             layers,
@@ -394,11 +417,7 @@ impl StreamingTransformer {
     /// Forward through the stack. The caller has already token-embedded
     /// (and mel-conditioned) the input; this method adds sinusoidal
     /// positions once at the stack level and then runs every layer.
-    pub(crate) fn forward(
-        &self,
-        x: &Tensor,
-        states: &mut TransformerState,
-    ) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor, states: &mut TransformerState) -> Result<Tensor> {
         let offset = states.layers[0].seq_len as i64;
         let t = x.dim(1)?;
 

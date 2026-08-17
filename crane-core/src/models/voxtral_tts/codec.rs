@@ -17,10 +17,10 @@
 //! different from the shared [`TransformerBlock`](super::super::modules::transformer::TransformerBlock)
 //! that they are kept self-contained here.
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{
-    linear_no_bias, Activation, Conv1d as CandleConv1d, Conv1dConfig,
-    ConvTranspose1d as CandleConvTranspose1d, ConvTranspose1dConfig, Linear, VarBuilder,
+    Activation, Conv1d as CandleConv1d, Conv1dConfig, ConvTranspose1d as CandleConvTranspose1d,
+    ConvTranspose1dConfig, Linear, VarBuilder, linear_no_bias,
 };
 
 use crate::models::with_tracing::RmsNorm;
@@ -840,7 +840,7 @@ mod tests {
         // Head 0, slope=0.5: check diagonal (i=j) => bias=0
         assert_eq!(data[0 * 16 + 0 * 4 + 0], 0.0); // (0,0)
         assert_eq!(data[0 * 16 + 1 * 4 + 1], 0.0); // (1,1)
-                                                   // Head 0: (1,0) => slope * (0-1) = -0.5
+        // Head 0: (1,0) => slope * (0-1) = -0.5
         assert!((data[0 * 16 + 1 * 4 + 0] - (-0.5)).abs() < 1e-6);
         // Head 0: (0,1) => blocked (future)
         assert!(data[0 * 16 + 0 * 4 + 1].is_infinite());
@@ -1150,8 +1150,7 @@ mod tests {
 
         // The semantic codebook is always F32 in real usage (see
         // `load_semantic_codebook`), regardless of the decoder's dtype.
-        let semantic_codebook =
-            Tensor::randn(0f32, 0.01, (codebook_size, semantic_dim), dev)?;
+        let semantic_codebook = Tensor::randn(0f32, 0.01, (codebook_size, semantic_dim), dev)?;
         let alibi_slopes = compute_alibi_slopes(n_heads);
         let input_conv = dummy_causal_conv1d(embed_dim, dim, 3, 1, dtype, dev)?;
         let output_conv = dummy_causal_conv1d(dim, patch_size, 7, 1, dtype, dev)?;
@@ -1309,7 +1308,7 @@ mod tests {
             Err(_) => {
                 eprintln!("VOXTRAL_CHECKPOINT_DIR not set, skipping");
                 return;
-            }
+            },
         };
 
         let weights_path = checkpoint_dir.join("consolidated.safetensors");
@@ -1374,7 +1373,7 @@ mod tests {
             Err(_) => {
                 eprintln!("VOXTRAL_CHECKPOINT_DIR not set, skipping");
                 return;
-            }
+            },
         };
 
         let weights_path = checkpoint_dir.join("consolidated.safetensors");

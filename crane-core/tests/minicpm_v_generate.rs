@@ -18,12 +18,16 @@ fn minicpm_v_generate_is_coherent() {
     // convenient shared default already used by other vision-model tests
     // (see the `qwen35-hf-diff-method` notes).
     let image_path = std::env::var("CRANE_MINICPM_V_TEST_IMAGE").unwrap_or_else(|_| {
-        "/home/hahihula/mywork/ai/additional_models/Ornith-1.0-9B/assets/ornith_9b_eval.png".to_string()
+        "/home/hahihula/mywork/ai/additional_models/Ornith-1.0-9B/assets/ornith_9b_eval.png"
+            .to_string()
     });
 
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
-        (candle_core::Device::new_cuda(0).unwrap(), candle_core::DType::BF16)
+        (
+            candle_core::Device::new_cuda(0).unwrap(),
+            candle_core::DType::BF16,
+        )
     } else {
         (candle_core::Device::Cpu, candle_core::DType::F32)
     };
@@ -34,9 +38,17 @@ fn minicpm_v_generate_is_coherent() {
 
     let image = image::open(&image_path).unwrap_or_else(|e| panic!("open {image_path}: {e}"));
 
-    let cfg = VlGenerationConfig { max_new_tokens: 96, strip_thinking: false };
+    let cfg = VlGenerationConfig {
+        max_new_tokens: 96,
+        strip_thinking: false,
+    };
     let text = model
-        .generate(Some(&image), "Describe this image in one or two sentences.", &cfg, |_| {})
+        .generate(
+            Some(&image),
+            "Describe this image in one or two sentences.",
+            &cfg,
+            |_| {},
+        )
         .expect("generate");
 
     println!("generated: {text}");

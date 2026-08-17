@@ -101,19 +101,19 @@ fn bench_text_to_ipa_full_lexicon(c: &mut Criterion) {
     let dict_path = model_dir.join("dict_filtered_heteronyms.tsv");
     let dict_tsv = std::fs::read_to_string(&dict_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", dict_path.display()));
-    let oov_model =
-        oov_onnx::Model::load(&model_dir.join("oov")).expect("load OOV model");
+    let oov_model = oov_onnx::Model::load(&model_dir.join("oov")).expect("load OOV model");
     let engine = EnglishG2p::new(&dict_tsv, Some(oov_model), false).expect("build EnglishG2p");
 
-    let corpus: Option<Vec<String>> = crane_core::test_data::get_test_data_file("g2p/en_us/test.tsv")
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|tsv| {
-            tsv.lines()
-                .filter_map(|line| line.split_once('\t'))
-                .map(|(word, _)| word.to_string())
-                .collect()
-        });
+    let corpus: Option<Vec<String>> =
+        crane_core::test_data::get_test_data_file("g2p/en_us/test.tsv")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|tsv| {
+                tsv.lines()
+                    .filter_map(|line| line.split_once('\t'))
+                    .map(|(word, _)| word.to_string())
+                    .collect()
+            });
 
     let mut group = c.benchmark_group("text_to_ipa_full_lexicon");
     group.throughput(Throughput::Elements(1));
@@ -237,8 +237,7 @@ fn bench_ipa_normalize(c: &mut Criterion) {
 
     // The double space between "dʒˌæpənˈiz" and "lˈɪt" is intentional: it
     // exercises `normalize()`'s whitespace-run-collapsing pass.
-    let long_sentence =
-        "sˈɛndʒ nˈoʊ vælkˈaɪɹaɪɑː θɹˈi ˌʌnɹɪkˈɔɹdɪd kɹˈɑnɪkəlz dʒˌæpənˈiz  lˈɪt";
+    let long_sentence = "sˈɛndʒ nˈoʊ vælkˈaɪɹaɪɑː θɹˈi ˌʌnɹɪkˈɔɹdɪd kɹˈɑnɪkəlz dʒˌæpənˈiz  lˈɪt";
     group.bench_function("long_sentence", |b| {
         b.iter(|| normalizer.normalize(black_box(long_sentence)));
     });

@@ -131,10 +131,7 @@ mod tests {
 
     #[test]
     fn split_preserves_non_ascii_tokens() {
-        assert_eq!(
-            split_text_to_words("café résumé"),
-            vec!["café", "résumé"]
-        );
+        assert_eq!(split_text_to_words("café résumé"), vec!["café", "résumé"]);
     }
 
     #[test]

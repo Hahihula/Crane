@@ -51,16 +51,16 @@ mod projection;
 mod rocm_backend;
 
 pub use backend::{
-    apply_recurrence, compute_beta_g, gated_delta_rule_recurrence, l2_alpha, l2_norm,
-    l2_norm_fused, softplus, GdnGateConsts,
+    GdnGateConsts, apply_recurrence, compute_beta_g, gated_delta_rule_recurrence, l2_alpha,
+    l2_norm, l2_norm_fused, softplus,
 };
+pub use cache::GdnLayerCache;
+pub use config::{GdnConfig, GdnDims, VHeadOrder, defaults};
 pub use conv::causal_conv1d;
 #[cfg(feature = "cuda")]
 pub use cuda_backend::gdn_recurrence_cuda;
-#[cfg(all(feature = "rocm", not(feature = "cuda")))]
-pub use rocm_backend::gdn_recurrence_rocm;
-pub use cache::GdnLayerCache;
-pub use config::{defaults, GdnConfig, GdnDims, VHeadOrder};
 pub use layer::GatedDeltaNet;
 pub use norm::RmsNormGated;
 pub use projection::{GdnInputProjection, GdnInputProjectionKind, GdnProjection};
+#[cfg(all(feature = "rocm", not(feature = "cuda")))]
+pub use rocm_backend::gdn_recurrence_rocm;

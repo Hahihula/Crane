@@ -14,13 +14,13 @@
 //! before calling `atan2()`.
 
 #[cfg(feature = "cuda")]
+use candle_core::DType;
+#[cfg(feature = "cuda")]
 use candle_core::backend::BackendStorage;
 #[cfg(feature = "cuda")]
 use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 #[cfg(feature = "cuda")]
 use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
-#[cfg(feature = "cuda")]
-use candle_core::DType;
 use candle_core::{CpuStorage, CustomOp2, Layout, Result, Shape, Tensor, WithDType};
 
 // PTX compiled from kernels/cuda/atan2.cu — embedded at build time.
@@ -119,7 +119,7 @@ impl CustomOp2 for Atan2Op {
                 builder.arg(&n_u32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::BF16(dst)
-            }
+            },
             (CudaStorageSlice::F16(y), CudaStorageSlice::F16(x)) => {
                 let y = y.slice(yo1..yo2);
                 let x = x.slice(xo1..xo2);
@@ -131,7 +131,7 @@ impl CustomOp2 for Atan2Op {
                 builder.arg(&n_u32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::F16(dst)
-            }
+            },
             (CudaStorageSlice::F32(y), CudaStorageSlice::F32(x)) => {
                 let y = y.slice(yo1..yo2);
                 let x = x.slice(xo1..xo2);
@@ -143,7 +143,7 @@ impl CustomOp2 for Atan2Op {
                 builder.arg(&n_u32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::F32(dst)
-            }
+            },
             _ => candle_core::bail!("atan2: unsupported or mismatched CUDA storage types"),
         };
 

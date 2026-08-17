@@ -14,7 +14,10 @@
 use std::io::{Read, Seek};
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{conv1d, embedding, layer_norm, linear, linear_no_bias, Conv1d, Conv1dConfig, Embedding, LayerNorm, Linear, VarBuilder};
+use candle_nn::{
+    Conv1d, Conv1dConfig, Embedding, LayerNorm, Linear, VarBuilder, conv1d, embedding, layer_norm,
+    linear, linear_no_bias,
+};
 
 use super::config::AudioConfig;
 use crate::models::hunyuan_dense::modeling::Gguf;
@@ -50,26 +53,71 @@ impl WhisperAttention {
     /// the real Whisper `MultiHeadAttention`'s own quirk of `key` having no
     /// bias while `query`/`value`/`out` do (already correctly ported in
     /// [`Self::new`]'s safetensors path too — this just matches it).
-    fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, prefix: &str, dim: usize, num_heads: usize) -> Result<Self> {
+    fn from_gguf<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        prefix: &str,
+        dim: usize,
+        num_heads: usize,
+    ) -> Result<Self> {
         let head_dim = dim / num_heads;
-        let q_proj = Linear::new(gg.dequant_tensor(&format!("{prefix}.query.weight"))?, Some(gg.dequant_tensor(&format!("{prefix}.query.bias"))?.flatten_all()?));
+        let q_proj = Linear::new(
+            gg.dequant_tensor(&format!("{prefix}.query.weight"))?,
+            Some(
+                gg.dequant_tensor(&format!("{prefix}.query.bias"))?
+                    .flatten_all()?,
+            ),
+        );
         let k_proj = Linear::new(gg.dequant_tensor(&format!("{prefix}.key.weight"))?, None);
-        let v_proj = Linear::new(gg.dequant_tensor(&format!("{prefix}.value.weight"))?, Some(gg.dequant_tensor(&format!("{prefix}.value.bias"))?.flatten_all()?));
-        let out_proj = Linear::new(gg.dequant_tensor(&format!("{prefix}.out.weight"))?, Some(gg.dequant_tensor(&format!("{prefix}.out.bias"))?.flatten_all()?));
-        Ok(Self { q_proj, k_proj, v_proj, out_proj, num_heads, head_dim, scale: 1.0 / (head_dim as f64).sqrt() })
+        let v_proj = Linear::new(
+            gg.dequant_tensor(&format!("{prefix}.value.weight"))?,
+            Some(
+                gg.dequant_tensor(&format!("{prefix}.value.bias"))?
+                    .flatten_all()?,
+            ),
+        );
+        let out_proj = Linear::new(
+            gg.dequant_tensor(&format!("{prefix}.out.weight"))?,
+            Some(
+                gg.dequant_tensor(&format!("{prefix}.out.bias"))?
+                    .flatten_all()?,
+            ),
+        );
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            out_proj,
+            num_heads,
+            head_dim,
+            scale: 1.0 / (head_dim as f64).sqrt(),
+        })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b, seq, _dim) = xs.dims3()?;
-        let q = (self.q_proj.forward(xs)? * self.scale)?.reshape((b, seq, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let k = self.k_proj.forward(xs)?.reshape((b, seq, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let v = self.v_proj.forward(xs)?.reshape((b, seq, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let q = (self.q_proj.forward(xs)? * self.scale)?
+            .reshape((b, seq, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let k = self
+            .k_proj
+            .forward(xs)?
+            .reshape((b, seq, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = self
+            .v_proj
+            .forward(xs)?
+            .reshape((b, seq, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
 
         let attn_weights = q.contiguous()?.matmul(&k.transpose(2, 3)?.contiguous()?)?;
         let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
         let attn_output = attn_weights.matmul(&v.contiguous()?)?; // [b, heads, seq, head_dim]
 
-        let attn_output = attn_output.transpose(1, 2)?.contiguous()?.reshape((b, seq, self.num_heads * self.head_dim))?;
+        let attn_output = attn_output.transpose(1, 2)?.contiguous()?.reshape((
+            b,
+            seq,
+            self.num_heads * self.head_dim,
+        ))?;
         self.out_proj.forward(&attn_output)
     }
 }
@@ -85,8 +133,16 @@ struct EncoderLayer {
 impl EncoderLayer {
     fn new(cfg: &AudioConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            self_attn_layer_norm: layer_norm(cfg.d_model, LAYER_NORM_EPS, vb.pp("self_attn_layer_norm"))?,
-            self_attn: WhisperAttention::new(cfg.d_model, cfg.encoder_attention_heads, vb.pp("self_attn"))?,
+            self_attn_layer_norm: layer_norm(
+                cfg.d_model,
+                LAYER_NORM_EPS,
+                vb.pp("self_attn_layer_norm"),
+            )?,
+            self_attn: WhisperAttention::new(
+                cfg.d_model,
+                cfg.encoder_attention_heads,
+                vb.pp("self_attn"),
+            )?,
             final_layer_norm: layer_norm(cfg.d_model, LAYER_NORM_EPS, vb.pp("final_layer_norm"))?,
             fc1: linear(cfg.d_model, cfg.encoder_ffn_dim, vb.pp("fc1"))?,
             fc2: linear(cfg.encoder_ffn_dim, cfg.d_model, vb.pp("fc2"))?,
@@ -98,14 +154,49 @@ impl EncoderLayer {
     /// own GGUF export, `openbmb/MiniCPM-o-4_5-gguf`'s
     /// `MiniCPM-o-4_5-audio-F16.gguf` — near-PyTorch-original Whisper
     /// naming, not llama.cpp's usual compact `blk.N.*` scheme).
-    fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, cfg: &AudioConfig, layer_idx: usize) -> Result<Self> {
+    fn from_gguf<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        cfg: &AudioConfig,
+        layer_idx: usize,
+    ) -> Result<Self> {
         let prefix = format!("encoder.blocks.{layer_idx}");
-        let self_attn_layer_norm = LayerNorm::new(gg.dequant_tensor(&format!("{prefix}.attn_ln.weight"))?, gg.dequant_tensor(&format!("{prefix}.attn_ln.bias"))?, LAYER_NORM_EPS);
-        let self_attn = WhisperAttention::from_gguf(gg, &format!("{prefix}.attn"), cfg.d_model, cfg.encoder_attention_heads)?;
-        let final_layer_norm = LayerNorm::new(gg.dequant_tensor(&format!("{prefix}.mlp_ln.weight"))?, gg.dequant_tensor(&format!("{prefix}.mlp_ln.bias"))?, LAYER_NORM_EPS);
-        let fc1 = Linear::new(gg.dequant_tensor(&format!("{prefix}.mlp.0.weight"))?, Some(gg.dequant_tensor(&format!("{prefix}.mlp.0.bias"))?.flatten_all()?));
-        let fc2 = Linear::new(gg.dequant_tensor(&format!("{prefix}.mlp.2.weight"))?, Some(gg.dequant_tensor(&format!("{prefix}.mlp.2.bias"))?.flatten_all()?));
-        Ok(Self { self_attn_layer_norm, self_attn, final_layer_norm, fc1, fc2 })
+        let self_attn_layer_norm = LayerNorm::new(
+            gg.dequant_tensor(&format!("{prefix}.attn_ln.weight"))?,
+            gg.dequant_tensor(&format!("{prefix}.attn_ln.bias"))?,
+            LAYER_NORM_EPS,
+        );
+        let self_attn = WhisperAttention::from_gguf(
+            gg,
+            &format!("{prefix}.attn"),
+            cfg.d_model,
+            cfg.encoder_attention_heads,
+        )?;
+        let final_layer_norm = LayerNorm::new(
+            gg.dequant_tensor(&format!("{prefix}.mlp_ln.weight"))?,
+            gg.dequant_tensor(&format!("{prefix}.mlp_ln.bias"))?,
+            LAYER_NORM_EPS,
+        );
+        let fc1 = Linear::new(
+            gg.dequant_tensor(&format!("{prefix}.mlp.0.weight"))?,
+            Some(
+                gg.dequant_tensor(&format!("{prefix}.mlp.0.bias"))?
+                    .flatten_all()?,
+            ),
+        );
+        let fc2 = Linear::new(
+            gg.dequant_tensor(&format!("{prefix}.mlp.2.weight"))?,
+            Some(
+                gg.dequant_tensor(&format!("{prefix}.mlp.2.bias"))?
+                    .flatten_all()?,
+            ),
+        );
+        Ok(Self {
+            self_attn_layer_norm,
+            self_attn,
+            final_layer_norm,
+            fc1,
+            fc2,
+        })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -133,12 +224,24 @@ pub struct AudioEncoder {
 
 impl AudioEncoder {
     pub fn new(cfg: &AudioConfig, vb: VarBuilder) -> Result<Self> {
-        let conv1_cfg = Conv1dConfig { padding: 1, stride: 1, ..Default::default() };
+        let conv1_cfg = Conv1dConfig {
+            padding: 1,
+            stride: 1,
+            ..Default::default()
+        };
         let conv1 = conv1d(cfg.num_mel_bins, cfg.d_model, 3, conv1_cfg, vb.pp("conv1"))?;
-        let conv2_cfg = Conv1dConfig { padding: 1, stride: 2, ..Default::default() };
+        let conv2_cfg = Conv1dConfig {
+            padding: 1,
+            stride: 2,
+            ..Default::default()
+        };
         let conv2 = conv1d(cfg.d_model, cfg.d_model, 3, conv2_cfg, vb.pp("conv2"))?;
 
-        let embed_positions = embedding(cfg.max_source_positions, cfg.d_model, vb.pp("embed_positions"))?;
+        let embed_positions = embedding(
+            cfg.max_source_positions,
+            cfg.d_model,
+            vb.pp("embed_positions"),
+        )?;
 
         let vb_layers = vb.pp("layers");
         let mut layers = Vec::with_capacity(cfg.encoder_layers);
@@ -148,7 +251,13 @@ impl AudioEncoder {
 
         let layer_norm = layer_norm(cfg.d_model, LAYER_NORM_EPS, vb.pp("layer_norm"))?;
 
-        Ok(Self { conv1, conv2, embed_positions, layers, layer_norm })
+        Ok(Self {
+            conv1,
+            conv2,
+            embed_positions,
+            layers,
+            layer_norm,
+        })
     }
 
     /// GGUF equivalent of [`Self::new`] — loads from a standalone
@@ -166,22 +275,51 @@ impl AudioEncoder {
     /// Returns an error if a required tensor is missing or has an
     /// unexpected shape.
     pub fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, cfg: &AudioConfig) -> Result<Self> {
-        let conv1_cfg = Conv1dConfig { padding: 1, stride: 1, ..Default::default() };
-        let conv1 = Conv1d::new(gg.dequant_tensor("encoder.conv1.weight")?, Some(gg.dequant_tensor("encoder.conv1.bias")?.flatten_all()?), conv1_cfg);
+        let conv1_cfg = Conv1dConfig {
+            padding: 1,
+            stride: 1,
+            ..Default::default()
+        };
+        let conv1 = Conv1d::new(
+            gg.dequant_tensor("encoder.conv1.weight")?,
+            Some(gg.dequant_tensor("encoder.conv1.bias")?.flatten_all()?),
+            conv1_cfg,
+        );
 
-        let conv2_cfg = Conv1dConfig { padding: 1, stride: 2, ..Default::default() };
-        let conv2 = Conv1d::new(gg.dequant_tensor("encoder.conv2.weight")?, Some(gg.dequant_tensor("encoder.conv2.bias")?.flatten_all()?), conv2_cfg);
+        let conv2_cfg = Conv1dConfig {
+            padding: 1,
+            stride: 2,
+            ..Default::default()
+        };
+        let conv2 = Conv1d::new(
+            gg.dequant_tensor("encoder.conv2.weight")?,
+            Some(gg.dequant_tensor("encoder.conv2.bias")?.flatten_all()?),
+            conv2_cfg,
+        );
 
-        let embed_positions = Embedding::new(gg.dequant_tensor("encoder.positional_embedding")?, cfg.d_model);
+        let embed_positions = Embedding::new(
+            gg.dequant_tensor("encoder.positional_embedding")?,
+            cfg.d_model,
+        );
 
         let mut layers = Vec::with_capacity(cfg.encoder_layers);
         for i in 0..cfg.encoder_layers {
             layers.push(EncoderLayer::from_gguf(gg, cfg, i)?);
         }
 
-        let layer_norm = LayerNorm::new(gg.dequant_tensor("encoder.ln_post.weight")?, gg.dequant_tensor("encoder.ln_post.bias")?, LAYER_NORM_EPS);
+        let layer_norm = LayerNorm::new(
+            gg.dequant_tensor("encoder.ln_post.weight")?,
+            gg.dequant_tensor("encoder.ln_post.bias")?,
+            LAYER_NORM_EPS,
+        );
 
-        Ok(Self { conv1, conv2, embed_positions, layers, layer_norm })
+        Ok(Self {
+            conv1,
+            conv2,
+            embed_positions,
+            layers,
+            layer_norm,
+        })
     }
 
     /// `input_features`: log-mel spectrogram `[B, num_mel_bins, mel_frames]`
@@ -200,7 +338,10 @@ impl AudioEncoder {
         let (_b, seq_len, _d) = xs.dims3()?;
 
         let pos_ids = Tensor::arange(0u32, seq_len as u32, xs.device())?;
-        let embed_pos = self.embed_positions.forward(&pos_ids)?.to_dtype(xs.dtype())?; // [seq_len, d_model]
+        let embed_pos = self
+            .embed_positions
+            .forward(&pos_ids)?
+            .to_dtype(xs.dtype())?; // [seq_len, d_model]
 
         let mut hidden = xs.broadcast_add(&embed_pos)?;
         for layer in &self.layers {

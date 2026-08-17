@@ -12,7 +12,7 @@
 use candle_core::Result;
 use serde::Deserialize;
 
-use crate::ops::gdn::{defaults, GdnConfig};
+use crate::ops::gdn::{GdnConfig, defaults};
 
 /// Whether a transformer block at layer index `i` is full (softmax) attention
 /// or linear (Gated Delta Net) attention.
@@ -349,7 +349,13 @@ mod tests {
         // 16 of 64 layers are full attention, the last of every group of 4.
         let types = cfg.layer_types();
         assert_eq!(types.len(), 64);
-        assert_eq!(types.iter().filter(|t| **t == LayerType::FullAttention).count(), 16);
+        assert_eq!(
+            types
+                .iter()
+                .filter(|t| **t == LayerType::FullAttention)
+                .count(),
+            16
+        );
         assert_eq!(types[3], LayerType::FullAttention);
         assert_eq!(types[2], LayerType::LinearAttention);
         // Three value heads per key head — the case that never arises on the

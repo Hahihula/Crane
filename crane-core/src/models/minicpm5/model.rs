@@ -15,8 +15,8 @@ use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
 use super::modeling::{Config, MiniCpm5Model};
-use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
+use crate::generation::based::ModelForCausalLM;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 
@@ -99,16 +99,12 @@ impl Model {
         let format = match format {
             ModelFormat::Auto => {
                 let p = std::path::Path::new(model_path);
-                if p.is_file()
-                    && p.extension()
-                        .map(|e| e == "gguf")
-                        .unwrap_or(false)
-                {
+                if p.is_file() && p.extension().map(|e| e == "gguf").unwrap_or(false) {
                     ModelFormat::Gguf
                 } else {
                     ModelFormat::Safetensors
                 }
-            }
+            },
             other => other,
         };
 
@@ -188,8 +184,9 @@ impl Model {
         // Prefer the embedded tokenizer; fall back to a sibling
         // tokenizer.json only when the GGUF lacks the necessary metadata.
         let tokenizer = if gguf_has_embedded_tokenizer(&ct) {
-            build_tokenizer_from_gguf_path(gguf_path)?
-                .ok_or_else(|| anyhow::anyhow!("GGUF reports embedded tokenizer but build returned None"))?
+            build_tokenizer_from_gguf_path(gguf_path)?.ok_or_else(|| {
+                anyhow::anyhow!("GGUF reports embedded tokenizer but build returned None")
+            })?
         } else {
             let same_dir = parent.join("tokenizer.json");
             let tokenizer_path = if same_dir.exists() {
@@ -207,7 +204,10 @@ impl Model {
                     );
                 }
             };
-            eprintln!("GGUF has no embedded tokenizer; falling back to {}", tokenizer_path.display());
+            eprintln!(
+                "GGUF has no embedded tokenizer; falling back to {}",
+                tokenizer_path.display()
+            );
             Tokenizer::from_file(&tokenizer_path).map_err(E::msg)?
         };
 
@@ -234,7 +234,11 @@ impl Model {
         }
 
         let inner = MiniCpm5Model::from_gguf(ct, &mut file, device)?;
-        let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
+        let dtype = if device.is_cuda() {
+            DType::BF16
+        } else {
+            DType::F32
+        };
 
         Ok(Self {
             tokenizer: TokenOutputStream::new(tokenizer),
@@ -268,11 +272,8 @@ impl Model {
     }
 
     pub fn warmup(&mut self) {
-        if let Err(e) = self.generate(
-            &[45, 546, 456],
-            &GenerationConfig::with_max_tokens(5),
-            None,
-        ) {
+        if let Err(e) = self.generate(&[45, 546, 456], &GenerationConfig::with_max_tokens(5), None)
+        {
             eprintln!("warmup failed (non-fatal): {e}");
         }
         self.clear_kv_cache();

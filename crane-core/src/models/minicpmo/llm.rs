@@ -14,9 +14,9 @@ use candle_nn::{Module, VarBuilder};
 use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
-use super::config::{load_config, MiniCpmOConfig};
-use crate::generation::based::ModelForCausalLM;
+use super::config::{MiniCpmOConfig, load_config};
 use crate::generation::GenerationConfig;
+use crate::generation::based::ModelForCausalLM;
 use crate::models::qwen3::modeling::Qwen3Model;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
@@ -134,7 +134,11 @@ impl MiniCpmOLlm {
     /// # Errors
     ///
     /// Returns an error if the forward pass fails.
-    pub fn forward_step(&mut self, input_ids: &[u32], start_pos: usize) -> candle_core::Result<Tensor> {
+    pub fn forward_step(
+        &mut self,
+        input_ids: &[u32],
+        start_pos: usize,
+    ) -> candle_core::Result<Tensor> {
         let input = Tensor::new(input_ids, &self.device)?.unsqueeze(0)?;
         self.inner.forward(&input, start_pos)
     }
@@ -147,7 +151,10 @@ impl MiniCpmOLlm {
     ///
     /// Returns an error if the embedding lookup fails.
     pub fn embed_only(&self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
-        self.inner.embed_tokens().forward(input_ids)?.to_dtype(self.dtype)
+        self.inner
+            .embed_tokens()
+            .forward(input_ids)?
+            .to_dtype(self.dtype)
     }
 
     /// Run the decoder from a caller-supplied embedding sequence (e.g. text
@@ -157,7 +164,11 @@ impl MiniCpmOLlm {
     /// # Errors
     ///
     /// Returns an error if the forward pass fails.
-    pub fn forward_embeds(&mut self, inputs_embeds: &Tensor, start_pos: usize) -> candle_core::Result<Tensor> {
+    pub fn forward_embeds(
+        &mut self,
+        inputs_embeds: &Tensor,
+        start_pos: usize,
+    ) -> candle_core::Result<Tensor> {
         self.inner.forward_embeds(inputs_embeds, start_pos)
     }
 
@@ -307,17 +318,25 @@ mod hf_diff {
         #[cfg(not(feature = "cuda"))]
         let (device, dtype) = (Device::Cpu, DType::F32);
 
-        let mut model = MiniCpmOLlm::new(model_path, &device, &dtype).expect("load MiniCPM-o llm tower");
+        let mut model =
+            MiniCpmOLlm::new(model_path, &device, &dtype).expect("load MiniCPM-o llm tower");
 
-        let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap()).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap(),
+        )
+        .unwrap();
         let input_ids: Vec<u32> = meta["input_ids"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_u64().unwrap() as u32)
             .collect();
-        let shape: Vec<usize> = meta["shape"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let shape: Vec<usize> = meta["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         let (seq_len, vocab_size) = (shape[0], shape[1]);
         assert_eq!(input_ids.len(), seq_len);
 
@@ -341,9 +360,21 @@ mod hf_diff {
         // Last row of the [seq_len, vocab] dump.
         let py_last = &py_logits_all[(seq_len - 1) * vocab_size..seq_len * vocab_size];
 
-        let dot: f64 = rust_logits.iter().zip(py_last).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-        let norm_a: f64 = rust_logits.iter().map(|a| f64::from(*a) * f64::from(*a)).sum::<f64>().sqrt();
-        let norm_b: f64 = py_last.iter().map(|b| f64::from(*b) * f64::from(*b)).sum::<f64>().sqrt();
+        let dot: f64 = rust_logits
+            .iter()
+            .zip(py_last)
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum();
+        let norm_a: f64 = rust_logits
+            .iter()
+            .map(|a| f64::from(*a) * f64::from(*a))
+            .sum::<f64>()
+            .sqrt();
+        let norm_b: f64 = py_last
+            .iter()
+            .map(|b| f64::from(*b) * f64::from(*b))
+            .sum::<f64>()
+            .sqrt();
         let cosine = dot / (norm_a * norm_b);
         let max_abs_diff = rust_logits
             .iter()
@@ -358,7 +389,12 @@ mod hf_diff {
             idx.sort_unstable_by(|&a, &b| rust_logits[b].partial_cmp(&rust_logits[a]).unwrap());
             idx[..5].to_vec()
         };
-        let py_top5: Vec<usize> = meta["top5_last"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let py_top5: Vec<usize> = meta["top5_last"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         println!("rust top5: {rust_top5:?}, python top5: {py_top5:?}");
         assert_eq!(rust_top5[0], py_top5[0], "top-1 predicted token mismatch");
 

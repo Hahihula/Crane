@@ -41,13 +41,18 @@ pub(crate) fn scatter_elements(
         let dim_size = data.dims()[axis] as i64;
         let max = Tensor::new(dim_size, indices.device())?.to_dtype(indices.dtype())?;
         let mask = indices.lt(&zeros)?;
-        mask.to_dtype(indices.dtype())?.broadcast_mul(&max)?.add(indices)?
+        mask.to_dtype(indices.dtype())?
+            .broadcast_mul(&max)?
+            .add(indices)?
     };
 
     match reduction {
         "none" => data.scatter(indices, updates, axis),
         "add" => data.scatter_add(indices, updates, axis),
-        other => bail!("unsupported ScatterElements reduction {other} for {}", node.name),
+        other => bail!(
+            "unsupported ScatterElements reduction {other} for {}",
+            node.name
+        ),
     }
 }
 
@@ -62,7 +67,11 @@ mod tests {
     fn scatter_elements_node(attribute: Vec<AttributeProto>) -> NodeProto {
         NodeProto {
             op_type: "ScatterElements".to_string(),
-            input: vec!["data".to_string(), "indices".to_string(), "updates".to_string()],
+            input: vec![
+                "data".to_string(),
+                "indices".to_string(),
+                "updates".to_string(),
+            ],
             output: vec!["y".to_string()],
             attribute,
             ..Default::default()

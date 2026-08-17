@@ -78,11 +78,7 @@ impl SamplingBuffers {
     /// # Errors
     ///
     /// Returns an error if tensor allocation on `device` fails.
-    pub fn get_topk_neg_vec(
-        &mut self,
-        k: usize,
-        device: &Device,
-    ) -> candle_core::Result<Tensor> {
+    pub fn get_topk_neg_vec(&mut self, k: usize, device: &Device) -> candle_core::Result<Tensor> {
         if let Some(t) = self.topk_neg_vecs.get(&k)
             && t.device().same_device(device)
         {
@@ -96,11 +92,7 @@ impl SamplingBuffers {
     /// # Errors
     ///
     /// Returns an error if `k <= 1` or tensor allocation on `device` fails.
-    pub fn get_topk_shift_idx(
-        &mut self,
-        k: usize,
-        device: &Device,
-    ) -> candle_core::Result<Tensor> {
+    pub fn get_topk_shift_idx(&mut self, k: usize, device: &Device) -> candle_core::Result<Tensor> {
         if let Some(t) = self.topk_shift_idxs.get(&k)
             && t.device().same_device(device)
         {
@@ -251,12 +243,7 @@ pub fn sample(
             // Fall back to CPU LogitsProcessor which handles temperature +
             // top-p natively and only needs a ~600 KB DtoH copy.
             // Set CRANE_FORCE_GPU_TOPK=1 to override this heuristic.
-            if vocab > 65536
-                && std::env::var("CRANE_FORCE_GPU_TOPK")
-                    .ok()
-                    .as_deref()
-                    != Some("1")
-            {
+            if vocab > 65536 && std::env::var("CRANE_FORCE_GPU_TOPK").ok().as_deref() != Some("1") {
                 let next_token = seq.logits_processor.sample(&logits)?;
                 if trace {
                     let t_done = Instant::now();
@@ -281,7 +268,8 @@ pub fn sample(
         top_k = top_k.min(64).min(vocab);
 
         if top_k > 0 && top_k < vocab {
-            let topk_idx = crane_core::ops::topk_indices(&logits, top_k).map_err(anyhow::Error::from)?;
+            let topk_idx =
+                crane_core::ops::topk_indices(&logits, top_k).map_err(anyhow::Error::from)?;
             let topk_logits = logits.gather(&topk_idx, candle_core::D::Minus1)?;
             let t_after_topk = Instant::now();
 
@@ -330,8 +318,7 @@ pub fn sample(
                     .reshape(top_k)?;
                 let mask_le = cumsum.le(top_p)?;
 
-                let shift =
-                    buffers.get_topk_shift_buf(top_k, logits.device(), mask_le.dtype())?;
+                let shift = buffers.get_topk_shift_buf(top_k, logits.device(), mask_le.dtype())?;
                 shift.zero_set()?;
                 if top_k > 1 {
                     let idx = buffers.get_topk_shift_idx(top_k, logits.device())?;
@@ -535,9 +522,18 @@ mod tests {
         let t = logits(&[10.0, -10.0, 3.0]);
         apply_penalties_inplace(&t, 2.0, 0.0, 0.0, &[0, 1]).unwrap();
         let out = t.to_vec1::<f32>().unwrap();
-        assert!((out[0] - 5.0).abs() < 1e-6, "positive logit should be divided");
-        assert!((out[1] - -20.0).abs() < 1e-6, "negative logit should be multiplied");
-        assert!((out[2] - 3.0).abs() < 1e-6, "unseen token must be untouched");
+        assert!(
+            (out[0] - 5.0).abs() < 1e-6,
+            "positive logit should be divided"
+        );
+        assert!(
+            (out[1] - -20.0).abs() < 1e-6,
+            "negative logit should be multiplied"
+        );
+        assert!(
+            (out[2] - 3.0).abs() < 1e-6,
+            "unseen token must be untouched"
+        );
     }
 
     #[test]
@@ -562,7 +558,10 @@ mod tests {
     fn frequency_penalty_scales_with_occurrence_count() {
         let t = logits(&[10.0, 10.0, 10.0]);
         apply_penalties_inplace(&t, 1.0, 0.5, 0.0, &[0, 0, 0, 1]).unwrap();
-        assert_eq!(t.to_vec1::<f32>().unwrap(), vec![10.0 - 1.5, 10.0 - 0.5, 10.0]);
+        assert_eq!(
+            t.to_vec1::<f32>().unwrap(),
+            vec![10.0 - 1.5, 10.0 - 0.5, 10.0]
+        );
     }
 
     #[test]
@@ -571,7 +570,10 @@ mod tests {
     fn presence_penalty_is_flat_regardless_of_count() {
         let t = logits(&[10.0, 10.0, 10.0]);
         apply_penalties_inplace(&t, 1.0, 0.0, 0.5, &[0, 0, 0, 1]).unwrap();
-        assert_eq!(t.to_vec1::<f32>().unwrap(), vec![10.0 - 0.5, 10.0 - 0.5, 10.0]);
+        assert_eq!(
+            t.to_vec1::<f32>().unwrap(),
+            vec![10.0 - 0.5, 10.0 - 0.5, 10.0]
+        );
     }
 
     #[test]
@@ -611,7 +613,10 @@ mod tests {
         let t = logits(&[10.0, 10.0]);
         apply_penalties_inplace(&t, 1.0, -0.5, 0.0, &[0, 0, 1]).unwrap();
         let out = t.to_vec1::<f32>().unwrap();
-        assert!(out[0] > 10.0, "negative frequency_penalty should boost the logit");
+        assert!(
+            out[0] > 10.0,
+            "negative frequency_penalty should boost the logit"
+        );
         assert!((out[0] - 11.0).abs() < 1e-6);
         assert!((out[1] - 10.5).abs() < 1e-6);
     }
@@ -623,9 +628,15 @@ mod tests {
         let t = logits(&[10.0, 10.0, 10.0]);
         apply_penalties_inplace(&t, 1.0, 0.0, -0.5, &[0, 1]).unwrap();
         let out = t.to_vec1::<f32>().unwrap();
-        assert!(out[0] > 10.0, "negative presence_penalty should boost the logit");
+        assert!(
+            out[0] > 10.0,
+            "negative presence_penalty should boost the logit"
+        );
         assert!((out[0] - 10.5).abs() < 1e-6);
         assert!((out[1] - 10.5).abs() < 1e-6);
-        assert!((out[2] - 10.0).abs() < 1e-6, "unseen token must be untouched");
+        assert!(
+            (out[2] - 10.0).abs() < 1e-6,
+            "unseen token must be untouched"
+        );
     }
 }

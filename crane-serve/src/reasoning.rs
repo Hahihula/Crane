@@ -46,7 +46,10 @@ impl ThinkingOptions {
     /// `reasoning_effort` is OpenAI's own top-level field. When both carry an
     /// effort, `chat_template_kwargs` wins — it is the more specific,
     /// template-targeted channel.
-    pub fn from_request(chat_template_kwargs: Option<&Value>, reasoning_effort: Option<&str>) -> Self {
+    pub fn from_request(
+        chat_template_kwargs: Option<&Value>,
+        reasoning_effort: Option<&str>,
+    ) -> Self {
         let kwargs = chat_template_kwargs.and_then(Value::as_object);
         Self {
             enable_thinking: kwargs
@@ -123,7 +126,11 @@ impl ReasoningSplitter {
         let mut content = String::new();
 
         loop {
-            let tag = if self.in_reasoning { THINK_CLOSE } else { THINK_OPEN };
+            let tag = if self.in_reasoning {
+                THINK_CLOSE
+            } else {
+                THINK_OPEN
+            };
             if let Some(idx) = self.pending.find(tag) {
                 let before: String = self.pending[..idx].into();
                 self.emit(&before, &mut reasoning, &mut content);
@@ -159,13 +166,21 @@ impl ReasoningSplitter {
             return;
         }
         if self.in_reasoning {
-            let text = if self.seen_reasoning { text } else { text.trim_start() };
+            let text = if self.seen_reasoning {
+                text
+            } else {
+                text.trim_start()
+            };
             if !text.is_empty() {
                 self.seen_reasoning = true;
                 reasoning.push_str(text);
             }
         } else {
-            let text = if self.seen_content { text } else { text.trim_start() };
+            let text = if self.seen_content {
+                text
+            } else {
+                text.trim_start()
+            };
             if !text.is_empty() {
                 self.seen_content = true;
                 content.push_str(text);
@@ -182,7 +197,10 @@ pub(crate) fn partial_tag_suffix_len(haystack: &str, tag: &str) -> usize {
     let max = tag.len().saturating_sub(1).min(haystack.len());
     (1..=max)
         .rev()
-        .find(|&n| haystack.is_char_boundary(haystack.len() - n) && tag.starts_with(&haystack[haystack.len() - n..]))
+        .find(|&n| {
+            haystack.is_char_boundary(haystack.len() - n)
+                && tag.starts_with(&haystack[haystack.len() - n..])
+        })
         .unwrap_or(0)
 }
 
@@ -255,7 +273,9 @@ mod tests {
         let mut s = ReasoningSplitter::for_prompt("<think>\n");
         let mut reasoning = String::new();
         let mut content = String::new();
-        for tok in ["think", "ing", " a bit", "\n<", "/", "think", ">", "\n\n", "answer"] {
+        for tok in [
+            "think", "ing", " a bit", "\n<", "/", "think", ">", "\n\n", "answer",
+        ] {
             let (r, c) = s.push(tok);
             reasoning.push_str(&r);
             content.push_str(&c);

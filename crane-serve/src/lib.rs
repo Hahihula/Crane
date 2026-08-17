@@ -3,8 +3,8 @@ pub mod engine;
 pub mod handlers;
 pub mod openai_api;
 pub mod reasoning;
-pub mod tools;
 pub mod sglang_api;
+pub mod tools;
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -4,8 +4,8 @@ pub mod modeling;
 
 pub use codec::CodecDecoder;
 pub use model::{
-    build_prompt_segments, load_tokenizer, load_voice_embedding, Model, PromptSegment,
-    SpeechStream, VoxtralConfig, BEGIN_AUDIO, BOS, END_AUDIO_CODE, INST, INST_END,
+    BEGIN_AUDIO, BOS, END_AUDIO_CODE, INST, INST_END, Model, PromptSegment, SpeechStream,
+    VoxtralConfig, build_prompt_segments, load_tokenizer, load_voice_embedding,
 };
 pub use modeling::{AcousticTransformer, AudioCodebookEmbedding, VoxtralLlm};
 

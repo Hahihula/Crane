@@ -4,10 +4,10 @@
 //!   cargo run --bin gemma4_simple -- /path/to/gemma-4-E2B
 
 use anyhow::Result;
-use crane_core::generation::based::ModelForCausalLM;
 use crane_core::generation::GenerationConfig;
-use crane_core::models::gemma4::Model;
+use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::DType;
+use crane_core::models::gemma4::Model;
 
 fn main() -> Result<()> {
     let model_path = std::env::args()

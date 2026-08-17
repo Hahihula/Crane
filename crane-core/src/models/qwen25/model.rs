@@ -12,7 +12,7 @@ use anyhow::{Error as E, Result};
 // see CANDLE_TRANSFORMERS.md. A local Qwen2 implementation already exists in
 // this module and is the likely replacement for the dense variant.
 use candle_transformers::models::qwen2::{Config as ConfigBase, ModelForCausalLM as ModelBase};
-use candle_transformers::models::qwen2_moe::{Model as ModelMoe};
+use candle_transformers::models::qwen2_moe::Model as ModelMoe;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -20,8 +20,8 @@ use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
-use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
+use crate::generation::based::ModelForCausalLM;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 

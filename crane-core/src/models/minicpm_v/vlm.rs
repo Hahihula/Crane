@@ -25,11 +25,11 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
-use super::config::{load_config, Config};
+use super::config::{Config, load_config};
 use super::merger::Merger;
 use super::preprocess::{
-    self, downsample_divisor, load_preprocessor_config, build_placeholder, PlaceholderTokens,
-    PreprocessorConfig, ProcessedImage,
+    self, PlaceholderTokens, PreprocessorConfig, ProcessedImage, build_placeholder,
+    downsample_divisor, load_preprocessor_config,
 };
 use super::vision::VisionModel;
 use crate::models::qwen3_5::vlm::splice_image_features;
@@ -47,7 +47,10 @@ pub struct VlGenerationConfig {
 
 impl Default for VlGenerationConfig {
     fn default() -> Self {
-        Self { max_new_tokens: 512, strip_thinking: true }
+        Self {
+            max_new_tokens: 512,
+            strip_thinking: true,
+        }
     }
 }
 
@@ -58,7 +61,10 @@ fn load_placeholder_tokens(model_path: &str) -> Result<PlaceholderTokens> {
     let path = std::path::Path::new(model_path).join("tokenizer_config.json");
     let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_slice(&data)?;
-    let extra = json.get("extra_special_tokens").cloned().unwrap_or_default();
+    let extra = json
+        .get("extra_special_tokens")
+        .cloned()
+        .unwrap_or_default();
     let get = |key: &str, default: &str| -> String {
         extra
             .get(key)
@@ -109,7 +115,10 @@ impl MinicpmV46VLModel {
 
         eprintln!(
             "[minicpm_v] loading vision tower: hidden={} layers={} insert_layer_id={} window={:?}",
-            cfg.vision_config.hidden_size, cfg.vision_config.num_hidden_layers, cfg.insert_layer_id, cfg.window_kernel_size,
+            cfg.vision_config.hidden_size,
+            cfg.vision_config.num_hidden_layers,
+            cfg.insert_layer_id,
+            cfg.window_kernel_size,
         );
         let vision = VisionModel::new(
             &cfg.vision_config,
@@ -130,7 +139,8 @@ impl MinicpmV46VLModel {
             vision_end_token_id: None,
             tie_word_embeddings: cfg.tie_word_embeddings,
         };
-        let text = Qwen3_5TextModel::new(&qwen35_cfg, vb, device, *dtype, None).context("build text model")?;
+        let text = Qwen3_5TextModel::new(&qwen35_cfg, vb, device, *dtype, None)
+            .context("build text model")?;
 
         let preprocessor = load_preprocessor_config(model_path)?;
         let placeholder_tokens = load_placeholder_tokens(model_path)?;
@@ -167,12 +177,18 @@ impl MinicpmV46VLModel {
     /// `target_sizes`: per-image/-slice `(h, w)` patch-grid dims.
     ///
     /// Returns `[total_image_tokens, llm_hidden]`.
-    pub fn encode_images(&self, pixel_values: &Tensor, target_sizes: &[(usize, usize)]) -> Result<Tensor> {
+    pub fn encode_images(
+        &self,
+        pixel_values: &Tensor,
+        target_sizes: &[(usize, usize)],
+    ) -> Result<Tensor> {
         let (vision_out, downsampled_sizes) = self
             .vision
             .forward(pixel_values, target_sizes)
             .context("vision forward")?;
-        self.merger.forward(&vision_out, &downsampled_sizes).context("merger forward")
+        self.merger
+            .forward(&vision_out, &downsampled_sizes)
+            .context("merger forward")
     }
 
     /// Forward pass for a vision-language prefill (or a text-only prefill,
@@ -198,7 +214,8 @@ impl MinicpmV46VLModel {
         let mut hidden_states = self.text.embed_only(input_ids)?;
 
         if let Some(img_emb) = image_embeds {
-            hidden_states = splice_image_features(input_ids, &hidden_states, &img_emb, self.image_token_id)?;
+            hidden_states =
+                splice_image_features(input_ids, &hidden_states, &img_emb, self.image_token_id)?;
         }
 
         // No MRoPE grid needed (see module docs) — all three axes share the
@@ -208,7 +225,8 @@ impl MinicpmV46VLModel {
             .collect();
         let position_ids = Tensor::from_vec(flat, (3, seq_len), &self.device)?;
 
-        self.text.forward_embeds(&hidden_states, &position_ids, start_pos, None)
+        self.text
+            .forward_embeds(&hidden_states, &position_ids, start_pos, None)
     }
 
     /// Decode one new token. The KV cache must already hold the prefill.
@@ -229,21 +247,36 @@ impl MinicpmV46VLModel {
     /// full structured placeholder (`<image>...</image>` [+ `<slice>...
     /// </slice>` per tile]). Returns `None` for `ProcessedImage`/pixel data
     /// when `image` is `None` (text-only turn).
-    pub fn render_prompt(&self, image: Option<&image::DynamicImage>, user_text: &str) -> Result<(Vec<u32>, Option<ProcessedImage>)> {
+    pub fn render_prompt(
+        &self,
+        image: Option<&image::DynamicImage>,
+        user_text: &str,
+    ) -> Result<(Vec<u32>, Option<ProcessedImage>)> {
         let processed = image
             .map(|img| preprocess::process_image(img, &self.preprocessor, &self.device, self.dtype))
             .transpose()?;
 
         let user_content = match &processed {
             Some(p) => {
-                let placeholder = build_placeholder(p, &self.placeholder_tokens, 0, self.use_image_id, self.downsample_divisor);
+                let placeholder = build_placeholder(
+                    p,
+                    &self.placeholder_tokens,
+                    0,
+                    self.use_image_id,
+                    self.downsample_divisor,
+                );
                 format!("{placeholder}\n{user_text}")
-            }
+            },
             None => user_text.to_string(),
         };
-        let rendered = format!("<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n");
+        let rendered =
+            format!("<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n");
 
-        let base = self.tokenizer.tokenizer.encode(rendered, false).map_err(E::msg)?;
+        let base = self
+            .tokenizer
+            .tokenizer
+            .encode(rendered, false)
+            .map_err(E::msg)?;
         let ids = base.get_ids().to_vec();
         Ok((ids, processed))
     }
@@ -258,15 +291,24 @@ impl MinicpmV46VLModel {
         mut on_token: impl FnMut(&str),
     ) -> Result<String> {
         let (input_ids, processed) = self.render_prompt(image, user_text)?;
-        let input_tensor = Tensor::from_vec(input_ids.clone(), (1usize, input_ids.len()), &self.device)?;
+        let input_tensor =
+            Tensor::from_vec(input_ids.clone(), (1usize, input_ids.len()), &self.device)?;
 
         let (pixel_values, target_sizes) = match &processed {
-            Some(p) => (Some(p.pixel_values.clone().unsqueeze(0)?), Some(p.target_sizes.clone())),
+            Some(p) => (
+                Some(p.pixel_values.clone().unsqueeze(0)?),
+                Some(p.target_sizes.clone()),
+            ),
             None => (None, None),
         };
 
         self.clear_kv_cache();
-        let mut logits = self.forward(&input_tensor, pixel_values.as_ref(), target_sizes.as_deref(), 0)?;
+        let mut logits = self.forward(
+            &input_tensor,
+            pixel_values.as_ref(),
+            target_sizes.as_deref(),
+            0,
+        )?;
 
         let mut generated: Vec<u32> = Vec::with_capacity(cfg.max_new_tokens);
         let mut cur_pos = input_ids.len();
@@ -287,8 +329,16 @@ impl MinicpmV46VLModel {
             cur_pos += 1;
         }
 
-        let text = self.tokenizer.tokenizer.decode(&generated, true).map_err(E::msg)?;
-        Ok(if cfg.strip_thinking { strip_thinking(&text) } else { text })
+        let text = self
+            .tokenizer
+            .tokenizer
+            .decode(&generated, true)
+            .map_err(E::msg)?;
+        Ok(if cfg.strip_thinking {
+            strip_thinking(&text)
+        } else {
+            text
+        })
     }
 }
 

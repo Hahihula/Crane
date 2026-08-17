@@ -1,8 +1,8 @@
-use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use minijinja_contrib::add_to_environment;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokenizers::{EncodeInput, Tokenizer};
-use minijinja_contrib::add_to_environment;
 
 /// Defines the aditional parameters available for the `from_pretrained` function
 #[derive(Debug, Clone)]
@@ -134,7 +134,10 @@ impl AutoTokenizer {
 
         // Fall back to a standalone chat_template.jinja if the field is absent.
         if config.chat_template.is_none() {
-            let jinja_path = file.parent().unwrap_or(std::path::Path::new(".")).join("chat_template.jinja");
+            let jinja_path = file
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("chat_template.jinja");
             if jinja_path.exists() {
                 config.chat_template = std::fs::read_to_string(&jinja_path).ok();
             }
@@ -284,7 +287,14 @@ fn rewrite_python_str_methods(template: &str) -> String {
     let template = rewrite_split_index(template);
 
     // Step 2: rewrite remaining `.method(` → ` | method(`
-    const METHODS: &[&str] = &["startswith", "endswith", "split", "lstrip", "rstrip", "strip"];
+    const METHODS: &[&str] = &[
+        "startswith",
+        "endswith",
+        "split",
+        "lstrip",
+        "rstrip",
+        "strip",
+    ];
     let mut out = template;
     for method in METHODS {
         let pat = format!(".{}(", method);
@@ -346,8 +356,8 @@ fn find_matching_paren(s: &str) -> Option<usize> {
                 if depth == 0 {
                     return Some(i);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     None
@@ -360,7 +370,11 @@ impl AutoTokenizer {
         ctx: S,
         add_generation_prompt: bool,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.apply_chat_template_with_tools(ctx, Option::<&serde_json::Value>::None, add_generation_prompt)
+        self.apply_chat_template_with_tools(
+            ctx,
+            Option::<&serde_json::Value>::None,
+            add_generation_prompt,
+        )
     }
 
     /// Render the chat template for `messages`, exposing `tools` to the template
@@ -438,13 +452,17 @@ impl AutoTokenizer {
         env.add_filter("lstrip", |s: String, chars: Option<String>| -> String {
             match chars {
                 None => s.trim_start().to_string(),
-                Some(c) => s.trim_start_matches(c.chars().collect::<Vec<_>>().as_slice()).to_string(),
+                Some(c) => s
+                    .trim_start_matches(c.chars().collect::<Vec<_>>().as_slice())
+                    .to_string(),
             }
         });
         env.add_filter("rstrip", |s: String, chars: Option<String>| -> String {
             match chars {
                 None => s.trim_end().to_string(),
-                Some(c) => s.trim_end_matches(c.chars().collect::<Vec<_>>().as_slice()).to_string(),
+                Some(c) => s
+                    .trim_end_matches(c.chars().collect::<Vec<_>>().as_slice())
+                    .to_string(),
             }
         });
         env.add_filter("strip", |s: String, chars: Option<String>| -> String {
@@ -453,51 +471,75 @@ impl AutoTokenizer {
                 Some(c) => {
                     let ch: Vec<char> = c.chars().collect();
                     s.trim_matches(ch.as_slice()).to_string()
-                }
+                },
             }
         });
 
         // HF chat templates call `raise_exception(msg)` to abort rendering on
         // malformed input (e.g. Qwen/Ornith: "System message must be at the
         // beginning."). Surface it as a render error with the template's message.
-        env.add_function("raise_exception", |msg: String| -> Result<String, minijinja::Error> {
-            Err(minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg))
-        });
+        env.add_function(
+            "raise_exception",
+            |msg: String| -> Result<String, minijinja::Error> {
+                Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    msg,
+                ))
+            },
+        );
 
         // `tojson` (used by tool-calling templates, e.g. `tool | tojson`).
         // minijinja's built-in needs the `json` feature AND uses compact
         // separators; HF/Jinja2 emit Python `json.dumps` defaults — `", "` /
         // `": "` — plus HTML-safe escaping. Match that for byte-parity.
-        env.add_filter("tojson", |v: minijinja::Value| -> Result<minijinja::Value, minijinja::Error> {
-            struct Py;
-            impl serde_json::ser::Formatter for Py {
-                fn begin_array_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
-                    if first { Ok(()) } else { w.write_all(b", ") }
+        env.add_filter(
+            "tojson",
+            |v: minijinja::Value| -> Result<minijinja::Value, minijinja::Error> {
+                struct Py;
+                impl serde_json::ser::Formatter for Py {
+                    fn begin_array_value<W: ?Sized + std::io::Write>(
+                        &mut self,
+                        w: &mut W,
+                        first: bool,
+                    ) -> std::io::Result<()> {
+                        if first { Ok(()) } else { w.write_all(b", ") }
+                    }
+                    fn begin_object_key<W: ?Sized + std::io::Write>(
+                        &mut self,
+                        w: &mut W,
+                        first: bool,
+                    ) -> std::io::Result<()> {
+                        if first { Ok(()) } else { w.write_all(b", ") }
+                    }
+                    fn begin_object_value<W: ?Sized + std::io::Write>(
+                        &mut self,
+                        w: &mut W,
+                    ) -> std::io::Result<()> {
+                        w.write_all(b": ")
+                    }
                 }
-                fn begin_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
-                    if first { Ok(()) } else { w.write_all(b", ") }
+                let mut out = Vec::new();
+                let mut ser = serde_json::Serializer::with_formatter(&mut out, Py);
+                serde::Serialize::serialize(&v, &mut ser).map_err(|e| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("tojson: {e}"),
+                    )
+                })?;
+                let s = String::from_utf8(out).unwrap_or_default();
+                let mut rv = String::with_capacity(s.len());
+                for c in s.chars() {
+                    match c {
+                        '<' => rv.push_str("\\u003c"),
+                        '>' => rv.push_str("\\u003e"),
+                        '&' => rv.push_str("\\u0026"),
+                        '\'' => rv.push_str("\\u0027"),
+                        _ => rv.push(c),
+                    }
                 }
-                fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
-                    w.write_all(b": ")
-                }
-            }
-            let mut out = Vec::new();
-            let mut ser = serde_json::Serializer::with_formatter(&mut out, Py);
-            serde::Serialize::serialize(&v, &mut ser)
-                .map_err(|e| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, format!("tojson: {e}")))?;
-            let s = String::from_utf8(out).unwrap_or_default();
-            let mut rv = String::with_capacity(s.len());
-            for c in s.chars() {
-                match c {
-                    '<' => rv.push_str("\\u003c"),
-                    '>' => rv.push_str("\\u003e"),
-                    '&' => rv.push_str("\\u0026"),
-                    '\'' => rv.push_str("\\u0027"),
-                    _ => rv.push(c),
-                }
-            }
-            Ok(minijinja::Value::from_safe_string(rv))
-        });
+                Ok(minijinja::Value::from_safe_string(rv))
+            },
+        );
 
         env.add_template("default", &template_str).unwrap();
         let tmpl = env.get_template("default").unwrap();
@@ -653,7 +695,10 @@ mod tests {
     #[test]
     fn reasoning_effort_explicit_overrides_default() {
         for effort in ["low", "medium", "xhigh"] {
-            assert_eq!(render_full(EFFORT_TAIL, None, Some(effort)).unwrap(), effort);
+            assert_eq!(
+                render_full(EFFORT_TAIL, None, Some(effort)).unwrap(),
+                effort
+            );
         }
     }
 
@@ -661,7 +706,9 @@ mod tests {
     /// surface as an error rather than a silently mis-prompted request.
     #[test]
     fn reasoning_effort_unsupported_value_errors() {
-        let err = render_full(EFFORT_TAIL, None, Some("high")).unwrap_err().to_string();
+        let err = render_full(EFFORT_TAIL, None, Some("high"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("bad effort"), "unexpected error: {err}");
     }
 
@@ -669,7 +716,10 @@ mod tests {
     #[test]
     fn reasoning_effort_is_inert_for_templates_that_ignore_it() {
         assert_eq!(render_full(OFFICIAL_TAIL, None, Some("low")).unwrap(), "ON");
-        assert_eq!(render_full(UNSLOTH_TAIL, Some(true), Some("low")).unwrap(), "ON");
+        assert_eq!(
+            render_full(UNSLOTH_TAIL, Some(true), Some("low")).unwrap(),
+            "ON"
+        );
     }
 
     // ── rewrite_split_index ──────────────────────────────────────────────

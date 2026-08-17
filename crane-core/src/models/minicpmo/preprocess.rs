@@ -19,7 +19,8 @@ use image::DynamicImage;
 use serde::Deserialize;
 
 use crate::models::minicpm_v::preprocess::{
-    find_best_resize, get_refine_size, get_sliced_grid, reshape_by_patch, resize_bicubic, to_normalized_chw,
+    find_best_resize, get_refine_size, get_sliced_grid, reshape_by_patch, resize_bicubic,
+    to_normalized_chw,
 };
 
 /// Mirror of MiniCPM-o-4.5's `preprocessor_config.json` (note the field
@@ -100,7 +101,8 @@ fn default_im_id_end() -> String {
 
 pub fn load_preprocessor_config(model_dir: &str) -> Result<PreprocessorConfig> {
     let path = std::path::Path::new(model_dir).join("preprocessor_config.json");
-    let data = std::fs::read(&path).with_context(|| format!("read preprocessor_config.json at {}", path.display()))?;
+    let data = std::fs::read(&path)
+        .with_context(|| format!("read preprocessor_config.json at {}", path.display()))?;
     Ok(serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))?)
 }
 
@@ -118,7 +120,12 @@ pub struct ProcessedImage {
 
 /// Preprocess one image per MiniCPM-o's slicing algorithm (identical search
 /// to MiniCPM-V-4.6's, `unit = patch_size` rather than `patch_size * 4`).
-pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &Device, dtype: DType) -> Result<ProcessedImage> {
+pub fn process_image(
+    image: &DynamicImage,
+    cfg: &PreprocessorConfig,
+    device: &Device,
+    dtype: DType,
+) -> Result<ProcessedImage> {
     use image::GenericImageView;
 
     let (w, h) = image.dimensions();
@@ -131,22 +138,43 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
         None
     };
 
-    let (source_h, source_w) = find_best_resize(height, width, cfg.scale_resolution, cfg.patch_size, grid.is_none());
+    let (source_h, source_w) = find_best_resize(
+        height,
+        width,
+        cfg.scale_resolution,
+        cfg.patch_size,
+        grid.is_none(),
+    );
     let source_img = resize_bicubic(&rgb, source_h, source_w);
-    let source_chw = to_normalized_chw(&source_img, &cfg.norm_mean, &cfg.norm_std, device)?.to_dtype(dtype)?;
+    let source_chw =
+        to_normalized_chw(&source_img, &cfg.norm_mean, &cfg.norm_std, device)?.to_dtype(dtype)?;
 
     let mut packed = vec![reshape_by_patch(&source_chw, cfg.patch_size)?];
     let mut target_sizes = vec![(source_h / cfg.patch_size, source_w / cfg.patch_size)];
 
     if let Some((grid_h, grid_w)) = grid {
-        let (refine_h, refine_w) = get_refine_size(height, width, grid_h, grid_w, cfg.scale_resolution, cfg.patch_size, true);
+        let (refine_h, refine_w) = get_refine_size(
+            height,
+            width,
+            grid_h,
+            grid_w,
+            cfg.scale_resolution,
+            cfg.patch_size,
+            true,
+        );
         let refine_img = resize_bicubic(&rgb, refine_h, refine_w);
         let (tile_h, tile_w) = (refine_h / grid_h, refine_w / grid_w);
 
         for row in 0..grid_h {
             for col in 0..grid_w {
-                let tile = refine_img.crop_imm((col * tile_w) as u32, (row * tile_h) as u32, tile_w as u32, tile_h as u32);
-                let tile_chw = to_normalized_chw(&tile, &cfg.norm_mean, &cfg.norm_std, device)?.to_dtype(dtype)?;
+                let tile = refine_img.crop_imm(
+                    (col * tile_w) as u32,
+                    (row * tile_h) as u32,
+                    tile_w as u32,
+                    tile_h as u32,
+                );
+                let tile_chw = to_normalized_chw(&tile, &cfg.norm_mean, &cfg.norm_std, device)?
+                    .to_dtype(dtype)?;
                 packed.push(reshape_by_patch(&tile_chw, cfg.patch_size)?);
                 target_sizes.push((tile_h / cfg.patch_size, tile_w / cfg.patch_size));
             }
@@ -154,7 +182,11 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
     }
 
     let pixel_values = Tensor::cat(&packed, 2)?;
-    Ok(ProcessedImage { pixel_values, target_sizes, grid })
+    Ok(ProcessedImage {
+        pixel_values,
+        target_sizes,
+        grid,
+    })
 }
 
 /// Pack multiple already-processed images into one NaViT batch (`[1, C,
@@ -163,7 +195,10 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
 pub fn pack_images(images: &[ProcessedImage]) -> Result<(Tensor, Vec<(usize, usize)>)> {
     let pv: Vec<&Tensor> = images.iter().map(|im| &im.pixel_values).collect();
     let pixel_values = Tensor::cat(&pv, 2)?.unsqueeze(0)?;
-    let target_sizes = images.iter().flat_map(|im| im.target_sizes.iter().copied()).collect();
+    let target_sizes = images
+        .iter()
+        .flat_map(|im| im.target_sizes.iter().copied())
+        .collect();
     Ok((pixel_values, target_sizes))
 }
 
@@ -172,15 +207,34 @@ pub fn pack_images(images: &[ProcessedImage]) -> Result<(Tensor, Vec<(usize, usi
 /// expand afterward). Every image/slice gets exactly `cfg.image_feature_size`
 /// placeholder tokens, regardless of its patch-grid size — direct port of
 /// `get_slice_image_placeholder`/`get_grid_placeholder`.
-pub fn build_placeholder(image: &ProcessedImage, cfg: &PreprocessorConfig, image_idx: usize) -> String {
-    let mut placeholder = format!("{}{}{}", cfg.im_start, cfg.unk.repeat(cfg.image_feature_size), cfg.im_end);
+pub fn build_placeholder(
+    image: &ProcessedImage,
+    cfg: &PreprocessorConfig,
+    image_idx: usize,
+) -> String {
+    let mut placeholder = format!(
+        "{}{}{}",
+        cfg.im_start,
+        cfg.unk.repeat(cfg.image_feature_size),
+        cfg.im_end
+    );
     if cfg.use_image_id {
-        placeholder = format!("{}{}{}{}", cfg.im_id_start, image_idx, cfg.im_id_end, placeholder);
+        placeholder = format!(
+            "{}{}{}{}",
+            cfg.im_id_start, image_idx, cfg.im_id_end, placeholder
+        );
     }
 
     if let Some((grid_h, grid_w)) = image.grid {
-        let slice_placeholder = format!("{}{}{}", cfg.slice_start, cfg.unk.repeat(cfg.image_feature_size), cfg.slice_end);
-        let rows: Vec<String> = (0..grid_h).map(|_| slice_placeholder.repeat(grid_w)).collect();
+        let slice_placeholder = format!(
+            "{}{}{}",
+            cfg.slice_start,
+            cfg.unk.repeat(cfg.image_feature_size),
+            cfg.slice_end
+        );
+        let rows: Vec<String> = (0..grid_h)
+            .map(|_| slice_placeholder.repeat(grid_w))
+            .collect();
         placeholder.push('\n');
         placeholder.push_str(&rows.join("\n"));
     }

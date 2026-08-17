@@ -463,9 +463,9 @@ mod tests {
         [
             ('a', 43),
             ('y', 67),
-            ('\u{0053}', 35),  // S
-            ('\u{02a3}', 18),  // ʣ
-            ('\u{02a6}', 20),  // ʦ
+            ('\u{0053}', 35), // S
+            ('\u{02a3}', 18), // ʣ
+            ('\u{02a6}', 20), // ʦ
         ]
         .into_iter()
         .collect()
@@ -573,12 +573,18 @@ mod tests {
             );
 
             let ids = phoneme_str_to_input_ids(&normalized, &vocab);
-            assert_eq!(ids, expected_ids, "phoneme ID mismatch for raw IPA {raw_ipa:?}");
+            assert_eq!(
+                ids, expected_ids,
+                "phoneme ID mismatch for raw IPA {raw_ipa:?}"
+            );
 
             checked += 1;
         }
 
-        assert_eq!(checked, 71, "expected exactly 71 corpus entries, found {checked}");
+        assert_eq!(
+            checked, 71,
+            "expected exactly 71 corpus entries, found {checked}"
+        );
     }
 
     /// Correctness benchmark: the (`de`, Kokoro) [`IpaNormalizer`] must
@@ -616,12 +622,18 @@ mod tests {
             );
 
             let ids = phoneme_str_to_input_ids(&normalized, &vocab);
-            assert_eq!(ids, expected_ids, "phoneme ID mismatch for raw IPA {raw_ipa:?}");
+            assert_eq!(
+                ids, expected_ids,
+                "phoneme ID mismatch for raw IPA {raw_ipa:?}"
+            );
 
             checked += 1;
         }
 
-        assert_eq!(checked, 32, "expected exactly 32 corpus entries, found {checked}");
+        assert_eq!(
+            checked, 32,
+            "expected exactly 32 corpus entries, found {checked}"
+        );
     }
 
     #[test]

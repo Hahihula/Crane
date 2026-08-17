@@ -56,15 +56,15 @@ pub fn load_and_resize_image_to_tensor(
                 let t = tensor.unsqueeze(0)?;
                 let t = t.upsample_bilinear2d(target_h, target_w, false)?;
                 t.squeeze(0)?
-            }
+            },
             ResizeMode::Nearest => {
                 let t = tensor.unsqueeze(0)?;
                 let t = t.upsample_nearest2d(target_h, target_w)?;
                 t.squeeze(0)?
-            }
+            },
             ResizeMode::Bicubic => {
                 return Err(E::msg("Bicubic resize not implemented yet"));
-            }
+            },
         };
     }
 
@@ -111,14 +111,14 @@ pub fn load_image_and_smart_resize(
         ResizeMode::Bilinear => {
             let t = tensor.unsqueeze(0)?;
             t.upsample_bilinear2d(resized_h, resized_w, false)?
-        }
+        },
         ResizeMode::Nearest => {
             let t = tensor.unsqueeze(0)?;
             t.upsample_nearest2d(resized_h, resized_w)?
-        }
+        },
         ResizeMode::Bicubic => {
             return Err(E::msg("Bicubic resize not implemented yet"));
-        }
+        },
     };
 
     let h_patches = (resized_h / PATCH_SIZE) as u32;

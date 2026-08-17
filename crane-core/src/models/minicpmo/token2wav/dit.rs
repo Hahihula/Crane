@@ -11,8 +11,8 @@
 //! doubled cond/uncond CFG batch, not a real padding batch), so attention
 //! runs unmasked — see `cfm.rs`.
 
-use candle_core::{Module, Result, Tensor, D};
-use candle_nn::{layer_norm, linear, Conv1d, Conv1dConfig, LayerNorm, Linear, VarBuilder};
+use candle_core::{D, Module, Result, Tensor};
+use candle_nn::{Conv1d, Conv1dConfig, LayerNorm, Linear, VarBuilder, layer_norm, linear};
 
 /// Parameterless LayerNorm (`elementwise_affine=False` — no learned
 /// weight/bias, confirmed against the checkpoint: DiT blocks' `norm1`/`norm2`/
@@ -94,7 +94,9 @@ impl DitAttention {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (b, t, _c) = x.dims3()?;
         let to_heads = |t_: &Tensor| -> Result<Tensor> {
-            t_.reshape((b, t, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()
+            t_.reshape((b, t, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?
+                .contiguous()
         };
         let q = self.q_norm.forward(&to_heads(&self.to_q.forward(x)?)?)?;
         let k = self.k_norm.forward(&to_heads(&self.to_k.forward(x)?)?)?;
@@ -102,9 +104,13 @@ impl DitAttention {
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
-        let attn = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?.to_dtype(scores.dtype())?;
+        let attn = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?
+            .to_dtype(scores.dtype())?;
         let out = attn.matmul(&v)?; // [b, h, t, d]
-        let out = out.transpose(1, 2)?.contiguous()?.reshape((b, t, self.num_heads * self.head_dim))?;
+        let out =
+            out.transpose(1, 2)?
+                .contiguous()?
+                .reshape((b, t, self.num_heads * self.head_dim))?;
         self.proj.forward(&out)
     }
 }
@@ -118,7 +124,10 @@ struct Mlp {
 
 impl Mlp {
     fn new(dim: usize, hidden: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self { fc1: linear(dim, hidden, vb.pp("fc1"))?, fc2: linear(hidden, dim, vb.pp("fc2"))? })
+        Ok(Self {
+            fc1: linear(dim, hidden, vb.pp("fc1"))?,
+            fc2: linear(hidden, dim, vb.pp("fc2"))?,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -139,8 +148,15 @@ struct CausalConv1d {
 
 impl CausalConv1d {
     fn new(in_ch: usize, out_ch: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
-        let cfg = Conv1dConfig { padding: 0, stride: 1, ..Default::default() };
-        Ok(Self { conv: candle_nn::conv1d(in_ch, out_ch, kernel, cfg, vb)?, left_pad: kernel - 1 })
+        let cfg = Conv1dConfig {
+            padding: 0,
+            stride: 1,
+            ..Default::default()
+        };
+        Ok(Self {
+            conv: candle_nn::conv1d(in_ch, out_ch, kernel, cfg, vb)?,
+            left_pad: kernel - 1,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -194,13 +210,23 @@ struct DiTBlock {
 }
 
 impl DiTBlock {
-    fn new(hidden_size: usize, num_heads: usize, head_dim: usize, mlp_ratio: f64, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        hidden_size: usize,
+        num_heads: usize,
+        head_dim: usize,
+        mlp_ratio: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let mlp_hidden = (hidden_size as f64 * mlp_ratio) as usize;
         Ok(Self {
             attn: DitAttention::new(hidden_size, num_heads, head_dim, vb.pp("attn"))?,
             mlp: Mlp::new(hidden_size, mlp_hidden, vb.pp("mlp"))?,
             conv: CausalConvBlock::new(hidden_size, 3, vb.pp("conv"))?,
-            ada_ln: linear(hidden_size, 9 * hidden_size, vb.pp("adaLN_modulation").pp(1))?,
+            ada_ln: linear(
+                hidden_size,
+                9 * hidden_size,
+                vb.pp("adaLN_modulation").pp(1),
+            )?,
             hidden_size,
         })
     }
@@ -209,7 +235,9 @@ impl DiTBlock {
     fn forward(&self, x: &Tensor, c_emb: &Tensor) -> Result<Tensor> {
         let c_emb = c_emb.silu()?;
         let modulation = self.ada_ln.forward(&c_emb)?; // [b, 1, 9*c]
-        let chunks: Vec<Tensor> = (0..9).map(|i| modulation.narrow(D::Minus1, i * self.hidden_size, self.hidden_size)).collect::<Result<_>>()?;
+        let chunks: Vec<Tensor> = (0..9)
+            .map(|i| modulation.narrow(D::Minus1, i * self.hidden_size, self.hidden_size))
+            .collect::<Result<_>>()?;
         let (shift_msa, scale_msa, gate_msa) = (&chunks[0], &chunks[1], &chunks[2]);
         let (shift_mlp, scale_mlp, gate_mlp) = (&chunks[3], &chunks[4], &chunks[5]);
         let (shift_conv, scale_conv, gate_conv) = (&chunks[6], &chunks[7], &chunks[8]);
@@ -239,7 +267,11 @@ impl FinalLayer {
     fn new(hidden_size: usize, out_channels: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             linear: linear(hidden_size, out_channels, vb.pp("linear"))?,
-            ada_ln: linear(hidden_size, 2 * hidden_size, vb.pp("adaLN_modulation").pp(1))?,
+            ada_ln: linear(
+                hidden_size,
+                2 * hidden_size,
+                vb.pp("adaLN_modulation").pp(1),
+            )?,
             hidden_size,
         })
     }
@@ -249,7 +281,9 @@ impl FinalLayer {
         let modulation = self.ada_ln.forward(&c_emb)?;
         let shift = modulation.narrow(D::Minus1, 0, self.hidden_size)?;
         let scale = modulation.narrow(D::Minus1, self.hidden_size, self.hidden_size)?;
-        let x = norm_no_affine(x, 1e-6)?.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(&shift)?;
+        let x = norm_no_affine(x, 1e-6)?
+            .broadcast_mul(&(scale + 1.0)?)?
+            .broadcast_add(&shift)?;
         self.linear.forward(&x)
     }
 }
@@ -264,21 +298,48 @@ pub struct DiT {
 }
 
 impl DiT {
-    pub fn new(in_channels: usize, out_channels: usize, hidden_size: usize, depth: usize, num_heads: usize, head_dim: usize, mlp_ratio: f64, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        hidden_size: usize,
+        depth: usize,
+        num_heads: usize,
+        head_dim: usize,
+        mlp_ratio: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let t_embedder = TimestepEmbedder::new(hidden_size, 256, vb.pp("t_embedder"))?;
         let in_proj = linear(in_channels, hidden_size, vb.pp("in_proj"))?;
         let vb_blocks = vb.pp("blocks");
         let mut blocks = Vec::with_capacity(depth);
         for i in 0..depth {
-            blocks.push(DiTBlock::new(hidden_size, num_heads, head_dim, mlp_ratio, vb_blocks.pp(i))?);
+            blocks.push(DiTBlock::new(
+                hidden_size,
+                num_heads,
+                head_dim,
+                mlp_ratio,
+                vb_blocks.pp(i),
+            )?);
         }
         let final_layer = FinalLayer::new(hidden_size, out_channels, vb.pp("final_layer"))?;
-        Ok(Self { t_embedder, in_proj, blocks, final_layer })
+        Ok(Self {
+            t_embedder,
+            in_proj,
+            blocks,
+            final_layer,
+        })
     }
 
     /// `x`, `mu`, `cond`: `[b, 80, t]`. `spks`: `[b, 80]`. `t_step`: `[b]`.
     /// Returns `[b, 80, t]`.
-    pub fn forward(&self, x: &Tensor, mu: &Tensor, t_step: &Tensor, spks: &Tensor, cond: &Tensor) -> Result<Tensor> {
+    pub fn forward(
+        &self,
+        x: &Tensor,
+        mu: &Tensor,
+        t_step: &Tensor,
+        spks: &Tensor,
+        cond: &Tensor,
+    ) -> Result<Tensor> {
         let t_emb = self.t_embedder.forward(t_step)?.unsqueeze(1)?; // [b, 1, hidden]
 
         let (b, _c, t) = x.dims3()?;

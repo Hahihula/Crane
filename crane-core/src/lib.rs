@@ -25,9 +25,9 @@
 //! | `accelerate` | Link against Apple Accelerate for CPU BLAS |
 //! | `mkl` | Link against Intel MKL for CPU BLAS |
 
-pub mod ops;
 pub mod generation;
 pub mod models;
+pub mod ops;
 pub mod utils;
 
 #[cfg(feature = "onnx")]

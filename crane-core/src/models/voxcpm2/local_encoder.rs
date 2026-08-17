@@ -7,7 +7,7 @@
 //! feeds `base_lm`'s next step.
 
 use candle_core::{Result, Tensor};
-use candle_nn::{linear, Linear, Module, VarBuilder};
+use candle_nn::{Linear, Module, VarBuilder, linear};
 
 use super::config::MiniCpm4Config;
 use super::minicpm4::MiniCpm4Model;
@@ -19,11 +19,20 @@ pub struct VoxCpmLocEnc {
 }
 
 impl VoxCpmLocEnc {
-    pub fn new(cfg: &MiniCpm4Config, input_dim: usize, max_length: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &MiniCpm4Config,
+        input_dim: usize,
+        max_length: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let special_token = vb.get((1, 1, 1, cfg.hidden_size), "special_token")?;
         let in_proj = linear(input_dim, cfg.hidden_size, vb.pp("in_proj"))?;
         let encoder = MiniCpm4Model::new(cfg, max_length, vb.pp("encoder"))?;
-        Ok(Self { special_token, in_proj, encoder })
+        Ok(Self {
+            special_token,
+            in_proj,
+            encoder,
+        })
     }
 
     /// `x`: `[B, T, P, D]` (`P` = `patch_size`, `D` = `feat_dim`). Returns

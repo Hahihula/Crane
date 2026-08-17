@@ -5,8 +5,8 @@
 //! layouts documented on [`gdn_recurrence_cuda`]; `q` is expected pre-scaled
 //! by `1/sqrt(K)` (the caller does this, matching the CPU reference).
 
-use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 use candle_core::cuda_backend::WrapErr;
+use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 use candle_core::op::BackpropOp;
 use candle_core::{CudaStorage, Result, Storage, Tensor};
 
@@ -98,10 +98,10 @@ pub fn gdn_recurrence_cuda(
 
     // Specialized register-resident kernel for K==128 (state column in
     // registers); runtime-K fallback otherwise (local memory).
-    let (bh_i, s_i, k_i, v_i, vt_i) = (bh as i32, s as i32, kdim as i32, vdim as i32, v_tile as i32);
+    let (bh_i, s_i, k_i, v_i, vt_i) =
+        (bh as i32, s as i32, kdim as i32, vdim as i32, v_tile as i32);
     if kdim == 128 {
-        let func =
-            dev.get_or_load_custom_func("gdn_recurrence_f32_k128", MODULE_NAME, ptx::GDN)?;
+        let func = dev.get_or_load_custom_func("gdn_recurrence_f32_k128", MODULE_NAME, ptx::GDN)?;
         let mut builder = func.builder();
         builder.arg(&q_v);
         builder.arg(&k_v);

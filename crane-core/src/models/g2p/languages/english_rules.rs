@@ -162,10 +162,7 @@ const SUFFIXES: &[(&str, &str)] = &[
 /// `"un"` and `"dis"` are each individually CER-positive, and their
 /// combination is CER-positive by more than either alone (measured on the
 /// same held-out benchmark): 18,976 baseline errors -> 18,961 with both.
-const PREFIXES: &[(&str, &str)] = &[
-    ("un", "ʌn"),
-    ("dis", "dɪs"),
-];
+const PREFIXES: &[(&str, &str)] = &[("un", "ʌn"), ("dis", "dɪs")];
 
 /// Minimum stem length left after stripping a prefix or suffix — prevents
 /// over-stripping short words like "able", "only", "fly", "unit".
@@ -355,9 +352,26 @@ fn push_single_consonant(out: &mut String, w: &[u8], i: usize) {
 fn th_voiced_word(w: &str) -> bool {
     matches!(
         w,
-        "the" | "this" | "that" | "they" | "them" | "then" | "than" | "there" | "these"
-            | "those" | "though" | "thus" | "thence" | "thy" | "thee" | "thou" | "thine"
-            | "with" | "within" | "without"
+        "the"
+            | "this"
+            | "that"
+            | "they"
+            | "them"
+            | "then"
+            | "than"
+            | "there"
+            | "these"
+            | "those"
+            | "though"
+            | "thus"
+            | "thence"
+            | "thy"
+            | "thee"
+            | "thou"
+            | "thine"
+            | "with"
+            | "within"
+            | "without"
     )
 }
 
@@ -641,8 +655,8 @@ mod tests {
     #[test]
     fn th_voiced_in_expanded_word_list() {
         for word in [
-            "them", "though", "thus", "thence", "thy", "thee", "thou", "thine", "with",
-            "within", "without",
+            "them", "though", "thus", "thence", "thy", "thee", "thou", "thine", "with", "within",
+            "without",
         ] {
             assert!(
                 hand_oov_rules_ipa(word).contains('ð'),
@@ -806,7 +820,10 @@ mod tests {
         // instead of "unknown" for this reason).
         let ipa = hand_oov_rules_ipa("unknown");
         assert!(ipa.starts_with("ʌn"), "expected un- prefix: {ipa}");
-        assert!(!ipa.contains('k'), "kn- in 'known' should silence the k: {ipa}");
+        assert!(
+            !ipa.contains('k'),
+            "kn- in 'known' should silence the k: {ipa}"
+        );
     }
 
     #[test]
@@ -994,7 +1011,10 @@ mod tests {
     fn short_e_only_words_keep_their_vowel() {
         for word in ["he", "be", "we", "she"] {
             let ipa = hand_oov_rules_ipa(word);
-            assert!(contains_vowel_sound(&ipa), "{word} produced no vowel: {ipa}");
+            assert!(
+                contains_vowel_sound(&ipa),
+                "{word} produced no vowel: {ipa}"
+            );
         }
     }
 

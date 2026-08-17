@@ -517,7 +517,7 @@ impl FullAttention {
                 Some(g) => {
                     let gate = candle_nn::ops::sigmoid(&g.to_dtype(y.dtype())?)?;
                     y.broadcast_mul(&gate)?
-                }
+                },
                 None => y,
             };
             return self.o_proj.forward(&y);

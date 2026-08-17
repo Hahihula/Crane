@@ -63,7 +63,8 @@ fn default_true() -> bool {
 
 impl MiniCpm4Config {
     pub fn head_dim(&self) -> usize {
-        self.kv_channels.unwrap_or(self.hidden_size / self.num_attention_heads)
+        self.kv_channels
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
     }
 
     /// Build a derived config for `feat_encoder`/`feat_decoder`: same
@@ -87,7 +88,12 @@ impl MiniCpm4Config {
     /// `num_hidden_layers` overridden, `vocab_size = 0`, `no_rope` set from
     /// the top-level `residual_lm_no_rope` flag.
     pub fn derive_residual_lm(&self, num_hidden_layers: usize, no_rope: bool) -> Self {
-        Self { num_hidden_layers, vocab_size: 0, no_rope, ..self.clone() }
+        Self {
+            num_hidden_layers,
+            vocab_size: 0,
+            no_rope,
+            ..self.clone()
+        }
     }
 }
 

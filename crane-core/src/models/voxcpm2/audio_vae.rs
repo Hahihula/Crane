@@ -21,7 +21,10 @@
 //! `reconstruct_weight_norm` math is shared.
 
 use candle_core::{Result, Tensor};
-use candle_nn::{embedding, Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Embedding, Module, VarBuilder};
+use candle_nn::{
+    Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Embedding, Module, VarBuilder,
+    embedding,
+};
 
 use crate::models::voxtral_tts::codec::reconstruct_weight_norm;
 
@@ -52,13 +55,26 @@ impl CausalConv1d {
         let weight_g = vb.get((out_ch, 1, 1), "weight_g")?;
         let weight = reconstruct_weight_norm(&weight_v, &weight_g)?;
         let bias = vb.get(out_ch, "bias")?;
-        let cfg = Conv1dConfig { padding: 0, stride, dilation, groups, cudnn_fwd_algo: None };
+        let cfg = Conv1dConfig {
+            padding: 0,
+            stride,
+            dilation,
+            groups,
+            cudnn_fwd_algo: None,
+        };
         let conv = candle_nn::Conv1d::new(weight, Some(bias), cfg);
-        Ok(Self { conv, left_pad: padding * 2 - output_padding })
+        Ok(Self {
+            conv,
+            left_pad: padding * 2 - output_padding,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = if self.left_pad > 0 { x.pad_with_zeros(2, self.left_pad, 0)? } else { x.clone() };
+        let x = if self.left_pad > 0 {
+            x.pad_with_zeros(2, self.left_pad, 0)?
+        } else {
+            x.clone()
+        };
         self.conv.forward(&x)
     }
 }
@@ -74,7 +90,15 @@ struct CausalConvTranspose1d {
 }
 
 impl CausalConvTranspose1d {
-    fn load(in_ch: usize, out_ch: usize, kernel: usize, stride: usize, padding: usize, output_padding: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(
+        in_ch: usize,
+        out_ch: usize,
+        kernel: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         // weight_norm's default dim=0 normalizes over `in_channels` for
         // ConvTranspose1d (weight shape `[in_ch, out_ch/groups, kernel]`,
         // groups=1 always here — see module docs).
@@ -82,9 +106,18 @@ impl CausalConvTranspose1d {
         let weight_g = vb.get((in_ch, 1, 1), "weight_g")?;
         let weight = reconstruct_weight_norm(&weight_v, &weight_g)?;
         let bias = vb.get(out_ch, "bias")?;
-        let cfg = ConvTranspose1dConfig { padding: 0, output_padding: 0, stride, dilation: 1, groups: 1 };
+        let cfg = ConvTranspose1dConfig {
+            padding: 0,
+            output_padding: 0,
+            stride,
+            dilation: 1,
+            groups: 1,
+        };
         let conv = candle_nn::ConvTranspose1d::new(weight, Some(bias), cfg);
-        Ok(Self { conv, trim: padding * 2 - output_padding })
+        Ok(Self {
+            conv,
+            trim: padding * 2 - output_padding,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -104,7 +137,9 @@ struct Snake1d {
 
 impl Snake1d {
     fn load(channels: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self { alpha: vb.get((1, channels, 1), "alpha")? })
+        Ok(Self {
+            alpha: vb.get((1, channels, 1), "alpha")?,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -163,7 +198,13 @@ struct CausalDecoderBlock {
 }
 
 impl CausalDecoderBlock {
-    fn load(input_dim: usize, output_dim: usize, stride: usize, depthwise: bool, vb: VarBuilder) -> Result<Self> {
+    fn load(
+        input_dim: usize,
+        output_dim: usize,
+        stride: usize,
+        depthwise: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         // `self.block = nn.Sequential(...)` in Python — same extra "block"
         // path segment as `CausalResidualUnit`.
         let vb = vb.pp("block");
@@ -171,14 +212,25 @@ impl CausalDecoderBlock {
         let padding = stride.div_ceil(2);
         let output_padding = stride % 2;
         let snake = Snake1d::load(input_dim, vb.pp(0))?;
-        let upsample =
-            CausalConvTranspose1d::load(input_dim, output_dim, 2 * stride, stride, padding, output_padding, vb.pp(1))?;
+        let upsample = CausalConvTranspose1d::load(
+            input_dim,
+            output_dim,
+            2 * stride,
+            stride,
+            padding,
+            output_padding,
+            vb.pp(1),
+        )?;
         let res_units = [
             CausalResidualUnit::load(output_dim, 1, groups, vb.pp(2))?,
             CausalResidualUnit::load(output_dim, 3, groups, vb.pp(3))?,
             CausalResidualUnit::load(output_dim, 9, groups, vb.pp(4))?,
         ];
-        Ok(Self { snake, upsample, res_units })
+        Ok(Self {
+            snake,
+            upsample,
+            res_units,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -249,8 +301,19 @@ impl AudioVaeDecoder {
 
         // `depthwise=True` initial layer is two convs: depthwise k=7 (groups=in)
         // then pointwise k=1 — matches `decoder.model.0`/`decoder.model.1`.
-        let init_dw = CausalConv1d::load(latent_dim, latent_dim, 7, 1, 1, latent_dim, 3, 0, vb_model.pp(0))?;
-        let init_pw = CausalConv1d::load(latent_dim, decoder_dim, 1, 1, 1, 1, 0, 0, vb_model.pp(1))?;
+        let init_dw = CausalConv1d::load(
+            latent_dim,
+            latent_dim,
+            7,
+            1,
+            1,
+            latent_dim,
+            3,
+            0,
+            vb_model.pp(0),
+        )?;
+        let init_pw =
+            CausalConv1d::load(latent_dim, decoder_dim, 1, 1, 1, 1, 0, 0, vb_model.pp(1))?;
 
         let sr_bin_buckets = sr_bin_boundaries.len() + 1;
         let mut blocks = Vec::with_capacity(decoder_rates.len());
@@ -259,8 +322,18 @@ impl AudioVaeDecoder {
         for (i, &stride) in decoder_rates.iter().enumerate() {
             let output_dim = ch / 2;
             // `decoder.model.{2..7}` (indices 0,1 are the initial dw/pw convs).
-            blocks.push(CausalDecoderBlock::load(ch, output_dim, stride, depthwise, vb_model.pp(2 + i))?);
-            sr_cond.push(SampleRateConditionLayer::load(ch, sr_bin_buckets, vb.pp("sr_cond_model").pp(2 + i))?);
+            blocks.push(CausalDecoderBlock::load(
+                ch,
+                output_dim,
+                stride,
+                depthwise,
+                vb_model.pp(2 + i),
+            )?);
+            sr_cond.push(SampleRateConditionLayer::load(
+                ch,
+                sr_bin_buckets,
+                vb.pp("sr_cond_model").pp(2 + i),
+            )?);
             ch = output_dim;
         }
 
@@ -284,7 +357,10 @@ impl AudioVaeDecoder {
     /// `input <= boundaries[i]`, or `len(boundaries)` if none — equivalently
     /// the count of boundaries strictly less than `input`.
     fn sr_bucket_idx(&self, sr_hz: i64) -> u32 {
-        self.sr_bin_boundaries.iter().filter(|&&b| b < sr_hz).count() as u32
+        self.sr_bin_boundaries
+            .iter()
+            .filter(|&&b| b < sr_hz)
+            .count() as u32
     }
 
     /// `z`: `[B, latent_dim, T]`. Returns `[B, 1, T']` waveform in `[-1, 1]`
@@ -323,7 +399,13 @@ struct CausalEncoderBlock {
 }
 
 impl CausalEncoderBlock {
-    fn load(input_dim: usize, output_dim: usize, stride: usize, depthwise: bool, vb: VarBuilder) -> Result<Self> {
+    fn load(
+        input_dim: usize,
+        output_dim: usize,
+        stride: usize,
+        depthwise: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let vb = vb.pp("block");
         let groups = if depthwise { input_dim } else { 1 };
         let padding = stride.div_ceil(2);
@@ -334,9 +416,22 @@ impl CausalEncoderBlock {
             CausalResidualUnit::load(input_dim, 9, groups, vb.pp(2))?,
         ];
         let snake = Snake1d::load(input_dim, vb.pp(3))?;
-        let downsample =
-            CausalConv1d::load(input_dim, output_dim, 2 * stride, stride, 1, 1, padding, output_padding, vb.pp(4))?;
-        Ok(Self { res_units, snake, downsample })
+        let downsample = CausalConv1d::load(
+            input_dim,
+            output_dim,
+            2 * stride,
+            stride,
+            1,
+            1,
+            padding,
+            output_padding,
+            vb.pp(4),
+        )?;
+        Ok(Self {
+            res_units,
+            snake,
+            downsample,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -366,7 +461,12 @@ pub struct AudioVaeEncoder {
 }
 
 impl AudioVaeEncoder {
-    pub fn new(encoder_dim: usize, latent_dim: usize, encoder_rates: &[usize], vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        encoder_dim: usize,
+        latent_dim: usize,
+        encoder_rates: &[usize],
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let depthwise = true; // this checkpoint's AudioVAEConfig default, same as the decoder
         let vb_block = vb.pp("block");
 
@@ -377,13 +477,24 @@ impl AudioVaeEncoder {
         for (i, &stride) in encoder_rates.iter().enumerate() {
             let output_dim = ch * 2;
             // `encoder.block.{1..}` (index 0 is the initial conv above).
-            blocks.push(CausalEncoderBlock::load(ch, output_dim, stride, depthwise, vb_block.pp(1 + i))?);
+            blocks.push(CausalEncoderBlock::load(
+                ch,
+                output_dim,
+                stride,
+                depthwise,
+                vb_block.pp(1 + i),
+            )?);
             ch = output_dim;
         }
 
         let fc_mu = CausalConv1d::load(ch, latent_dim, 3, 1, 1, 1, 1, 0, vb.pp("fc_mu"))?;
 
-        Ok(Self { init_conv, blocks, fc_mu, hop_length: encoder_rates.iter().product() })
+        Ok(Self {
+            init_conv,
+            blocks,
+            fc_mu,
+            hop_length: encoder_rates.iter().product(),
+        })
     }
 
     /// `audio`: `[B, 1, T]` raw waveform at the VAE's native (encoder) sample
@@ -393,7 +504,11 @@ impl AudioVaeEncoder {
     pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
         let t = audio.dim(2)?;
         let right_pad = t.div_ceil(self.hop_length) * self.hop_length - t;
-        let x = if right_pad > 0 { audio.pad_with_zeros(2, 0, right_pad)? } else { audio.clone() };
+        let x = if right_pad > 0 {
+            audio.pad_with_zeros(2, 0, right_pad)?
+        } else {
+            audio.clone()
+        };
 
         let mut x = self.init_conv.forward(&x)?;
         for block in &self.blocks {
@@ -418,10 +533,18 @@ mod shape_smoke_test {
     fn decode_real_weights_shape_smoke_test() {
         let path = "/home/hahihula/mywork/ai/additional_models/VoxCPM2/audiovae.safetensors";
         let device = Device::Cpu;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
 
-        let decoder = AudioVaeDecoder::new(64, 2048, &[8, 6, 5, 2, 2, 2], vec![20_000, 30_000, 40_000], 48_000, vb.pp("decoder"))
-            .expect("build decoder");
+        let decoder = AudioVaeDecoder::new(
+            64,
+            2048,
+            &[8, 6, 5, 2, 2, 2],
+            vec![20_000, 30_000, 40_000],
+            48_000,
+            vb.pp("decoder"),
+        )
+        .expect("build decoder");
 
         // A handful of latent timesteps is enough to exercise every stride.
         let z = Tensor::randn(0f32, 1f32, (1, 64, 16), &device).unwrap();
@@ -433,8 +556,14 @@ mod shape_smoke_test {
         assert_eq!(wav.dim(2).unwrap(), 16 * 8 * 6 * 5 * 2 * 2 * 2);
 
         let flat: Vec<f32> = wav.flatten_all().unwrap().to_vec1().unwrap();
-        assert!(flat.iter().all(|v| v.is_finite()), "non-finite sample in output");
-        assert!(flat.iter().all(|v| (-1.0..=1.0).contains(v)), "sample outside tanh range");
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "non-finite sample in output"
+        );
+        assert!(
+            flat.iter().all(|v| (-1.0..=1.0).contains(v)),
+            "sample outside tanh range"
+        );
     }
 
     #[test]
@@ -442,9 +571,11 @@ mod shape_smoke_test {
     fn encode_real_weights_shape_smoke_test() {
         let path = "/home/hahihula/mywork/ai/additional_models/VoxCPM2/audiovae.safetensors";
         let device = Device::Cpu;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
 
-        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
+        let encoder =
+            AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
 
         // hop_length = 2*5*8*8 = 640. A few multiples of that is enough to
         // exercise every stride and the right-zero-pad path.
@@ -457,7 +588,10 @@ mod shape_smoke_test {
         assert_eq!(mu.dim(2).unwrap(), 6);
 
         let flat: Vec<f32> = mu.flatten_all().unwrap().to_vec1().unwrap();
-        assert!(flat.iter().all(|v| v.is_finite()), "non-finite value in mu output");
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "non-finite value in mu output"
+        );
     }
 
     // Round-trips a real waveform through encode() then decode() and checks
@@ -468,20 +602,40 @@ mod shape_smoke_test {
     fn encode_decode_roundtrip_shape_smoke_test() {
         let path = "/home/hahihula/mywork/ai/additional_models/VoxCPM2/audiovae.safetensors";
         let device = Device::Cpu;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
 
-        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
-        let decoder = AudioVaeDecoder::new(64, 2048, &[8, 6, 5, 2, 2, 2], vec![20_000, 30_000, 40_000], 48_000, vb.pp("decoder"))
-            .expect("build decoder");
+        let encoder =
+            AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
+        let decoder = AudioVaeDecoder::new(
+            64,
+            2048,
+            &[8, 6, 5, 2, 2, 2],
+            vec![20_000, 30_000, 40_000],
+            48_000,
+            vb.pp("decoder"),
+        )
+        .expect("build decoder");
 
         let audio = Tensor::randn(0f32, 0.1f32, (1, 1, 640 * 8), &device).unwrap();
         let mu = encoder.encode(&audio).expect("encode");
         let wav = decoder.decode(&mu).expect("decode");
-        eprintln!("input len: {}, mu shape: {:?}, output len: {}", 640 * 8, mu.dims(), wav.dim(2).unwrap());
+        eprintln!(
+            "input len: {}, mu shape: {:?}, output len: {}",
+            640 * 8,
+            mu.dims(),
+            wav.dim(2).unwrap()
+        );
 
         let flat: Vec<f32> = wav.flatten_all().unwrap().to_vec1().unwrap();
-        assert!(flat.iter().all(|v| v.is_finite()), "non-finite sample in round-tripped output");
-        assert!(flat.iter().all(|v| (-1.0..=1.0).contains(v)), "sample outside tanh range");
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "non-finite sample in round-tripped output"
+        );
+        assert!(
+            flat.iter().all(|v| (-1.0..=1.0).contains(v)),
+            "sample outside tanh range"
+        );
     }
 }
 
@@ -503,17 +657,30 @@ mod hf_diff {
         let device = Device::Cpu;
         let dtype = DType::F32;
 
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[format!("{model_path}/audiovae.safetensors")], dtype, &device) }.unwrap();
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                &[format!("{model_path}/audiovae.safetensors")],
+                dtype,
+                &device,
+            )
+        }
+        .unwrap();
         let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).unwrap();
 
-        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap()).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap(),
+        )
+        .unwrap();
         let input_len = meta["input_len"].as_u64().unwrap() as usize;
         let latent_dim = meta["latent_dim"].as_u64().unwrap() as usize;
         let out_len = meta["out_len"].as_u64().unwrap() as usize;
 
         let load = |name: &str, shape: (usize, usize, usize)| -> Tensor {
             let raw = std::fs::read(format!("{diff_dir}/{name}.bin")).unwrap();
-            let floats: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let floats: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             Tensor::from_vec(floats, shape, &device).unwrap()
         };
 
@@ -521,19 +688,42 @@ mod hf_diff {
         let hf_mu = load("mu", (1, latent_dim, out_len));
 
         let rust_mu = encoder.encode(&input_audio).unwrap();
-        println!("rust_mu shape: {:?}, hf_mu shape: {:?}", rust_mu.dims(), hf_mu.dims());
+        println!(
+            "rust_mu shape: {:?}, hf_mu shape: {:?}",
+            rust_mu.dims(),
+            hf_mu.dims()
+        );
         assert_eq!(rust_mu.dims(), hf_mu.dims());
 
         let rust_flat: Vec<f32> = rust_mu.flatten_all().unwrap().to_vec1().unwrap();
         let hf_flat: Vec<f32> = hf_mu.flatten_all().unwrap().to_vec1().unwrap();
 
-        let dot: f64 = rust_flat.iter().zip(&hf_flat).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-        let norm_a: f64 = rust_flat.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt();
-        let norm_b: f64 = hf_flat.iter().map(|b| f64::from(*b).powi(2)).sum::<f64>().sqrt();
+        let dot: f64 = rust_flat
+            .iter()
+            .zip(&hf_flat)
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum();
+        let norm_a: f64 = rust_flat
+            .iter()
+            .map(|a| f64::from(*a).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let norm_b: f64 = hf_flat
+            .iter()
+            .map(|b| f64::from(*b).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let cosine = dot / (norm_a * norm_b);
-        let max_abs_diff = rust_flat.iter().zip(&hf_flat).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let max_abs_diff = rust_flat
+            .iter()
+            .zip(&hf_flat)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         println!("cosine: {cosine}, max_abs_diff: {max_abs_diff}");
 
-        assert!(cosine > 0.999, "encode() diverged from Python: cosine={cosine}");
+        assert!(
+            cosine > 0.999,
+            "encode() diverged from Python: cosine={cosine}"
+        );
     }
 }

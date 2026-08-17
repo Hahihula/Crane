@@ -1,6 +1,6 @@
 use crate::common::{
-    config::{CommonConfig, DataType, DeviceConfig},
     CraneError, CraneResult,
+    config::{CommonConfig, DataType, DeviceConfig},
 };
 use std::path::Path;
 
@@ -27,7 +27,7 @@ impl MultimodalClient {
             DeviceConfig::Cuda(gpu_id) => {
                 crane_core::models::Device::cuda_if_available(*gpu_id as usize)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?
-            }
+            },
             DeviceConfig::Rocm(_gpu_id) => {
                 #[cfg(feature = "rocm")]
                 {
@@ -41,7 +41,7 @@ impl MultimodalClient {
                             .to_string(),
                     ));
                 }
-            }
+            },
             DeviceConfig::Metal => {
                 #[cfg(target_os = "macos")]
                 {
@@ -54,7 +54,7 @@ impl MultimodalClient {
                         "Metal device not available on this platform".to_string(),
                     ));
                 }
-            }
+            },
         };
 
         let _dtype = match self.config.dtype {

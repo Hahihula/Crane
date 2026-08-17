@@ -54,7 +54,9 @@ fn find_producer_input<'a>(
     producers: &HashMap<String, NodeProto>,
     op_type: &str,
 ) -> Option<(&'a String, &'a String)> {
-    let [a, b] = inputs else { return None };
+    let [a, b] = inputs else {
+        return None;
+    };
     if producers.get(a).is_some_and(|p| p.op_type == op_type) {
         return Some((a, b));
     }
@@ -67,7 +69,9 @@ fn find_producer_input<'a>(
 /// Given a commutative binary node's two inputs, returns the input that
 /// isn't `target`, or `None` if `target` isn't among exactly 2 inputs.
 fn other_input<'a>(inputs: &'a [String], target: &str) -> Option<&'a String> {
-    let [a, b] = inputs else { return None };
+    let [a, b] = inputs else {
+        return None;
+    };
     if a == target {
         return Some(b);
     }
@@ -92,13 +96,18 @@ fn other_input<'a>(inputs: &'a [String], target: &str) -> Option<&'a String> {
 /// 5. `mul1_out` is produced by `Mul(alpha, x)` — one operand is the same
 ///    `x` tensor as the outer `Add`'s.
 fn try_fuse_add(node: &mut NodeProto, producers: &HashMap<String, NodeProto>) -> bool {
-    let [in0, in1] = node.input.as_slice() else { return false };
+    let [in0, in1] = node.input.as_slice() else {
+        return false;
+    };
     if node.output.len() != 1 {
         return false;
     }
 
-    let matched = try_match_chain(in0, in1, producers).or_else(|| try_match_chain(in1, in0, producers));
-    let Some((x, alpha)) = matched else { return false };
+    let matched =
+        try_match_chain(in0, in1, producers).or_else(|| try_match_chain(in1, in0, producers));
+    let Some((x, alpha)) = matched else {
+        return false;
+    };
 
     node.op_type = "Snake".to_string();
     node.input = vec![x, alpha];
@@ -139,7 +148,9 @@ fn try_match_chain(
     }
 
     let sin = &producers[sin_name];
-    let [mul1_name] = sin.input.as_slice() else { return None };
+    let [mul1_name] = sin.input.as_slice() else {
+        return None;
+    };
 
     let mul1 = producers.get(mul1_name)?;
     if mul1.op_type != "Mul" {
@@ -189,8 +200,18 @@ mod tests {
         vec![
             binary_node("Mul", alpha, x, &format!("mul1{suffix}")),
             unary_node("Sin", &format!("mul1{suffix}"), &format!("sin{suffix}")),
-            binary_node("Pow", &format!("sin{suffix}"), "two", &format!("pow{suffix}")),
-            binary_node("Mul", inv_alpha, &format!("pow{suffix}"), &format!("mul2{suffix}")),
+            binary_node(
+                "Pow",
+                &format!("sin{suffix}"),
+                "two",
+                &format!("pow{suffix}"),
+            ),
+            binary_node(
+                "Mul",
+                inv_alpha,
+                &format!("pow{suffix}"),
+                &format!("mul2{suffix}"),
+            ),
             binary_node("Add", x, &format!("mul2{suffix}"), output),
         ]
     }
@@ -262,9 +283,18 @@ mod tests {
     #[test]
     fn fuses_multiple_decompositions() {
         let mut nodes = snake_decomposition("x1", "alpha1", "inv_alpha1", "result1", "_a");
-        nodes.extend(snake_decomposition("x2", "alpha2", "inv_alpha2", "result2", "_b"));
+        nodes.extend(snake_decomposition(
+            "x2",
+            "alpha2",
+            "inv_alpha2",
+            "result2",
+            "_b",
+        ));
 
-        let mut graph = GraphProto { node: nodes, ..Default::default() };
+        let mut graph = GraphProto {
+            node: nodes,
+            ..Default::default()
+        };
 
         let fused = fuse_snake_decomposition(&mut graph);
         assert_eq!(fused, 2);

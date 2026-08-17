@@ -17,7 +17,15 @@ use super::dit::DiT;
 /// # Errors
 ///
 /// Returns an error if any `DiT` forward pass fails.
-pub fn solve_euler(estimator: &DiT, x: &Tensor, mu: &Tensor, spks: &Tensor, cond: &Tensor, n_timesteps: usize, cfg_rate: f64) -> Result<Tensor> {
+pub fn solve_euler(
+    estimator: &DiT,
+    x: &Tensor,
+    mu: &Tensor,
+    spks: &Tensor,
+    cond: &Tensor,
+    n_timesteps: usize,
+    cfg_rate: f64,
+) -> Result<Tensor> {
     let device = x.device();
     let dtype = x.dtype();
 

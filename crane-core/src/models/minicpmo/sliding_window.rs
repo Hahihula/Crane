@@ -17,7 +17,7 @@
 //! already-trusted fused kernel `Qwen3Model` itself uses) rather than
 //! trusted on the strength of a live session alone.
 
-use candle_core::{Result, Tensor, D};
+use candle_core::{D, Result, Tensor};
 
 use crate::models::modules::rotary::RotaryEmbedding;
 
@@ -31,10 +31,19 @@ fn rotate_half(x: &Tensor) -> Result<Tensor> {
 /// Full-width (duplicated, `[len, head_dim]`) cos/sin for positions
 /// `[start, start+len)`, cast to `dtype` and reshaped to broadcast against
 /// a `[B, H, len, head_dim]` key tensor — mirrors `get_rotary_cos_sin`.
-fn full_width_cos_sin(rotary: &RotaryEmbedding, start: usize, len: usize, dtype: candle_core::DType) -> Result<(Tensor, Tensor)> {
+fn full_width_cos_sin(
+    rotary: &RotaryEmbedding,
+    start: usize,
+    len: usize,
+    dtype: candle_core::DType,
+) -> Result<(Tensor, Tensor)> {
     let (cos, sin) = rotary.forward(start, len)?;
-    let cos = Tensor::cat(&[&cos, &cos], D::Minus1)?.to_dtype(dtype)?.reshape((1, 1, len, ()))?;
-    let sin = Tensor::cat(&[&sin, &sin], D::Minus1)?.to_dtype(dtype)?.reshape((1, 1, len, ()))?;
+    let cos = Tensor::cat(&[&cos, &cos], D::Minus1)?
+        .to_dtype(dtype)?
+        .reshape((1, 1, len, ()))?;
+    let sin = Tensor::cat(&[&sin, &sin], D::Minus1)?
+        .to_dtype(dtype)?
+        .reshape((1, 1, len, ()))?;
     Ok((cos, sin))
 }
 
@@ -47,7 +56,13 @@ fn full_width_cos_sin(rotary: &RotaryEmbedding, start: usize, len: usize, dtype:
 /// # Errors
 ///
 /// Returns an error if the tensor ops fail (e.g. shape mismatch).
-pub(crate) fn realign_rotary_suffix(rotary: &RotaryEmbedding, keys: &Tensor, old_start: usize, new_start: usize, len: usize) -> Result<Tensor> {
+pub(crate) fn realign_rotary_suffix(
+    rotary: &RotaryEmbedding,
+    keys: &Tensor,
+    old_start: usize,
+    new_start: usize,
+    len: usize,
+) -> Result<Tensor> {
     if len == 0 {
         return Ok(keys.clone());
     }
@@ -72,7 +87,12 @@ pub(crate) fn realign_rotary_suffix(rotary: &RotaryEmbedding, keys: &Tensor, old
 /// # Errors
 ///
 /// Returns an error if the tensor ops fail (e.g. shape mismatch).
-pub(crate) fn drop_tokens_from_cache(caches: &mut [Option<(Tensor, Tensor)>], length: usize, preserve: usize, rotary: &RotaryEmbedding) -> Result<bool> {
+pub(crate) fn drop_tokens_from_cache(
+    caches: &mut [Option<(Tensor, Tensor)>],
+    length: usize,
+    preserve: usize,
+    rotary: &RotaryEmbedding,
+) -> Result<bool> {
     if length == 0 {
         return Ok(false);
     }
@@ -95,14 +115,25 @@ pub(crate) fn drop_tokens_from_cache(caches: &mut [Option<(Tensor, Tensor)>], le
     let suffix_new_start = preserve;
 
     for cache in &mut *caches {
-        let Some((k, v)) = cache else { continue };
+        let Some((k, v)) = cache else {
+            continue;
+        };
         let prefix_k = k.narrow(2, 0, preserve)?;
         let prefix_v = v.narrow(2, 0, preserve)?;
         let (new_k, new_v) = if suffix_len > 0 {
             let suffix_k = k.narrow(2, suffix_old_start, suffix_len)?;
             let suffix_v = v.narrow(2, suffix_old_start, suffix_len)?;
-            let suffix_k = realign_rotary_suffix(rotary, &suffix_k, suffix_old_start, suffix_new_start, suffix_len)?;
-            (Tensor::cat(&[&prefix_k, &suffix_k], 2)?.contiguous()?, Tensor::cat(&[&prefix_v, &suffix_v], 2)?.contiguous()?)
+            let suffix_k = realign_rotary_suffix(
+                rotary,
+                &suffix_k,
+                suffix_old_start,
+                suffix_new_start,
+                suffix_len,
+            )?;
+            (
+                Tensor::cat(&[&prefix_k, &suffix_k], 2)?.contiguous()?,
+                Tensor::cat(&[&prefix_v, &suffix_v], 2)?.contiguous()?,
+            )
         } else {
             (prefix_k.contiguous()?, prefix_v.contiguous()?)
         };
@@ -139,12 +170,23 @@ mod tests {
     }
 
     fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
-        (a - b).unwrap().abs().unwrap().flatten_all().unwrap().max(0).unwrap().to_scalar::<f32>().unwrap()
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
     }
 
     /// One distinct raw (pre-RoPE) key vector per position, `[1, 1, n, D]`.
     fn distinct_raw_keys(n: usize) -> Tensor {
-        let data: Vec<f32> = (0..n * HEAD_DIM).map(|i| ((i as f32) * 0.037).sin()).collect();
+        let data: Vec<f32> = (0..n * HEAD_DIM)
+            .map(|i| ((i as f32) * 0.037).sin())
+            .collect();
         Tensor::from_vec(data, (1, 1, n, HEAD_DIM), &Device::Cpu).unwrap()
     }
 
@@ -153,7 +195,10 @@ mod tests {
         let raw = distinct_raw_keys(5);
         let encoded = encode(&raw, 7, 5);
         let realigned = realign_rotary_suffix(&rotary(), &encoded, 7, 7, 5).unwrap();
-        assert!(max_abs_diff(&encoded, &realigned) < 1e-5, "realigning to the same start position must be a no-op");
+        assert!(
+            max_abs_diff(&encoded, &realigned) < 1e-5,
+            "realigning to the same start position must be a no-op"
+        );
     }
 
     #[test]
@@ -165,10 +210,14 @@ mod tests {
         let old_start = 20;
         let new_start = 3;
         let old_encoded = encode(&raw, old_start, 5);
-        let realigned = realign_rotary_suffix(&rotary(), &old_encoded, old_start, new_start, 5).unwrap();
+        let realigned =
+            realign_rotary_suffix(&rotary(), &old_encoded, old_start, new_start, 5).unwrap();
         let expected = encode(&raw, new_start, 5);
         let diff = max_abs_diff(&realigned, &expected);
-        assert!(diff < 1e-4, "realigned keys should match direct re-encoding at the new position, max abs diff {diff}");
+        assert!(
+            diff < 1e-4,
+            "realigned keys should match direct re-encoding at the new position, max abs diff {diff}"
+        );
     }
 
     #[test]
@@ -179,7 +228,10 @@ mod tests {
         let there = realign_rotary_suffix(&rotary(), &encoded, 12, 40, 6).unwrap();
         let back = realign_rotary_suffix(&rotary(), &there, 40, 12, 6).unwrap();
         let diff = max_abs_diff(&encoded, &back);
-        assert!(diff < 1e-4, "a round-trip realignment should return to the original, max abs diff {diff}");
+        assert!(
+            diff < 1e-4,
+            "a round-trip realignment should return to the original, max abs diff {diff}"
+        );
     }
 
     #[test]
@@ -187,7 +239,10 @@ mod tests {
         let raw = distinct_raw_keys(3);
         let encoded = encode(&raw, 0, 3);
         let realigned = realign_rotary_suffix(&rotary(), &encoded, 5, 2, 0).unwrap();
-        assert!(max_abs_diff(&encoded, &realigned) < 1e-6, "zero-length realignment should return input unchanged");
+        assert!(
+            max_abs_diff(&encoded, &realigned) < 1e-6,
+            "zero-length realignment should return input unchanged"
+        );
     }
 
     #[test]
@@ -198,23 +253,38 @@ mod tests {
         let raw = distinct_raw_keys(6);
         let k = encode(&raw, 0, 6);
         let v = distinct_raw_keys(6); // values aren't RoPE'd; arbitrary content is fine
-        let mut caches: Vec<Option<(Tensor, Tensor)>> = vec![Some((k.clone(), v.clone())), Some((k.clone(), v.clone()))];
+        let mut caches: Vec<Option<(Tensor, Tensor)>> =
+            vec![Some((k.clone(), v.clone())), Some((k.clone(), v.clone()))];
 
         let dropped = drop_tokens_from_cache(&mut caches, 2, 2, &rotary()).unwrap();
         assert!(dropped, "should report a successful drop");
 
         for cache in &caches {
             let (new_k, new_v) = cache.as_ref().unwrap();
-            assert_eq!(new_k.dims(), &[1, 1, 4, HEAD_DIM], "K should shrink from 6 to 4 positions");
-            assert_eq!(new_v.dims(), &[1, 1, 4, HEAD_DIM], "V should shrink from 6 to 4 positions");
+            assert_eq!(
+                new_k.dims(),
+                &[1, 1, 4, HEAD_DIM],
+                "K should shrink from 6 to 4 positions"
+            );
+            assert_eq!(
+                new_v.dims(),
+                &[1, 1, 4, HEAD_DIM],
+                "V should shrink from 6 to 4 positions"
+            );
 
             // Preserved prefix (original positions 0..2) must be untouched.
             let prefix_before = k.narrow(2, 0, 2).unwrap();
             let prefix_after = new_k.narrow(2, 0, 2).unwrap();
-            assert!(max_abs_diff(&prefix_before, &prefix_after) < 1e-6, "preserved prefix keys must be unchanged");
+            assert!(
+                max_abs_diff(&prefix_before, &prefix_after) < 1e-6,
+                "preserved prefix keys must be unchanged"
+            );
             let v_prefix_before = v.narrow(2, 0, 2).unwrap();
             let v_prefix_after = new_v.narrow(2, 0, 2).unwrap();
-            assert!(max_abs_diff(&v_prefix_before, &v_prefix_after) < 1e-6, "preserved prefix values must be unchanged");
+            assert!(
+                max_abs_diff(&v_prefix_before, &v_prefix_after) < 1e-6,
+                "preserved prefix values must be unchanged"
+            );
 
             // Realigned suffix (originally positions 4..6, now 2..4) must
             // match directly encoding the same raw content at the new
@@ -223,12 +293,18 @@ mod tests {
             let expected_suffix_k = encode(&raw_suffix, 2, 2);
             let actual_suffix_k = new_k.narrow(2, 2, 2).unwrap();
             let diff = max_abs_diff(&actual_suffix_k, &expected_suffix_k);
-            assert!(diff < 1e-4, "realigned suffix keys should match direct re-encoding, max abs diff {diff}");
+            assert!(
+                diff < 1e-4,
+                "realigned suffix keys should match direct re-encoding, max abs diff {diff}"
+            );
 
             // Values are just carried over positionally, no RoPE involved.
             let v_suffix_before = v.narrow(2, 4, 2).unwrap();
             let v_suffix_after = new_v.narrow(2, 2, 2).unwrap();
-            assert!(max_abs_diff(&v_suffix_before, &v_suffix_after) < 1e-6, "suffix values should be carried over unchanged (not RoPE'd)");
+            assert!(
+                max_abs_diff(&v_suffix_before, &v_suffix_after) < 1e-6,
+                "suffix values should be carried over unchanged (not RoPE'd)"
+            );
         }
     }
 
@@ -240,7 +316,11 @@ mod tests {
         // Only 4 - preserve(1) = 3 available, asking to drop 10 should refuse.
         let dropped = drop_tokens_from_cache(&mut caches, 10, 1, &rotary()).unwrap();
         assert!(!dropped, "should refuse to drop more than is available");
-        assert_eq!(caches[0].as_ref().unwrap().0.dim(2).unwrap(), 4, "cache must be left untouched on refusal");
+        assert_eq!(
+            caches[0].as_ref().unwrap().0.dim(2).unwrap(),
+            4,
+            "cache must be left untouched on refusal"
+        );
     }
 
     #[test]
@@ -264,7 +344,10 @@ mod tests {
         let (new_k, new_v) = caches[0].as_ref().unwrap();
         assert_eq!(new_k.dim(2).unwrap(), 2);
         let diff = max_abs_diff(new_k, &k.narrow(2, 0, 2).unwrap());
-        assert!(diff < 1e-6, "with an empty suffix the result should be exactly the preserved prefix");
+        assert!(
+            diff < 1e-6,
+            "with an empty suffix the result should be exactly the preserved prefix"
+        );
         let vdiff = max_abs_diff(new_v, &v.narrow(2, 0, 2).unwrap());
         assert!(vdiff < 1e-6);
     }
@@ -273,7 +356,12 @@ mod tests {
     fn rotate_half_matches_hand_computed_value() {
         // x = [1,2,3,4] -> split [1,2] | [3,4] -> rotate_half = [-3,-4, 1, 2]
         let x = Tensor::from_vec(vec![1f32, 2.0, 3.0, 4.0], (1, 1, 1, 4), &Device::Cpu).unwrap();
-        let out = rotate_half(&x).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let out = rotate_half(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         assert_eq!(out, vec![-3.0, -4.0, 1.0, 2.0]);
     }
 

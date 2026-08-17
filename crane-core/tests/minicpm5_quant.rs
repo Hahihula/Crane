@@ -23,8 +23,8 @@
 
 use candle_core::{DType, Device};
 use crane_core::chat::{Message, Role};
-use crane_core::generation::based::ModelForCausalLM;
 use crane_core::generation::GenerationConfig;
+use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::minicpm5::Model;
 
 const MAX_NEW_TOKENS: usize = 150;
@@ -43,7 +43,10 @@ fn device_and_dtype() -> (Device, DType) {
 /// Greedy chat-template generation. Returns the decoded response text and
 /// whether generation stopped before hitting `MAX_NEW_TOKENS` (i.e. it found
 /// a real stop token rather than running out of budget).
-fn run_chat(model_path: &str, tokenizer: &crane_core::autotokenizer::AutoTokenizer) -> (String, bool) {
+fn run_chat(
+    model_path: &str,
+    tokenizer: &crane_core::autotokenizer::AutoTokenizer,
+) -> (String, bool) {
     let (device, dtype) = device_and_dtype();
     let mut model = Model::new(model_path, &device, &dtype).expect("load model");
 
@@ -55,9 +58,15 @@ fn run_chat(model_path: &str, tokenizer: &crane_core::autotokenizer::AutoTokeniz
         .apply_chat_template_with_options(&messages, Option::<&serde_json::Value>::None, true, None)
         .expect("apply chat template");
 
-    let gen_cfg = GenerationConfig { max_new_tokens: MAX_NEW_TOKENS, temperature: None, ..Default::default() };
+    let gen_cfg = GenerationConfig {
+        max_new_tokens: MAX_NEW_TOKENS,
+        temperature: None,
+        ..Default::default()
+    };
     let input_ids = model.prepare_inputs(&prompt).expect("tokenize prompt");
-    let output_ids = model.generate(&input_ids, &gen_cfg, None).expect("generate");
+    let output_ids = model
+        .generate(&input_ids, &gen_cfg, None)
+        .expect("generate");
     let generated = &output_ids[input_ids.len()..];
     let text = tokenizer.decode(generated, true).expect("decode");
     let stopped_early = generated.len() < MAX_NEW_TOKENS;
@@ -67,22 +76,37 @@ fn run_chat(model_path: &str, tokenizer: &crane_core::autotokenizer::AutoTokeniz
 #[test]
 #[ignore = "needs local MiniCPM5 checkpoints (CRANE_MINICPM5_DIR, CRANE_MINICPM5_GGUF)"]
 fn gguf_and_safetensors_both_answer_correctly_and_stop_cleanly() {
-    let dir = std::env::var("CRANE_MINICPM5_DIR").expect("set CRANE_MINICPM5_DIR to a MiniCPM5-1B checkpoint dir");
-    let gguf = std::env::var("CRANE_MINICPM5_GGUF").expect("set CRANE_MINICPM5_GGUF to a .gguf file");
+    let dir = std::env::var("CRANE_MINICPM5_DIR")
+        .expect("set CRANE_MINICPM5_DIR to a MiniCPM5-1B checkpoint dir");
+    let gguf =
+        std::env::var("CRANE_MINICPM5_GGUF").expect("set CRANE_MINICPM5_GGUF to a .gguf file");
 
     // Chat-template tokenizer comes from the safetensors checkpoint; only
     // used to render the prompt / decode output text identically for both
     // paths, not to exercise the GGUF-embedded-tokenizer path itself (that's
     // exercised inside `Model::new` -> `Model::from_gguf` below).
-    let tokenizer = crane_core::autotokenizer::AutoTokenizer::from_pretrained(&dir, None).expect("load tokenizer");
+    let tokenizer = crane_core::autotokenizer::AutoTokenizer::from_pretrained(&dir, None)
+        .expect("load tokenizer");
 
     let (st_text, st_stopped) = run_chat(&dir, &tokenizer);
     println!("safetensors: stopped_early={st_stopped} text={st_text:?}");
-    assert!(st_text.to_lowercase().contains("paris"), "safetensors didn't answer Paris: {st_text}");
-    assert!(st_stopped, "safetensors generation ran to max_new_tokens instead of stopping at EOS");
+    assert!(
+        st_text.to_lowercase().contains("paris"),
+        "safetensors didn't answer Paris: {st_text}"
+    );
+    assert!(
+        st_stopped,
+        "safetensors generation ran to max_new_tokens instead of stopping at EOS"
+    );
 
     let (gguf_text, gguf_stopped) = run_chat(&gguf, &tokenizer);
     println!("gguf: stopped_early={gguf_stopped} text={gguf_text:?}");
-    assert!(gguf_text.to_lowercase().contains("paris"), "gguf didn't answer Paris: {gguf_text}");
-    assert!(gguf_stopped, "gguf generation ran to max_new_tokens instead of stopping at EOS (the <|im_end|> union bug)");
+    assert!(
+        gguf_text.to_lowercase().contains("paris"),
+        "gguf didn't answer Paris: {gguf_text}"
+    );
+    assert!(
+        gguf_stopped,
+        "gguf generation ran to max_new_tokens instead of stopping at EOS (the <|im_end|> union bug)"
+    );
 }

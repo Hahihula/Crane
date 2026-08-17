@@ -28,18 +28,18 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use candle_core::quantized::GgmlDType;
-use candle_core::{DType, D, Device, Module, Tensor};
-use candle_nn::{embedding, layer_norm, Embedding, LayerNorm, VarBuilder};
+use candle_core::{D, DType, Device, Module, Tensor};
+use candle_nn::{Embedding, LayerNorm, VarBuilder, embedding, layer_norm};
 
-use crate::models::muscriptor::config::{VariantConfig, SAMPLE_RATE, SEGMENT_DURATION};
 use crate::models::muscriptor::conditioner::{
     ClassConditioner, ConditioningAttributes, ConditioningProvider, MelSpectrogramConditioner,
     WavCondition,
 };
+use crate::models::muscriptor::config::{SAMPLE_RATE, SEGMENT_DURATION, VariantConfig};
 use crate::models::muscriptor::midi::{MidiNote, MidiWriter};
 use crate::models::muscriptor::mt3::{
-    instrument_group_from_names, resolve_instrument_names, MT3Tokenizer, Token, DRUM_PROGRAM,
-    EOS_ID,
+    DRUM_PROGRAM, EOS_ID, MT3Tokenizer, Token, instrument_group_from_names,
+    resolve_instrument_names,
 };
 use crate::models::muscriptor::transformer::{StreamingTransformer, TransformerState};
 use crate::ops::linear::LinearLayer;
@@ -102,16 +102,26 @@ impl Default for TranscribeConfig {
 /// `TranscribeConfig`'s sampling knobs describe. Mirrors the upstream's
 /// `sample_from_probs` branch order: top-p first, then top-k, then plain
 /// temperature; greedy argmax when sampling is off or `temperature <= 0`.
-fn build_logits_processor(config: &TranscribeConfig) -> candle_transformers::generation::LogitsProcessor {
+fn build_logits_processor(
+    config: &TranscribeConfig,
+) -> candle_transformers::generation::LogitsProcessor {
     use candle_transformers::generation::{LogitsProcessor, Sampling};
     let sampling = if !config.use_sampling || config.temperature <= 0.0 {
         Sampling::ArgMax
     } else if config.top_p > 0.0 {
-        Sampling::TopP { p: f64::from(config.top_p), temperature: f64::from(config.temperature) }
+        Sampling::TopP {
+            p: f64::from(config.top_p),
+            temperature: f64::from(config.temperature),
+        }
     } else if config.top_k > 0 {
-        Sampling::TopK { k: config.top_k, temperature: f64::from(config.temperature) }
+        Sampling::TopK {
+            k: config.top_k,
+            temperature: f64::from(config.temperature),
+        }
     } else {
-        Sampling::All { temperature: f64::from(config.temperature) }
+        Sampling::All {
+            temperature: f64::from(config.temperature),
+        }
     };
     LogitsProcessor::from_sampling(config.seed, sampling)
 }
@@ -126,7 +136,10 @@ struct ScaledEmbedding {
 impl ScaledEmbedding {
     fn new(num_embeddings: usize, embedding_dim: usize, vb: VarBuilder) -> Result<Self> {
         let inner = embedding(num_embeddings, embedding_dim, vb)?;
-        Ok(Self { inner, zero_idx: -1 })
+        Ok(Self {
+            inner,
+            zero_idx: -1,
+        })
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
@@ -138,7 +151,7 @@ impl ScaledEmbedding {
         let is_zero = input.eq(self.zero_idx)?.to_dtype(y.dtype())?;
         // `is_zero` is rank-2 `[B, S]`; `y` is rank-3 `[B, S, D]`.
         // Broadcast-multiplying keeps `where_cond` honest.
-        let keep = is_zero.affine(-1.0, 1.0)?;  // 1 where real, 0 where zero
+        let keep = is_zero.affine(-1.0, 1.0)?; // 1 where real, 0 where zero
         let out = y.broadcast_mul(&keep.unsqueeze(D::Minus1)?)?;
         Ok(out)
     }
@@ -178,7 +191,8 @@ impl LMModel {
         let emb = ScaledEmbedding::new(config.card + 1, config.dim, vb.pp("emb"))?;
         let transformer = StreamingTransformer::new(vb.pp("transformer"), config, quant)?;
         let out_norm = layer_norm(config.dim, 1e-5, vb.pp("out_norm"))?;
-        let linear = crate::ops::linear::linear_layer(config.dim, config.card, vb.pp("linear"), quant)?;
+        let linear =
+            crate::ops::linear::linear_layer(config.dim, config.card, vb.pp("linear"), quant)?;
         Ok(Self {
             emb,
             out_norm,
@@ -221,9 +235,7 @@ impl LMModel {
                 // model's VarBuilder device but kept as-is here) and
                 // cast to the same dtype as the embedded tokens so `cat`
                 // accepts both sides.
-                let cond_d = cond
-                    .to_device(input.device())?
-                    .to_dtype(input.dtype())?;
+                let cond_d = cond.to_device(input.device())?.to_dtype(input.dtype())?;
                 input = Tensor::cat(&[&cond_d, &input], 1)?;
             }
         }
@@ -293,7 +305,10 @@ impl LMModel {
             .values()
             .next()
             .map_or(1, |(c, _)| c.dim(0).unwrap_or(1));
-        anyhow::ensure!(batch == 1, "LMModel::generate only supports batch=1, got {batch}");
+        anyhow::ensure!(
+            batch == 1,
+            "LMModel::generate only supports batch=1, got {batch}"
+        );
         anyhow::ensure!(
             prompt.len() < max_gen_len,
             "prompt ({} tokens) leaves nothing to generate within max_gen_len ({})",
@@ -301,8 +316,13 @@ impl LMModel {
             max_gen_len
         );
 
-        let sample = |logits: &Tensor, lp: &mut candle_transformers::generation::LogitsProcessor| -> Result<u32> {
-            let last = logits.narrow(1, logits.dim(1)? - 1, 1)?.squeeze(1)?.squeeze(0)?;
+        let sample = |logits: &Tensor,
+                      lp: &mut candle_transformers::generation::LogitsProcessor|
+         -> Result<u32> {
+            let last = logits
+                .narrow(1, logits.dim(1)? - 1, 1)?
+                .squeeze(1)?
+                .squeeze(0)?;
             let masked = last.to_dtype(DType::F32)?.broadcast_add(&forbid_add)?;
             Ok(lp.sample(&masked)?)
         };
@@ -329,7 +349,8 @@ impl LMModel {
         // (the old bug) left the cursor pointing ~500 positions short of
         // what was actually written, so every later step's cache
         // write/read collided with the prefix.
-        self.transformer.advance(state, prepend_total + prefill_ids.len());
+        self.transformer
+            .advance(state, prepend_total + prefill_ids.len());
 
         let mut generated: Vec<u32> = prompt.to_vec();
         let mut next = sample(&prefill_logits, logits_processor)?;
@@ -409,13 +430,15 @@ impl Model {
         // checkpoints are single-stream so the `.0.` is always present
         // and uniquely maps.
         let st_path = dir.join("model.safetensors");
-        let st_bytes = std::fs::read(&st_path)
-            .with_context(|| format!("read {}", st_path.display()))?;
-        let raw =
-            candle_core::safetensors::load_buffer(&st_bytes, &Device::Cpu)
-                .with_context(|| format!("parse {}", st_path.display()))?;
+        let st_bytes =
+            std::fs::read(&st_path).with_context(|| format!("read {}", st_path.display()))?;
+        let raw = candle_core::safetensors::load_buffer(&st_bytes, &Device::Cpu)
+            .with_context(|| format!("parse {}", st_path.display()))?;
 
-        if raw.keys().any(|k| k.starts_with("emb.1.") || k.starts_with("linears.1.")) {
+        if raw
+            .keys()
+            .any(|k| k.starts_with("emb.1.") || k.starts_with("linears.1."))
+        {
             anyhow::bail!(
                 "checkpoint has more than one codebook (n_q > 1); \
                  only single-stream models are supported"
@@ -425,7 +448,8 @@ impl Model {
         // Kept in the checkpoint's native dtype here (F32 for every
         // published variant) — dtype conversion happens per-destination
         // below (transformer vs. always-F32 conditioners), not here.
-        let mut tensors: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        let mut tensors: std::collections::HashMap<String, Tensor> =
+            std::collections::HashMap::new();
         for (name, t) in raw {
             let mut new_name = name;
             if let Some(rest) = new_name.strip_prefix("emb.0.") {
@@ -486,17 +510,13 @@ impl Model {
         class.insert(
             "instrument_group".to_string(),
             Arc::new(ClassConditioner::from_embedding_tensor(
-                1000,
-                config.dim,
-                lg_emb,
+                1000, config.dim, lg_emb,
             )?),
         );
         class.insert(
             "dataset_name".to_string(),
             Arc::new(ClassConditioner::from_embedding_tensor(
-                4,
-                config.dim,
-                ds_emb,
+                4, config.dim, ds_emb,
             )?),
         );
         let conditioner = Arc::new(ConditioningProvider::new(mel, class));
@@ -659,7 +679,12 @@ impl TranscriptionModel {
     /// `prelude_forcing=True` default), so a note straddling a boundary
     /// stays attributed to the same instrument instead of the model
     /// re-guessing it.
-    pub fn transcribe_to_midi(&self, samples: &[f32], sample_rate: u32, config: &TranscribeConfig) -> Result<Vec<u8>> {
+    pub fn transcribe_to_midi(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        config: &TranscribeConfig,
+    ) -> Result<Vec<u8>> {
         anyhow::ensure!(
             config.cfg_coef == 1.0,
             "cfg_coef={} requested but classifier-free guidance isn't implemented \
@@ -695,7 +720,11 @@ impl TranscriptionModel {
         } else {
             Vec::new()
         };
-        let forbidden = if forbidden.is_empty() { None } else { Some(&forbidden[..]) };
+        let forbidden = if forbidden.is_empty() {
+            None
+        } else {
+            Some(&forbidden[..])
+        };
 
         let mut logits_processor = build_logits_processor(config);
         let mut tracker = OpenNoteTracker::new();
@@ -717,7 +746,10 @@ impl TranscriptionModel {
             let prompt: Vec<u32> = if chunk_idx == 0 {
                 Vec::new()
             } else {
-                crate::models::muscriptor::mt3::tie_section_token_ids(&m.tokenizer, &tracker.open_keys())
+                crate::models::muscriptor::mt3::tie_section_token_ids(
+                    &m.tokenizer,
+                    &tracker.open_keys(),
+                )
             };
 
             // Exact upper bound on how many KV rows this chunk's `generate`
@@ -761,7 +793,13 @@ impl TranscriptionModel {
                 if matches!(tok, Token::Eos) {
                     break;
                 }
-                tracker.feed(tok, secs as f32, chunk_start_secs, chunk_end_bound, &mut notes);
+                tracker.feed(
+                    tok,
+                    secs as f32,
+                    chunk_start_secs,
+                    chunk_end_bound,
+                    &mut notes,
+                );
             }
         }
         tracker.finish(&mut notes);
@@ -852,7 +890,7 @@ impl OpenNoteTracker {
                 // next `Program` restatement — which, for a chunk that
                 // never restates it, is the rest of the chunk.
                 Token::Program(p) => self.current_program = Some(p),
-                _ => {}
+                _ => {},
             }
             return;
         }
@@ -876,13 +914,15 @@ impl OpenNoteTracker {
                         pitch: p,
                         onset,
                         offset: global_time.max(onset),
-                        instrument: crate::models::muscriptor::mt3::instrument_name_for_program(prog),
+                        instrument: crate::models::muscriptor::mt3::instrument_name_for_program(
+                            prog,
+                        ),
                     });
                 }
                 if vel {
                     self.open.insert(key, global_time);
                 }
-            }
+            },
             Token::Drum(d) => {
                 notes.push(MidiNote {
                     program: DRUM_PROGRAM,
@@ -891,8 +931,8 @@ impl OpenNoteTracker {
                     offset: global_time + MIN_NOTE_DURATION_SECS,
                     instrument: Some("drums"),
                 });
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -931,18 +971,48 @@ mod open_note_tracker_tests {
 
         // Prologue: "program 0, pitch 60 sustained, tie" — no notes emitted
         // during the prologue itself.
-        tracker.feed(Token::Program(0), 0.0, 5.0, Some(SEGMENT_DURATION), &mut notes);
-        tracker.feed(Token::Pitch(60), 0.0, 5.0, Some(SEGMENT_DURATION), &mut notes);
+        tracker.feed(
+            Token::Program(0),
+            0.0,
+            5.0,
+            Some(SEGMENT_DURATION),
+            &mut notes,
+        );
+        tracker.feed(
+            Token::Pitch(60),
+            0.0,
+            5.0,
+            Some(SEGMENT_DURATION),
+            &mut notes,
+        );
         tracker.feed(Token::Tie, 0.0, 5.0, Some(SEGMENT_DURATION), &mut notes);
-        assert!(notes.is_empty(), "prologue tokens must never emit notes directly");
+        assert!(
+            notes.is_empty(),
+            "prologue tokens must never emit notes directly"
+        );
         assert!(!tracker.in_prologue, "Tie must end the prologue");
 
         // Body: velocity-on, pitch 62 — with no Program token restated,
         // this must still resolve against program 0 from the prologue.
-        tracker.feed(Token::Velocity(true), 0.5, 5.0, Some(SEGMENT_DURATION), &mut notes);
-        tracker.feed(Token::Pitch(62), 0.5, 5.0, Some(SEGMENT_DURATION), &mut notes);
+        tracker.feed(
+            Token::Velocity(true),
+            0.5,
+            5.0,
+            Some(SEGMENT_DURATION),
+            &mut notes,
+        );
+        tracker.feed(
+            Token::Pitch(62),
+            0.5,
+            5.0,
+            Some(SEGMENT_DURATION),
+            &mut notes,
+        );
 
-        assert_eq!(tracker.open_keys(), vec![(0, 62)], "pitch 62 must have opened under program 0");
+        assert_eq!(
+            tracker.open_keys(),
+            vec![(0, 62)],
+            "pitch 62 must have opened under program 0"
+        );
     }
 }
-

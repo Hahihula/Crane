@@ -47,7 +47,7 @@ pub mod vlm;
 
 pub use audio::AudioProjector;
 pub use audio_encoder::AudioEncoder;
-pub use config::{load_config, MiniCpmOConfig};
+pub use config::{MiniCpmOConfig, load_config};
 pub use duplex::{ChunkOutput, DuplexConfig, DuplexGgufPaths, DuplexSession, SlidingWindowMode};
 pub use llm::MiniCpmOLlm;
 pub use resampler::Resampler;

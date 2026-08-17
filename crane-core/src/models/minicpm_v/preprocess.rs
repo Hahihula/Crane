@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use serde::Deserialize;
 
 use super::config::Config;
@@ -56,8 +56,8 @@ pub fn load_preprocessor_config(model_dir: &str) -> Result<PreprocessorConfig> {
     let path = std::path::Path::new(model_dir).join("preprocessor_config.json");
     let data = std::fs::read(&path)
         .with_context(|| format!("read preprocessor_config.json at {}", path.display()))?;
-    let cfg: PreprocessorConfig = serde_json::from_slice(&data)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let cfg: PreprocessorConfig =
+        serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))?;
     Ok(cfg)
 }
 
@@ -74,7 +74,13 @@ pub(crate) fn ensure_divide(length: f64, divisor: usize) -> usize {
 /// hierarchical `Merger`) but plain `patch_size` for MiniCPM-o (its
 /// `Resampler` compresses via cross-attention, not size-halving, so no extra
 /// divisibility constraint) — see `minicpmo::preprocess`.
-pub(crate) fn find_best_resize(height: usize, width: usize, scale_resolution: usize, unit: usize, allow_upscale: bool) -> (usize, usize) {
+pub(crate) fn find_best_resize(
+    height: usize,
+    width: usize,
+    scale_resolution: usize,
+    unit: usize,
+    allow_upscale: bool,
+) -> (usize, usize) {
     let (mut h, mut w) = (height as f64, width as f64);
     if h * w > (scale_resolution * scale_resolution) as f64 || allow_upscale {
         let aspect_ratio = w / h;
@@ -90,7 +96,15 @@ pub(crate) fn find_best_resize(height: usize, width: usize, scale_resolution: us
 /// such that it divides evenly into `grid_h x grid_w` tiles each sized per
 /// [`find_best_resize`]. Direct port of `get_refine_size`. `unit`: see
 /// [`find_best_resize`].
-pub(crate) fn get_refine_size(height: usize, width: usize, grid_h: usize, grid_w: usize, scale_resolution: usize, unit: usize, allow_upscale: bool) -> (usize, usize) {
+pub(crate) fn get_refine_size(
+    height: usize,
+    width: usize,
+    grid_h: usize,
+    grid_w: usize,
+    scale_resolution: usize,
+    unit: usize,
+    allow_upscale: bool,
+) -> (usize, usize) {
     let refine_width = ensure_divide(width as f64, grid_w);
     let refine_height = ensure_divide(height as f64, grid_h);
     let (best_h, best_w) = find_best_resize(
@@ -111,7 +125,12 @@ pub(crate) fn get_refine_size(height: usize, width: usize, grid_h: usize, grid_w
 /// is actually consumed downstream (`get_refine_size`, and the Processor's
 /// `num_rows, num_cols = image_grids[...]`). Reused as-is by `minicpmo::preprocess`
 /// (the search algorithm doesn't depend on the vision tower's merge strategy).
-pub(crate) fn get_sliced_grid(height: usize, width: usize, max_slice_nums: usize, scale_resolution: usize) -> Option<(usize, usize)> {
+pub(crate) fn get_sliced_grid(
+    height: usize,
+    width: usize,
+    max_slice_nums: usize,
+    scale_resolution: usize,
+) -> Option<(usize, usize)> {
     let log_ratio = (width as f64 / height as f64).ln();
     let ratio = (width * height) as f64 / (scale_resolution * scale_resolution) as f64;
     let multiple = (ratio.ceil() as usize).min(max_slice_nums);
@@ -154,7 +173,12 @@ pub(crate) fn resize_bicubic(image: &DynamicImage, height: usize, width: usize) 
 
 /// RGB `DynamicImage` -> normalized `[C, H, W]` tensor (`(pixel/255 - mean) /
 /// std`, per-channel).
-pub(crate) fn to_normalized_chw(image: &DynamicImage, mean: &[f32], std: &[f32], device: &Device) -> Result<Tensor> {
+pub(crate) fn to_normalized_chw(
+    image: &DynamicImage,
+    mean: &[f32],
+    std: &[f32],
+    device: &Device,
+) -> Result<Tensor> {
     let rgb = image.to_rgb8();
     let (w, h) = rgb.dimensions();
     let (w, h) = (w as usize, h as usize);
@@ -196,7 +220,12 @@ pub struct ProcessedImage {
 }
 
 /// Preprocess one image per MiniCPM-V-4.6's slicing algorithm.
-pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &Device, dtype: DType) -> Result<ProcessedImage> {
+pub fn process_image(
+    image: &DynamicImage,
+    cfg: &PreprocessorConfig,
+    device: &Device,
+    dtype: DType,
+) -> Result<ProcessedImage> {
     let (w, h) = image.dimensions();
     let (height, width) = (h as usize, w as usize);
     let rgb = DynamicImage::ImageRgb8(image.to_rgb8());
@@ -207,22 +236,43 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
         None
     };
 
-    let (source_h, source_w) = find_best_resize(height, width, cfg.scale_resolution, cfg.patch_size * 4, grid.is_none());
+    let (source_h, source_w) = find_best_resize(
+        height,
+        width,
+        cfg.scale_resolution,
+        cfg.patch_size * 4,
+        grid.is_none(),
+    );
     let source_img = resize_bicubic(&rgb, source_h, source_w);
-    let source_chw = to_normalized_chw(&source_img, &cfg.image_mean, &cfg.image_std, device)?.to_dtype(dtype)?;
+    let source_chw =
+        to_normalized_chw(&source_img, &cfg.image_mean, &cfg.image_std, device)?.to_dtype(dtype)?;
 
     let mut packed = vec![reshape_by_patch(&source_chw, cfg.patch_size)?];
     let mut target_sizes = vec![(source_h / cfg.patch_size, source_w / cfg.patch_size)];
 
     if let Some((grid_h, grid_w)) = grid {
-        let (refine_h, refine_w) = get_refine_size(height, width, grid_h, grid_w, cfg.scale_resolution, cfg.patch_size * 4, true);
+        let (refine_h, refine_w) = get_refine_size(
+            height,
+            width,
+            grid_h,
+            grid_w,
+            cfg.scale_resolution,
+            cfg.patch_size * 4,
+            true,
+        );
         let refine_img = resize_bicubic(&rgb, refine_h, refine_w);
         let (tile_h, tile_w) = (refine_h / grid_h, refine_w / grid_w);
 
         for row in 0..grid_h {
             for col in 0..grid_w {
-                let tile = refine_img.crop_imm((col * tile_w) as u32, (row * tile_h) as u32, tile_w as u32, tile_h as u32);
-                let tile_chw = to_normalized_chw(&tile, &cfg.image_mean, &cfg.image_std, device)?.to_dtype(dtype)?;
+                let tile = refine_img.crop_imm(
+                    (col * tile_w) as u32,
+                    (row * tile_h) as u32,
+                    tile_w as u32,
+                    tile_h as u32,
+                );
+                let tile_chw = to_normalized_chw(&tile, &cfg.image_mean, &cfg.image_std, device)?
+                    .to_dtype(dtype)?;
                 packed.push(reshape_by_patch(&tile_chw, cfg.patch_size)?);
                 target_sizes.push((tile_h / cfg.patch_size, tile_w / cfg.patch_size));
             }
@@ -230,7 +280,11 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
     }
 
     let pixel_values = Tensor::cat(&packed, 2)?;
-    Ok(ProcessedImage { pixel_values, target_sizes, grid })
+    Ok(ProcessedImage {
+        pixel_values,
+        target_sizes,
+        grid,
+    })
 }
 
 /// Pack multiple already-processed images into one NaViT batch (`[1, C,
@@ -239,7 +293,10 @@ pub fn process_image(image: &DynamicImage, cfg: &PreprocessorConfig, device: &De
 pub fn pack_images(images: &[ProcessedImage]) -> Result<(Tensor, Vec<(usize, usize)>)> {
     let pv: Vec<&Tensor> = images.iter().map(|im| &im.pixel_values).collect();
     let pixel_values = Tensor::cat(&pv, 2)?.unsqueeze(0)?;
-    let target_sizes = images.iter().flat_map(|im| im.target_sizes.iter().copied()).collect();
+    let target_sizes = images
+        .iter()
+        .flat_map(|im| im.target_sizes.iter().copied())
+        .collect();
     Ok((pixel_values, target_sizes))
 }
 
@@ -265,7 +322,13 @@ pub struct PlaceholderTokens {
 /// vision pipeline halves each spatial axis twice — the window merger, then
 /// the `Merger` — so `downsample_mode: "16x"` means `h_patches*w_patches/16`
 /// tokens per image/slice).
-pub fn build_placeholder(image: &ProcessedImage, tokens: &PlaceholderTokens, local_image_index: usize, use_image_id: bool, downsample_divisor: usize) -> String {
+pub fn build_placeholder(
+    image: &ProcessedImage,
+    tokens: &PlaceholderTokens,
+    local_image_index: usize,
+    use_image_id: bool,
+    downsample_divisor: usize,
+) -> String {
     let overview_tokens = (image.target_sizes[0].0 * image.target_sizes[0].1) / downsample_divisor;
     let mut placeholder = format!(
         "{}{}{}",
@@ -281,14 +344,17 @@ pub fn build_placeholder(image: &ProcessedImage, tokens: &PlaceholderTokens, loc
     }
 
     if let Some((grid_h, grid_w)) = image.grid {
-        let per_slice_tokens = (image.target_sizes[1].0 * image.target_sizes[1].1) / downsample_divisor;
+        let per_slice_tokens =
+            (image.target_sizes[1].0 * image.target_sizes[1].1) / downsample_divisor;
         let slice_placeholder = format!(
             "{}{}{}",
             tokens.slice_start_token,
             tokens.image_token.repeat(per_slice_tokens),
             tokens.slice_end_token
         );
-        let rows: Vec<String> = (0..grid_h).map(|_| slice_placeholder.repeat(grid_w)).collect();
+        let rows: Vec<String> = (0..grid_h)
+            .map(|_| slice_placeholder.repeat(grid_w))
+            .collect();
         placeholder.push_str(&rows.join("\n"));
     }
 
@@ -296,11 +362,7 @@ pub fn build_placeholder(image: &ProcessedImage, tokens: &PlaceholderTokens, loc
 }
 
 pub fn downsample_divisor(cfg: &Config) -> usize {
-    if cfg.downsample_mode == "4x" {
-        4
-    } else {
-        16
-    }
+    if cfg.downsample_mode == "4x" { 4 } else { 16 }
 }
 
 #[cfg(test)]
@@ -323,7 +385,10 @@ mod tests {
     fn get_sliced_grid_wide_image_prefers_more_columns() {
         // A very wide image should end up with grid_w > grid_h.
         let (gh, gw) = get_sliced_grid(448, 448 * 6, 9, 448).expect("should slice");
-        assert!(gw >= gh, "wide image should get more columns than rows: ({gh},{gw})");
+        assert!(
+            gw >= gh,
+            "wide image should get more columns than rows: ({gh},{gw})"
+        );
     }
 
     #[test]

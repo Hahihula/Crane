@@ -16,7 +16,10 @@ use crate::onnx::proto::NodeProto;
 pub(crate) fn nonzero(_node: &NodeProto, input: &Tensor) -> Result<Tensor> {
     let dims = input.dims().to_vec();
     let rank = dims.len();
-    let flat: Vec<f32> = input.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    let flat: Vec<f32> = input
+        .flatten_all()?
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()?;
 
     // Standard unravel-index: for a fixed `flat_idx`, walking `d` from the
     // last dimension backward and repeatedly taking `% dims[d]` then
@@ -59,7 +62,10 @@ mod tests {
     use super::nonzero;
 
     fn node() -> NodeProto {
-        NodeProto { name: "NonZero.0".to_string(), ..Default::default() }
+        NodeProto {
+            name: "NonZero.0".to_string(),
+            ..Default::default()
+        }
     }
 
     // The motivating shape: a 2D mask produces row-major multi-indices.

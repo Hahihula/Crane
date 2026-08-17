@@ -42,7 +42,9 @@ impl GermanG2p {
     /// Returns an error if `lexicon_tsv` is malformed — see
     /// [`Lexicon::from_tsv`].
     pub fn new(lexicon_tsv: &str) -> Result<Self> {
-        Ok(Self { lexicon: Lexicon::from_tsv(lexicon_tsv)? })
+        Ok(Self {
+            lexicon: Lexicon::from_tsv(lexicon_tsv)?,
+        })
     }
 
     /// Converts `text` to a space-joined IPA phoneme string.
@@ -78,7 +80,9 @@ impl GermanG2p {
             let owned_ipa;
             let word_ipa = if let Some(ipa) = lookup_cascade(&self.lexicon, word) {
                 ipa
-            } else if let Some(compound_ipa) = super::german_compound::decompose(&self.lexicon, word) {
+            } else if let Some(compound_ipa) =
+                super::german_compound::decompose(&self.lexicon, word)
+            {
                 owned_ipa = compound_ipa;
                 owned_ipa.as_str()
             } else {
@@ -206,7 +210,10 @@ mod tests {
         let words: Vec<&str> = ipa.split(' ').collect();
         assert_eq!(words.first(), Some(&"haʊ̯s"));
         assert_eq!(words.last(), Some(&"ˈfɛnstɐ"));
-        assert!(ipa.contains('ʃ'), "Schublade should produce ʃ from sch: {ipa}");
+        assert!(
+            ipa.contains('ʃ'),
+            "Schublade should produce ʃ from sch: {ipa}"
+        );
     }
 
     #[test]

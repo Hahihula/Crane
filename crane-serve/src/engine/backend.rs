@@ -82,7 +82,6 @@ pub trait ModelBackend: Send + 'static {
         0
     }
 
-
     // ── Batch decode (GPU-efficient concurrent serving) ───────
 
     /// Whether this backend supports batched decoding.
@@ -240,8 +239,9 @@ impl HunyuanBackend {
         dtype: &DType,
         format: crane_core::models::hunyuan_dense::ModelFormat,
     ) -> Result<Self> {
-        let model =
-            crane_core::models::hunyuan_dense::Model::new_with_format(model_path, device, dtype, format)?;
+        let model = crane_core::models::hunyuan_dense::Model::new_with_format(
+            model_path, device, dtype, format,
+        )?;
         Ok(Self { model })
     }
 }
@@ -320,8 +320,12 @@ impl ModelBackend for HunyuanBackend {
         attention_mask: Option<&Tensor>,
         batch_kv_info: Option<(&[usize], usize)>,
     ) -> candle_core::Result<Tensor> {
-        self.model
-            .step_batch_decode_with_input_ids(input_ids, positions, attention_mask, batch_kv_info)
+        self.model.step_batch_decode_with_input_ids(
+            input_ids,
+            positions,
+            attention_mask,
+            batch_kv_info,
+        )
     }
 
     fn extract_batch_kv(
@@ -436,8 +440,9 @@ impl Minicpm5Backend {
         dtype: &DType,
         format: crane_core::models::minicpm5::ModelFormat,
     ) -> Result<Self> {
-        let model =
-            crane_core::models::minicpm5::Model::new_with_format(model_path, device, dtype, format)?;
+        let model = crane_core::models::minicpm5::Model::new_with_format(
+            model_path, device, dtype, format,
+        )?;
         Ok(Self {
             model,
             dtype: *dtype,
@@ -528,7 +533,11 @@ impl Qwen3_5Backend {
     ) -> Result<Self> {
         let model = match quant {
             Some(dt) => crane_core::models::qwen3_5::Model::new_with_options(
-                model_path, device, dtype, format, Some(dt),
+                model_path,
+                device,
+                dtype,
+                format,
+                Some(dt),
             )?,
             None => crane_core::models::qwen3_5::Model::new_with_format(
                 model_path, device, dtype, format,
@@ -648,9 +657,16 @@ impl ModelBackend for Qwen3Backend {
         // Also include <|endoftext|> (151643) as a fallback.
         let tok = &self.model.tokenizer.tokenizer;
         let mut ids = Vec::new();
-        if let Some(id) = tok.token_to_id("<|im_end|>") { ids.push(id); }
-        if let Some(id) = tok.token_to_id("<|endoftext|>") { ids.push(id); }
-        if ids.is_empty() { ids.push(151_645); ids.push(151_643); }
+        if let Some(id) = tok.token_to_id("<|im_end|>") {
+            ids.push(id);
+        }
+        if let Some(id) = tok.token_to_id("<|endoftext|>") {
+            ids.push(id);
+        }
+        if ids.is_empty() {
+            ids.push(151_645);
+            ids.push(151_643);
+        }
         ids
     }
 
@@ -697,8 +713,12 @@ impl ModelBackend for Qwen3Backend {
         attention_mask: Option<&Tensor>,
         batch_kv_info: Option<(&[usize], usize)>,
     ) -> candle_core::Result<Tensor> {
-        self.model
-            .step_batch_decode_with_input_ids(input_ids, positions, attention_mask, batch_kv_info)
+        self.model.step_batch_decode_with_input_ids(
+            input_ids,
+            positions,
+            attention_mask,
+            batch_kv_info,
+        )
     }
 
     fn extract_batch_kv(

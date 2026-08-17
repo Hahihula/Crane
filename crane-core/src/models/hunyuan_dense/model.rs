@@ -15,8 +15,8 @@ use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
 use super::modeling::{Config, HunYuanDenseV1};
-use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
+use crate::generation::based::ModelForCausalLM;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 
@@ -52,16 +52,12 @@ impl Model {
         let format = match format {
             ModelFormat::Auto => {
                 let p = std::path::Path::new(model_path);
-                if p.is_file()
-                    && p.extension()
-                        .map(|e| e == "gguf")
-                        .unwrap_or(false)
-                {
+                if p.is_file() && p.extension().map(|e| e == "gguf").unwrap_or(false) {
                     ModelFormat::Gguf
                 } else {
                     ModelFormat::Safetensors
                 }
-            }
+            },
             other => other,
         };
 
@@ -195,8 +191,8 @@ impl Model {
 
     /// Run a single forward step, returning raw logits. Caller manages KV cache.
     pub fn forward_step(
-        &mut self, 
-        input_ids: &[u32], 
+        &mut self,
+        input_ids: &[u32],
         start_pos: usize,
     ) -> candle_core::Result<Tensor> {
         let input = Tensor::new(input_ids, &self.device)?.unsqueeze(0)?;
@@ -231,7 +227,8 @@ impl Model {
     ) -> candle_core::Result<Tensor> {
         let n = positions.len();
         let input = Tensor::new(tokens, &self.device)?.reshape((n, 1))?;
-        self.inner.step_batch_decode(&input, positions, attention_mask, batch_kv_info)
+        self.inner
+            .step_batch_decode(&input, positions, attention_mask, batch_kv_info)
     }
 
     pub fn step_batch_decode_with_input_ids(
@@ -253,7 +250,8 @@ impl Model {
         original_max_kv: usize,
         rounds_done: usize,
     ) -> candle_core::Result<Vec<Vec<Option<(Tensor, Tensor)>>>> {
-        self.inner.extract_batch_kv(kv_lens, original_max_kv, rounds_done)
+        self.inner
+            .extract_batch_kv(kv_lens, original_max_kv, rounds_done)
     }
 
     /// Number of transformer layers.
@@ -277,11 +275,8 @@ impl Model {
     }
 
     pub fn warmup(&mut self) {
-        if let Err(e) = self.generate(
-            &[45, 546, 456],
-            &GenerationConfig::with_max_tokens(5),
-            None,
-        ) {
+        if let Err(e) = self.generate(&[45, 546, 456], &GenerationConfig::with_max_tokens(5), None)
+        {
             eprintln!("warmup failed (non-fatal): {e}");
         }
         self.clear_kv_cache();

@@ -2593,8 +2593,8 @@ pub(crate) fn simple_eval_(
                     left.broadcast_add(&right.broadcast_sub(&left)?.broadcast_mul(&frac_t)?)?
                 } else {
                     // How to determine the "nearest" pixel in nearest interpolation mode.
-                    let nearest_mode = get_attr_opt::<str>(node, "nearest_mode")?
-                        .unwrap_or("round_prefer_floor");
+                    let nearest_mode =
+                        get_attr_opt::<str>(node, "nearest_mode")?.unwrap_or("round_prefer_floor");
 
                     if mode != "nearest" {
                         bail!("Unsupported resize mode: {}", mode);
@@ -2855,7 +2855,10 @@ pub(crate) fn simple_eval_(
         }
 
         release_names_if_done(
-            node.input.iter().filter(|input| !input.is_empty()).map(String::as_str),
+            node.input
+                .iter()
+                .filter(|input| !input.is_empty())
+                .map(String::as_str),
             &mut remaining_uses,
             &graph_outputs,
             &inherited_values,

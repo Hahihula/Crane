@@ -13,13 +13,18 @@
 fn minicpmo_vlm_generate_is_coherent() {
     use crane_core::models::minicpmo::{MiniCpmOVlModel, VlGenerationConfig};
 
-    let dir = std::env::var("CRANE_MINICPMO_DIR").expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");
+    let dir = std::env::var("CRANE_MINICPMO_DIR")
+        .expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");
     // The checkpoint ships its own README example images under assets/.
-    let image_path = std::env::var("CRANE_MINICPMO_TEST_IMAGE").unwrap_or_else(|_| format!("{dir}/assets/fossil.png"));
+    let image_path = std::env::var("CRANE_MINICPMO_TEST_IMAGE")
+        .unwrap_or_else(|_| format!("{dir}/assets/fossil.png"));
 
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
-        (candle_core::Device::new_cuda(0).unwrap(), candle_core::DType::BF16)
+        (
+            candle_core::Device::new_cuda(0).unwrap(),
+            candle_core::DType::BF16,
+        )
     } else {
         (candle_core::Device::Cpu, candle_core::DType::F32)
     };
@@ -38,7 +43,13 @@ fn minicpmo_vlm_generate_is_coherent() {
 
     let cfg = VlGenerationConfig { max_new_tokens: 96 };
     let text = model
-        .generate(Some(&image), None, "Describe this image in one or two sentences.", &cfg, |_| {})
+        .generate(
+            Some(&image),
+            None,
+            "Describe this image in one or two sentences.",
+            &cfg,
+            |_| {},
+        )
         .expect("generate");
 
     println!("generated: {text}");

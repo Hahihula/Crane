@@ -1,10 +1,10 @@
 //! Simple Vision Example
-//! 
+//!
 //! This example shows how to use vision capabilities with the Crane SDK.
 
-use crane::prelude::*;
 use crane::common::config::{CommonConfig, DataType, DeviceConfig};
 use crane::llm::LlmModelType;
+use crane::prelude::*;
 
 fn main() -> CraneResult<()> {
     // Create a vision configuration
@@ -15,16 +15,16 @@ fn main() -> CraneResult<()> {
         dtype: DataType::F16,
         max_memory: None,
     };
-    
+
     // Create a new vision client
     let _vision_client = VisionClient::new(config)?;
-    
+
     // Analyze an image (this is a placeholder - actual implementation depends on available models)
     // let result = vision_client.analyze_image("path/to/your/image.jpg")?;
     // println!("Analysis result: {}", result);
-    
+
     println!("Vision example: Image analysis functionality coming soon!");
     println!("Check back for OCR and image analysis examples.");
-    
+
     Ok(())
 }

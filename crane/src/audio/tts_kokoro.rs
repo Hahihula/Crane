@@ -64,7 +64,11 @@ impl KokoroTts {
 
 impl Tts for KokoroTts {
     fn audio_info(&self) -> AudioInfo {
-        AudioInfo { sample_rate: self.model.sample_rate(), channels: 1, bits_per_sample: 16 }
+        AudioInfo {
+            sample_rate: self.model.sample_rate(),
+            channels: 1,
+            bits_per_sample: 16,
+        }
     }
 
     /// Returns a [`VoiceInfo`] for each voice discovered under the model's
@@ -92,7 +96,8 @@ impl Tts for KokoroTts {
         opts: &SpeechOptions,
     ) -> Result<Tensor> {
         let (tensor, _sample_rate) =
-            self.model.generate_speech(text, language, voice, self.phonemizer.as_ref(), opts)?;
+            self.model
+                .generate_speech(text, language, voice, self.phonemizer.as_ref(), opts)?;
         Ok(tensor)
     }
 }

@@ -20,22 +20,22 @@
 // adjacent code paths stay invisible to the compiler.
 #![allow(dead_code)]
 
-mod config;
 mod conditioner;
+mod config;
 mod midi;
 mod model;
 mod mt3;
 mod transformer;
 
-pub use config::VariantConfig;
 pub use conditioner::{
     ClassConditioner, ConditioningAttributes, ConditioningProvider, MelSpectrogramConditioner,
     WavCondition,
 };
+pub use config::VariantConfig;
 pub use midi::{MidiNote, MidiWriter};
 pub use model::{LMModel, Model, NoteEvent, TranscribeConfig, TranscriptionModel};
 pub use mt3::{
-    instrument_group_from_names, resolve_instrument_names, MT3_FULL_PLUS_GROUP_NAMES,
-    MT3Tokenizer, Token, TokenIter, DRUM_PROGRAM,
+    DRUM_PROGRAM, MT3_FULL_PLUS_GROUP_NAMES, MT3Tokenizer, Token, TokenIter,
+    instrument_group_from_names, resolve_instrument_names,
 };
-pub use transformer::{create_sin_embedding, LayerState, TransformerState};
+pub use transformer::{LayerState, TransformerState, create_sin_embedding};

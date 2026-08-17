@@ -61,7 +61,8 @@ pub(crate) fn optimize(
     // Correctness fixes for gaps in `eval.rs`, not a size optimization —
     // run unconditionally, even when `options.optimize` disables the
     // simplification passes below.
-    compat::rewrite_unsupported_ops(graph).map_err(|err| candle_core::Error::Msg(err.to_string()))?;
+    compat::rewrite_unsupported_ops(graph)
+        .map_err(|err| candle_core::Error::Msg(err.to_string()))?;
 
     if !options.optimize {
         report.final_nodes = graph.node.len();

@@ -27,8 +27,8 @@
 
 use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device};
-use crane_core::generation::based::ModelForCausalLM;
 use crane_core::generation::GenerationConfig;
+use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::{Model, ModelFormat};
 
 const PROMPT: &str = "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
@@ -118,7 +118,11 @@ fn long_prompt_divergence() {
     };
     let tokens = model.generate(&input_ids, &cfg, None).expect("generate");
     let generated = &tokens[input_ids.len()..];
-    let text = model.tokenizer.tokenizer.decode(generated, true).unwrap_or_default();
+    let text = model
+        .tokenizer
+        .tokenizer
+        .decode(generated, true)
+        .unwrap_or_default();
     println!("[{which}] text: {text}");
 }
 
@@ -151,13 +155,37 @@ fn long_prompt_logit_cosine() {
 
     println!("st tokens={} gguf tokens={}", st_ids.len(), gguf_ids.len());
 
-    let st_v = st_logits.flatten_all().unwrap().to_dtype(DType::F32).unwrap().to_vec1::<f32>().unwrap();
-    let gguf_v = gguf_logits.flatten_all().unwrap().to_dtype(DType::F32).unwrap().to_vec1::<f32>().unwrap();
+    let st_v = st_logits
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let gguf_v = gguf_logits
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
     assert_eq!(st_v.len(), gguf_v.len(), "vocab size mismatch");
 
-    let dot: f64 = st_v.iter().zip(&gguf_v).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-    let na: f64 = st_v.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt();
-    let nb: f64 = gguf_v.iter().map(|b| f64::from(*b).powi(2)).sum::<f64>().sqrt();
+    let dot: f64 = st_v
+        .iter()
+        .zip(&gguf_v)
+        .map(|(a, b)| f64::from(*a) * f64::from(*b))
+        .sum();
+    let na: f64 = st_v
+        .iter()
+        .map(|a| f64::from(*a).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let nb: f64 = gguf_v
+        .iter()
+        .map(|b| f64::from(*b).powi(2))
+        .sum::<f64>()
+        .sqrt();
     let cosine = dot / (na * nb);
     println!("last-position logits cosine similarity: {cosine:.6}");
     // The bug fixed for issue #88 (ssm_a fed through -exp() twice) collapsed
@@ -282,13 +310,37 @@ fn gguf_matches_safetensors_prefix() {
     let gguf_ids = gguf_model.prepare_inputs(PROMPT).expect("tokenize gguf");
     let gguf_logits = gguf_model.forward_step(&gguf_ids, 0).expect("gguf forward");
 
-    let st_v = st_logits.flatten_all().unwrap().to_dtype(DType::F32).unwrap().to_vec1::<f32>().unwrap();
-    let gguf_v = gguf_logits.flatten_all().unwrap().to_dtype(DType::F32).unwrap().to_vec1::<f32>().unwrap();
+    let st_v = st_logits
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let gguf_v = gguf_logits
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
     assert_eq!(st_v.len(), gguf_v.len(), "vocab size mismatch");
 
-    let dot: f64 = st_v.iter().zip(&gguf_v).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-    let na: f64 = st_v.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt();
-    let nb: f64 = gguf_v.iter().map(|b| f64::from(*b).powi(2)).sum::<f64>().sqrt();
+    let dot: f64 = st_v
+        .iter()
+        .zip(&gguf_v)
+        .map(|(a, b)| f64::from(*a) * f64::from(*b))
+        .sum();
+    let na: f64 = st_v
+        .iter()
+        .map(|a| f64::from(*a).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let nb: f64 = gguf_v
+        .iter()
+        .map(|b| f64::from(*b).powi(2))
+        .sum::<f64>()
+        .sqrt();
     let cosine = dot / (na * nb);
     println!("first-position logits cosine similarity: {cosine:.6}");
     assert!(
@@ -312,7 +364,11 @@ fn dump_gguf_header() {
     for k in keys {
         let v = &ct.metadata[k];
         let vs = format!("{v:?}");
-        let vs = if vs.len() > 120 { format!("{}…", &vs[..120]) } else { vs };
+        let vs = if vs.len() > 120 {
+            format!("{}…", &vs[..120])
+        } else {
+            vs
+        };
         println!("meta  {k} = {vs}");
     }
     let mut names: Vec<_> = ct.tensor_infos.iter().collect();
@@ -372,7 +428,11 @@ fn requantization_roundtrip_error() {
     ] {
         let qt = ct.tensor(&mut file, name, &Device::Cpu).unwrap();
         let ggml_dtype = qt.dtype();
-        let orig = qt.dequantize(&Device::Cpu).unwrap().to_dtype(DType::F32).unwrap();
+        let orig = qt
+            .dequantize(&Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
 
         // Round-trip WITHOUT any permutation: pure quantize(dequantize(x)) cost.
         let rt = QTensor::quantize(&orig, ggml_dtype)
@@ -381,8 +441,21 @@ fn requantization_roundtrip_error() {
             .unwrap()
             .to_dtype(DType::F32)
             .unwrap();
-        let err = (&rt - &orig).unwrap().abs().unwrap().max_all().unwrap().to_scalar::<f32>().unwrap();
-        let scale = orig.abs().unwrap().max_all().unwrap().to_scalar::<f32>().unwrap();
+        let err = (&rt - &orig)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let scale = orig
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
         println!(
             "{name}: dtype={ggml_dtype:?} block={} max_abs_roundtrip_err={err:.8} weight_max={scale:.6} rel={:.8}",
             ggml_dtype.block_size(),

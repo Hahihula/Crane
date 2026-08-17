@@ -100,11 +100,7 @@ impl candle_core::CustomOp1 for FusedSiluMul {
     }
 
     #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        storage: &CudaStorage,
-        layout: &Layout,
-    ) -> Result<(CudaStorage, Shape)> {
+    fn cuda_fwd(&self, storage: &CudaStorage, layout: &Layout) -> Result<(CudaStorage, Shape)> {
         let dev = storage.device();
         let dims = layout.shape().dims();
         let last = *dims.last().unwrap();
@@ -152,7 +148,7 @@ impl candle_core::CustomOp1 for FusedSiluMul {
                 builder.arg(&isize_i32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::BF16(dst)
-            }
+            },
             CudaStorageSlice::F16(s) => {
                 let s = s.slice(o1..o2);
                 let dst = unsafe { dev.alloc::<half::f16>(out_el)? };
@@ -163,7 +159,7 @@ impl candle_core::CustomOp1 for FusedSiluMul {
                 builder.arg(&isize_i32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::F16(dst)
-            }
+            },
             CudaStorageSlice::F32(s) => {
                 let s = s.slice(o1..o2);
                 let dst = unsafe { dev.alloc::<f32>(out_el)? };
@@ -174,7 +170,7 @@ impl candle_core::CustomOp1 for FusedSiluMul {
                 builder.arg(&isize_i32);
                 unsafe { builder.launch(cfg) }.w()?;
                 CudaStorageSlice::F32(dst)
-            }
+            },
             _ => candle_core::bail!("fused_silu_mul: unsupported storage type"),
         };
 
@@ -259,7 +255,7 @@ pub fn gpu_argmax(logits: &Tensor) -> Result<u32> {
             let vs = vocab_size as i32;
             builder.arg(&vs);
             unsafe { builder.launch(cfg1) }.w()?;
-        }
+        },
         _ => candle_core::bail!("gpu_argmax currently only supports BF16"),
     }
 

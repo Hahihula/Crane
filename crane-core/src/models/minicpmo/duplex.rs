@@ -257,7 +257,9 @@ pub struct DuplexSession {
 }
 
 fn get_token_or_bail(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
-    tokenizer.token_to_id(token).ok_or_else(|| candle_core::Error::Msg(format!("tokenizer has no {token} token")))
+    tokenizer
+        .token_to_id(token)
+        .ok_or_else(|| candle_core::Error::Msg(format!("tokenizer has no {token} token")))
 }
 
 /// Per-tower standalone-GGUF-file overrides for [`DuplexSession::new_with_gguf`] —
@@ -293,8 +295,23 @@ impl DuplexSession {
     ///
     /// Returns an error if the GGUF file or any other tower's weights
     /// can't be loaded.
-    pub fn new_with_llm_gguf(model_path: &str, llm_gguf_path: &str, device: &Device, dtype: DType, cfg: DuplexConfig) -> Result<Self> {
-        Self::new_with_gguf(model_path, &DuplexGgufPaths { llm: Some(llm_gguf_path), ..DuplexGgufPaths::default() }, device, dtype, cfg)
+    pub fn new_with_llm_gguf(
+        model_path: &str,
+        llm_gguf_path: &str,
+        device: &Device,
+        dtype: DType,
+        cfg: DuplexConfig,
+    ) -> Result<Self> {
+        Self::new_with_gguf(
+            model_path,
+            &DuplexGgufPaths {
+                llm: Some(llm_gguf_path),
+                ..DuplexGgufPaths::default()
+            },
+            device,
+            dtype,
+            cfg,
+        )
     }
 
     /// Loads any combination of towers from standalone GGUF files instead
@@ -321,49 +338,79 @@ impl DuplexSession {
     ///
     /// Returns an error if any requested GGUF file, or any safetensors
     /// fallback, can't be loaded.
-    pub fn new_with_gguf(model_path: &str, gguf: &DuplexGgufPaths, device: &Device, dtype: DType, cfg: DuplexConfig) -> Result<Self> {
+    pub fn new_with_gguf(
+        model_path: &str,
+        gguf: &DuplexGgufPaths,
+        device: &Device,
+        dtype: DType,
+        cfg: DuplexConfig,
+    ) -> Result<Self> {
         let llm = match gguf.llm {
-            Some(path) => MiniCpmOLlm::from_gguf(model_path, path, device).map_err(|e| candle_core::Error::Msg(e.to_string()))?,
-            None => MiniCpmOLlm::new(model_path, device, &dtype).map_err(|e| candle_core::Error::Msg(e.to_string()))?,
+            Some(path) => MiniCpmOLlm::from_gguf(model_path, path, device)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?,
+            None => MiniCpmOLlm::new(model_path, device, &dtype)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?,
         };
 
         let config_path = format!("{model_path}/config.json");
-        let config: MiniCpmOConfig =
-            crate::models::minicpmo::config::load_config(&config_path).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let config: MiniCpmOConfig = crate::models::minicpmo::config::load_config(&config_path)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
-        let filenames =
-            crate::utils::utils::get_safetensors_files(model_path).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&filenames, dtype, device) }?;
+        let filenames = crate::utils::utils::get_safetensors_files(model_path)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let vb =
+            unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&filenames, dtype, device) }?;
 
         let audio_output_dim = config.audio_config.encoder_ffn_dim / 4;
         let embed_dim = config.llm.hidden_size;
         let (audio_encoder, audio_projector) = match gguf.audio {
             Some(path) => {
-                let mut file = std::fs::File::open(path).map_err(|e| candle_core::Error::Msg(format!("failed to open audio GGUF {path}: {e}")))?;
+                let mut file = std::fs::File::open(path).map_err(|e| {
+                    candle_core::Error::Msg(format!("failed to open audio GGUF {path}: {e}"))
+                })?;
                 let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-                let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(ct, &mut file, device.clone(), dtype);
+                let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
+                    ct,
+                    &mut file,
+                    device.clone(),
+                    dtype,
+                );
                 let encoder = AudioEncoder::from_gguf(&mut gg, &config.audio_config)?;
                 let projector = AudioProjector::from_gguf(&mut gg, config.audio_pool_step)?;
                 (encoder, projector)
-            }
+            },
             None => {
                 let encoder = AudioEncoder::new(&config.audio_config, vb.pp("apm"))?;
-                let projector = AudioProjector::new(audio_output_dim, embed_dim, config.audio_pool_step, vb.pp("audio_projection_layer"))?;
+                let projector = AudioProjector::new(
+                    audio_output_dim,
+                    embed_dim,
+                    config.audio_pool_step,
+                    vb.pp("audio_projection_layer"),
+                )?;
                 (encoder, projector)
-            }
+            },
         };
-        let mel_extractor = WhisperFeatureExtractor::new(config.audio_config.num_mel_bins, device, dtype)?;
+        let mel_extractor =
+            WhisperFeatureExtractor::new(config.audio_config.num_mel_bins, device, dtype)?;
 
         let tts = match gguf.tts {
             Some(path) => {
-                let mut file = std::fs::File::open(path).map_err(|e| candle_core::Error::Msg(format!("failed to open tts GGUF {path}: {e}")))?;
+                let mut file = std::fs::File::open(path).map_err(|e| {
+                    candle_core::Error::Msg(format!("failed to open tts GGUF {path}: {e}"))
+                })?;
                 let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-                let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(ct, &mut file, device.clone(), dtype);
+                let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
+                    ct,
+                    &mut file,
+                    device.clone(),
+                    dtype,
+                );
                 MiniCpmTts::from_gguf(&mut gg, &config.tts_config, device, dtype)?
-            }
+            },
             None => MiniCpmTts::new(&config.tts_config, vb.pp("tts"), device, dtype)?,
         };
-        let token2wav = Token2Wav::new(model_path, device, dtype).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let token2wav = Token2Wav::new(model_path, device, dtype)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         let tok = &llm.tokenizer.tokenizer;
         let unit_token_id = get_token_or_bail(tok, "<unit>")?;
@@ -374,7 +421,12 @@ impl DuplexSession {
         let turn_eos_token_id = get_token_or_bail(tok, "<|turn_eos|>")?;
         let tts_pad_token_id = get_token_or_bail(tok, "<|tts_pad|>")?;
 
-        let rotary = RotaryEmbedding::new(llm.head_dim(), llm.max_position_embeddings(), llm.rope_theta(), device)?;
+        let rotary = RotaryEmbedding::new(
+            llm.head_dim(),
+            llm.max_position_embeddings(),
+            llm.rope_theta(),
+            device,
+        )?;
 
         // Matches Python's `tokenizer.encode(marker, add_special_tokens=False)`.
         let previous_marker_token_ids: Vec<u32> = llm
@@ -440,7 +492,10 @@ impl DuplexSession {
 
         let prompt = system_prompt.unwrap_or("Streaming Omni Conversation.");
         let rendered = format!("<|im_start|>system\n{prompt}<|im_end|>");
-        let ids = self.llm.prepare_inputs(&rendered).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let ids = self
+            .llm
+            .prepare_inputs(&rendered)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         self.feed_tokens(&ids)?;
         // Mirrors `StreamDecoder.register_system_prompt`/
         // `register_system_prompt_with_context`: protect the system prompt
@@ -463,7 +518,9 @@ impl DuplexSession {
 
     fn embed_tokens(&self, ids: &[u32]) -> Result<Tensor> {
         let ids_t = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
-        self.llm.embed_only(&ids_t).map_err(|e| candle_core::Error::Msg(e.to_string()))
+        self.llm
+            .embed_only(&ids_t)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))
     }
 
     /// Feed a batch of token ids through the LLM, advancing the KV cache.
@@ -482,7 +539,9 @@ impl DuplexSession {
         }
         let embeds = self.embed_tokens(ids)?;
         let start_pos = self.llm.kv_cache_len();
-        self.llm.forward_embeds(&embeds, start_pos).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        self.llm
+            .forward_embeds(&embeds, start_pos)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         Ok(())
     }
 
@@ -491,8 +550,14 @@ impl DuplexSession {
     /// at the last fed position — mirrors `StreamDecoder.feed(..., return_logits=True)`.
     fn feed_embeds(&mut self, embeds: &Tensor) -> Result<(Tensor, Tensor)> {
         let start_pos = self.llm.kv_cache_len();
-        let logits = self.llm.forward_embeds(embeds, start_pos).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        let hidden = self.llm.last_hidden_states().ok_or_else(|| candle_core::Error::Msg("no hidden states after forward".into()))?;
+        let logits = self
+            .llm
+            .forward_embeds(embeds, start_pos)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let hidden = self
+            .llm
+            .last_hidden_states()
+            .ok_or_else(|| candle_core::Error::Msg("no hidden states after forward".into()))?;
         let hidden_last = hidden.narrow(1, hidden.dim(1)? - 1, 1)?;
         let logits_flat = logits.squeeze(0)?.squeeze(0)?;
         Ok((logits_flat, hidden_last))
@@ -558,8 +623,13 @@ impl DuplexSession {
         // `models::utils::apply_repeat_penalty` uses elsewhere — matching
         // this model's actual trained/expected sampling distribution
         // matters more here than using the "more correct" formula.
-        if (self.cfg.text_repetition_penalty - 1.0).abs() > f32::EPSILON && !self.generated_tokens.is_empty() {
-            let start = self.generated_tokens.len().saturating_sub(self.cfg.text_repetition_window_size);
+        if (self.cfg.text_repetition_penalty - 1.0).abs() > f32::EPSILON
+            && !self.generated_tokens.is_empty()
+        {
+            let start = self
+                .generated_tokens
+                .len()
+                .saturating_sub(self.cfg.text_repetition_window_size);
             let mut seen = std::collections::HashSet::new();
             for &id in &self.generated_tokens[start..] {
                 if !seen.insert(id) {
@@ -597,7 +667,12 @@ impl DuplexSession {
     /// Returns an error if any forward/decode/synthesis step fails.
     pub fn streaming_generate(&mut self, rng_seed: u64) -> Result<ChunkOutput> {
         let Some(mut logits) = self.pending_logits.take() else {
-            return Ok(ChunkOutput { is_listen: true, text: String::new(), audio_waveform: None, end_of_turn: false });
+            return Ok(ChunkOutput {
+                is_listen: true,
+                text: String::new(),
+                audio_waveform: None,
+                end_of_turn: false,
+            });
         };
 
         let force_listen = self.force_listen_remaining > 0;
@@ -627,14 +702,20 @@ impl DuplexSession {
                 }
             };
 
-            if next_id != self.listen_token_id && next_id != self.chunk_eos_token_id && next_id != self.chunk_tts_eos_token_id {
+            if next_id != self.listen_token_id
+                && next_id != self.chunk_eos_token_id
+                && next_id != self.chunk_tts_eos_token_id
+            {
                 if !self.forbidden_token_ids.contains(&next_id) {
                     self.generated_tokens.push(next_id);
                 }
             }
             is_listen = next_id == self.listen_token_id;
 
-            if next_id == self.listen_token_id || next_id == self.chunk_eos_token_id || next_id == self.chunk_tts_eos_token_id {
+            if next_id == self.listen_token_id
+                || next_id == self.chunk_eos_token_id
+                || next_id == self.chunk_tts_eos_token_id
+            {
                 self.feed_tokens(&[next_id])?;
                 break;
             }
@@ -665,20 +746,30 @@ impl DuplexSession {
         // eviction only actually runs for the selected mode.
         self.register_unit_end(is_listen, &unit_ids);
         match self.cfg.sliding_window_mode {
-            SlidingWindowMode::Off => {}
+            SlidingWindowMode::Off => {},
             SlidingWindowMode::Basic => {
                 self.enforce_window()?;
-            }
+            },
             SlidingWindowMode::Context => {
                 self.enforce_window_with_context()?;
-            }
+            },
         }
 
         if is_listen {
-            return Ok(ChunkOutput { is_listen: true, text: String::new(), audio_waveform: None, end_of_turn: false });
+            return Ok(ChunkOutput {
+                is_listen: true,
+                text: String::new(),
+                audio_waveform: None,
+                end_of_turn: false,
+            });
         }
 
-        let text = self.llm.tokenizer.tokenizer.decode(&unit_ids, true).unwrap_or_default();
+        let text = self
+            .llm
+            .tokenizer
+            .tokenizer
+            .decode(&unit_ids, true)
+            .unwrap_or_default();
 
         // Phase 6d: generate this chunk's TTS speech-token codes
         // incrementally (persistent KV cache across chunks within a turn,
@@ -689,7 +780,8 @@ impl DuplexSession {
         // simplification" note (the real streaming vocoder needs a novel
         // per-denoising-timestep-and-per-layer KV cache with no existing
         // analog in this codebase, deliberately not ported yet).
-        let tts_condition = self.build_tts_condition_for_chunk(&unit_ids, &hidden_rows, end_of_turn)?;
+        let tts_condition =
+            self.build_tts_condition_for_chunk(&unit_ids, &hidden_rows, end_of_turn)?;
         let condition_len = tts_condition.dim(1)?;
         let is_first_chunk_of_turn = self.tts_start_pos == 0;
         let tts_chunk_cfg = TtsGenerationConfig {
@@ -698,32 +790,62 @@ impl DuplexSession {
             // stopping early) — matches `streaming_generate`'s
             // `min_token_per_chunk`/`max_token_per_chunk` (25 s3tokenizer
             // codes/s + 1).
-            min_new_tokens: if end_of_turn || is_first_chunk_of_turn { 0 } else { 26 },
+            min_new_tokens: if end_of_turn || is_first_chunk_of_turn {
+                0
+            } else {
+                26
+            },
             max_new_tokens: 26,
             // Re-seed per chunk (mixing in `rng_seed` and the running TTS
             // position) so consecutive chunks don't all sample from an
             // identical fresh RNG stream — Python's equivalent advances
             // torch's global RNG naturally across calls instead.
-            seed: self.cfg.tts_cfg.seed.wrapping_add(rng_seed).wrapping_add(self.tts_start_pos as u64),
+            seed: self
+                .cfg
+                .tts_cfg
+                .seed
+                .wrapping_add(rng_seed)
+                .wrapping_add(self.tts_start_pos as u64),
             ..self.cfg.tts_cfg.clone()
         };
-        let new_codes = self.tts.generate_chunk(&tts_condition, self.tts_start_pos, &tts_chunk_cfg).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let new_codes = self
+            .tts
+            .generate_chunk(&tts_condition, self.tts_start_pos, &tts_chunk_cfg)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         self.tts_start_pos += condition_len + new_codes.len();
         self.turn_codes.extend(new_codes);
 
         if !end_of_turn {
-            return Ok(ChunkOutput { is_listen: false, text, audio_waveform: None, end_of_turn: false });
+            return Ok(ChunkOutput {
+                is_listen: false,
+                text,
+                audio_waveform: None,
+                end_of_turn: false,
+            });
         }
 
         // Turn complete: synthesize the whole turn's accumulated codes in
         // one non-streaming Token2wav call, then reset TTS state for the
         // next turn.
-        let audio_waveform = if self.turn_codes.is_empty() { None } else { Some(self.token2wav.synthesize(&self.turn_codes, self.cfg.n_timesteps).map_err(|e| candle_core::Error::Msg(e.to_string()))?) };
+        let audio_waveform = if self.turn_codes.is_empty() {
+            None
+        } else {
+            Some(
+                self.token2wav
+                    .synthesize(&self.turn_codes, self.cfg.n_timesteps)
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?,
+            )
+        };
         self.tts.clear_kv_cache();
         self.tts_start_pos = 0;
         self.turn_codes.clear();
 
-        Ok(ChunkOutput { is_listen: false, text, audio_waveform, end_of_turn: true })
+        Ok(ChunkOutput {
+            is_listen: false,
+            text,
+            audio_waveform,
+            end_of_turn: true,
+        })
     }
 
     /// Builds one chunk's TTS conditioning sequence: `emb_text(token) +
@@ -736,16 +858,30 @@ impl DuplexSession {
     /// # Errors
     ///
     /// Returns an error if any embedding lookup fails.
-    fn build_tts_condition_for_chunk(&self, chunk_tokens: &[u32], chunk_hidden_rows: &[Tensor], end_of_turn: bool) -> Result<Tensor> {
+    fn build_tts_condition_for_chunk(
+        &self,
+        chunk_tokens: &[u32],
+        chunk_hidden_rows: &[Tensor],
+        end_of_turn: bool,
+    ) -> Result<Tensor> {
         let mut parts: Vec<Tensor> = Vec::new();
         if !chunk_tokens.is_empty() {
             let hidden_states = Tensor::cat(chunk_hidden_rows, 1)?.squeeze(0)?;
-            parts.push(self.tts.build_condition_embeds(chunk_tokens, &hidden_states)?);
+            parts.push(
+                self.tts
+                    .build_condition_embeds(chunk_tokens, &hidden_states)?,
+            );
         }
         if end_of_turn {
-            parts.push(self.tts.embed_special_token(self.tts.config.text_eos_token_id)?);
+            parts.push(
+                self.tts
+                    .embed_special_token(self.tts.config.text_eos_token_id)?,
+            );
         }
-        parts.push(self.tts.embed_special_token(self.tts.config.audio_bos_token_id)?);
+        parts.push(
+            self.tts
+                .embed_special_token(self.tts.config.audio_bos_token_id)?,
+        );
         let refs: Vec<&Tensor> = parts.iter().collect();
         Tensor::cat(&refs, 1)
     }
@@ -762,7 +898,11 @@ impl DuplexSession {
         let current_len = self.llm.kv_cache_len();
         let unit_len = current_len.saturating_sub(start_len);
         if unit_len > 0 {
-            self.unit_records.push_back(UnitRecord { length: unit_len, is_listen, generated_tokens: generated_tokens.to_vec() });
+            self.unit_records.push_back(UnitRecord {
+                length: unit_len,
+                is_listen,
+                generated_tokens: generated_tokens.to_vec(),
+            });
         }
     }
 
@@ -801,7 +941,12 @@ impl DuplexSession {
             };
             let length = record.length;
             let mut caches = self.llm.get_kv_caches();
-            let dropped = sliding_window::drop_tokens_from_cache(&mut caches, length, self.system_preserve_length, &self.rotary)?;
+            let dropped = sliding_window::drop_tokens_from_cache(
+                &mut caches,
+                length,
+                self.system_preserve_length,
+                &self.rotary,
+            )?;
             if !dropped {
                 break;
             }
@@ -836,7 +981,11 @@ impl DuplexSession {
             let extracted: Vec<u32> = if record.is_listen {
                 Vec::new()
             } else {
-                record.generated_tokens.into_iter().filter(|id| !self.is_control_token(*id)).collect()
+                record
+                    .generated_tokens
+                    .into_iter()
+                    .filter(|id| !self.is_control_token(*id))
+                    .collect()
             };
             self.update_previous_and_rebuild(&extracted)?;
             dropped_any = true;
@@ -856,7 +1005,12 @@ impl DuplexSession {
     ///
     /// Returns an error if the cache-rebuild tensor/forward ops fail.
     fn update_previous_and_rebuild(&mut self, new_tokens: &[u32]) -> Result<()> {
-        append_and_truncate_previous(&mut self.previous_token_ids, &self.previous_marker_token_ids, new_tokens, self.cfg.context_previous_max_tokens);
+        append_and_truncate_previous(
+            &mut self.previous_token_ids,
+            &self.previous_marker_token_ids,
+            new_tokens,
+            self.cfg.context_previous_max_tokens,
+        );
         self.rebuild_cache_with_previous()
     }
 
@@ -889,15 +1043,20 @@ impl DuplexSession {
                         v.narrow(2, 0, self.preserve_prefix_length)?.contiguous()?,
                     )));
                     units_cache.push(if units_to_keep_len > 0 {
-                        Some((k.narrow(2, old_units_start, units_to_keep_len)?.contiguous()?, v.narrow(2, old_units_start, units_to_keep_len)?.contiguous()?))
+                        Some((
+                            k.narrow(2, old_units_start, units_to_keep_len)?
+                                .contiguous()?,
+                            v.narrow(2, old_units_start, units_to_keep_len)?
+                                .contiguous()?,
+                        ))
                     } else {
                         None
                     });
-                }
+                },
                 None => {
                     prefix_only.push(None);
                     units_cache.push(None);
-                }
+                },
             }
         }
         drop(full);
@@ -915,7 +1074,13 @@ impl DuplexSession {
                     let realigned_k = if old_units_start == new_system_total {
                         uk
                     } else {
-                        sliding_window::realign_rotary_suffix(&self.rotary, &uk, old_units_start, new_system_total, units_to_keep_len)?
+                        sliding_window::realign_rotary_suffix(
+                            &self.rotary,
+                            &uk,
+                            old_units_start,
+                            new_system_total,
+                            units_to_keep_len,
+                        )?
                     };
                     *k = Tensor::cat(&[&*k, &realigned_k], 2)?.contiguous()?;
                     *v = Tensor::cat(&[&*v, &uv], 2)?.contiguous()?;
@@ -927,7 +1092,6 @@ impl DuplexSession {
         self.system_preserve_length = new_system_total;
         Ok(())
     }
-
 }
 
 /// Appends `new_tokens` to `previous` (adding `marker` first if `previous`
@@ -937,7 +1101,12 @@ impl DuplexSession {
 /// Mirrors `StreamDecoder._update_previous`'s append+truncate math,
 /// extracted as a pure function (no cache/model access) so it can be unit
 /// tested directly — see `mod tests` below.
-fn append_and_truncate_previous(previous: &mut Vec<u32>, marker: &[u32], new_tokens: &[u32], max_content_tokens: usize) {
+fn append_and_truncate_previous(
+    previous: &mut Vec<u32>,
+    marker: &[u32],
+    new_tokens: &[u32],
+    max_content_tokens: usize,
+) {
     if new_tokens.is_empty() {
         // Matches Python's `if not new_tokens and not new_text: return` —
         // no content to fold in, `previous` is left completely untouched
@@ -1033,8 +1202,14 @@ mod tests {
     fn softmax_sums_to_one_and_preserves_order() {
         let probs = softmax(&[1.0, 2.0, 3.0]);
         let sum: f32 = probs.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-6, "softmax should sum to 1, got {sum}");
-        assert!(probs[2] > probs[1] && probs[1] > probs[0], "order should be preserved");
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "softmax should sum to 1, got {sum}"
+        );
+        assert!(
+            probs[2] > probs[1] && probs[1] > probs[0],
+            "order should be preserved"
+        );
     }
 
     #[test]
@@ -1042,7 +1217,10 @@ mod tests {
         let a = softmax(&[1.0, 2.0, 3.0]);
         let b = softmax(&[1001.0, 1002.0, 1003.0]);
         for (x, y) in a.iter().zip(&b) {
-            assert!((x - y).abs() < 1e-5, "softmax should be invariant to a constant shift");
+            assert!(
+                (x - y).abs() < 1e-5,
+                "softmax should be invariant to a constant shift"
+            );
         }
     }
 
@@ -1052,14 +1230,20 @@ mod tests {
         top_k_filter(&mut logits, 2);
         let finite = logits.iter().filter(|l| l.is_finite()).count();
         assert_eq!(finite, 2, "should keep exactly top_k finite entries");
-        assert!(logits[0].is_finite() && logits[2].is_finite(), "the two largest (5.0, 4.0) should survive");
+        assert!(
+            logits[0].is_finite() && logits[2].is_finite(),
+            "the two largest (5.0, 4.0) should survive"
+        );
     }
 
     #[test]
     fn top_k_filter_noop_when_k_covers_everything() {
         let mut logits = vec![1.0, 2.0, 3.0];
         top_k_filter(&mut logits, 10);
-        assert!(logits.iter().all(|l| l.is_finite()), "top_k >= len should be a no-op");
+        assert!(
+            logits.iter().all(|l| l.is_finite()),
+            "top_k >= len should be a no-op"
+        );
     }
 
     #[test]
@@ -1069,16 +1253,25 @@ mod tests {
         // — the top token is never removed regardless of top_p).
         let mut logits = vec![0.0, 0.0, 10.0, 0.0];
         top_p_filter(&mut logits, 0.01);
-        assert!(logits[2].is_finite(), "the top token must survive even a tiny top_p");
+        assert!(
+            logits[2].is_finite(),
+            "the top token must survive even a tiny top_p"
+        );
         let finite_count = logits.iter().filter(|l| l.is_finite()).count();
-        assert_eq!(finite_count, 1, "a tiny top_p with one dominant token should keep only that token");
+        assert_eq!(
+            finite_count, 1,
+            "a tiny top_p with one dominant token should keep only that token"
+        );
     }
 
     #[test]
     fn top_p_filter_noop_at_one() {
         let mut logits = vec![1.0, 2.0, 3.0];
         top_p_filter(&mut logits, 1.0);
-        assert!(logits.iter().all(|l| l.is_finite()), "top_p >= 1.0 should be a no-op");
+        assert!(
+            logits.iter().all(|l| l.is_finite()),
+            "top_p >= 1.0 should be a no-op"
+        );
     }
 
     #[test]
@@ -1086,7 +1279,11 @@ mod tests {
         // An all-mass-on-one-token distribution should always return that token.
         let probs = vec![0.0, 0.0, 1.0, 0.0];
         for seed in 0..50u64 {
-            assert_eq!(sample_categorical(&probs, seed), 2, "should always sample the only nonzero-probability token");
+            assert_eq!(
+                sample_categorical(&probs, seed),
+                2,
+                "should always sample the only nonzero-probability token"
+            );
         }
     }
 
@@ -1102,14 +1299,22 @@ mod tests {
     fn append_and_truncate_previous_adds_marker_on_first_content() {
         let mut previous = Vec::new();
         append_and_truncate_previous(&mut previous, &[100, 101], &[1, 2, 3], 10);
-        assert_eq!(previous, vec![100, 101, 1, 2, 3], "marker should be prepended on first content");
+        assert_eq!(
+            previous,
+            vec![100, 101, 1, 2, 3],
+            "marker should be prepended on first content"
+        );
     }
 
     #[test]
     fn append_and_truncate_previous_appends_without_marker_on_subsequent_calls() {
         let mut previous = vec![100, 101, 1, 2, 3];
         append_and_truncate_previous(&mut previous, &[100, 101], &[4, 5], 10);
-        assert_eq!(previous, vec![100, 101, 1, 2, 3, 4, 5], "marker must not be repeated on later appends");
+        assert_eq!(
+            previous,
+            vec![100, 101, 1, 2, 3, 4, 5],
+            "marker must not be repeated on later appends"
+        );
     }
 
     #[test]
@@ -1119,7 +1324,11 @@ mod tests {
         // -> the oldest 2 get dropped, keeping [3,4,5].
         let mut previous = vec![100, 101, 1, 2, 3];
         append_and_truncate_previous(&mut previous, &[100, 101], &[4, 5], 3);
-        assert_eq!(previous, vec![100, 101, 3, 4, 5], "should keep the marker and only the newest max_content_tokens");
+        assert_eq!(
+            previous,
+            vec![100, 101, 3, 4, 5],
+            "should keep the marker and only the newest max_content_tokens"
+        );
     }
 
     #[test]
@@ -1134,21 +1343,32 @@ mod tests {
     fn append_and_truncate_previous_noop_append_when_under_limit() {
         let mut previous = vec![100, 101, 1, 2];
         append_and_truncate_previous(&mut previous, &[100, 101], &[3], 10);
-        assert_eq!(previous, vec![100, 101, 1, 2, 3], "no truncation needed when under the limit");
+        assert_eq!(
+            previous,
+            vec![100, 101, 1, 2, 3],
+            "no truncation needed when under the limit"
+        );
     }
 
     #[test]
     fn append_and_truncate_previous_empty_new_tokens_is_noop_when_previous_empty() {
         let mut previous = Vec::new();
         append_and_truncate_previous(&mut previous, &[100, 101], &[], 10);
-        assert!(previous.is_empty(), "appending nothing to an empty previous should stay empty (no marker added)");
+        assert!(
+            previous.is_empty(),
+            "appending nothing to an empty previous should stay empty (no marker added)"
+        );
     }
 
     #[test]
     fn append_and_truncate_previous_empty_new_tokens_leaves_existing_content_untouched() {
         let mut previous = vec![100, 101, 1, 2, 3];
         append_and_truncate_previous(&mut previous, &[100, 101], &[], 10);
-        assert_eq!(previous, vec![100, 101, 1, 2, 3], "no new content means previous is left completely unchanged, matching Python's early return");
+        assert_eq!(
+            previous,
+            vec![100, 101, 1, 2, 3],
+            "no new content means previous is left completely unchanged, matching Python's early return"
+        );
     }
 
     #[test]
@@ -1161,6 +1381,9 @@ mod tests {
         for seed in 0..200u64 {
             seen.insert(sample_categorical(&probs, seed));
         }
-        assert!(seen.len() > 1, "varying the seed should explore more than one outcome for a uniform distribution");
+        assert!(
+            seen.len() > 1,
+            "varying the seed should explore more than one outcome for a uniform distribution"
+        );
     }
 }

@@ -1,5 +1,5 @@
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 use candle_core::{DType, Device, Tensor};
 use std::fs::File;
 use std::io::Read;
@@ -37,8 +37,8 @@ pub fn load_tensors(path: &str) -> Result<Vec<Tensor>> {
                 return Err(anyhow!(
                     "int32 not supported in candle, Unsupported dtype: {}",
                     dtype_name
-                ))
-            }
+                ));
+            },
             "int64" => DType::I64,
             "uint8" => DType::U8,
             "bool" => DType::U8, // 根据实际情况调整

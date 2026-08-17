@@ -7,14 +7,14 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 
 use crate::openai_api::TranscriptionResponse;
-use crate::{make_error, AppState};
+use crate::{AppState, make_error};
 
 // ─────────────────────────────────────────────────────────────
 //  ASR Request Channel Structure
@@ -65,7 +65,7 @@ pub async fn transcriptions(
                     &format!("Failed to parse multipart request: {e}"),
                 );
                 return (status, json).into_response();
-            }
+            },
         };
 
         let name = field.name().unwrap_or_default().to_string();
@@ -78,7 +78,7 @@ pub async fn transcriptions(
                         &format!("Failed to read 'file' field: {e}"),
                     );
                     return (status, json).into_response();
-                }
+                },
             },
             "language" => {
                 if let Ok(text) = field.text().await
@@ -86,7 +86,7 @@ pub async fn transcriptions(
                 {
                     language = Some(text);
                 }
-            }
+            },
             "temperature" => {
                 if let Ok(text) = field.text().await {
                     match text.parse::<f64>() {
@@ -94,32 +94,39 @@ pub async fn transcriptions(
                         Err(_) => {
                             let (status, json) = make_error(
                                 StatusCode::BAD_REQUEST,
-                                &format!("Invalid 'temperature' value: {text:?} is not a valid number."),
+                                &format!(
+                                    "Invalid 'temperature' value: {text:?} is not a valid number."
+                                ),
                             );
                             return (status, json).into_response();
-                        }
+                        },
                     }
                 }
-            }
+            },
             "response_format" => {
                 if let Ok(text) = field.text().await
                     && text != "json"
                 {
                     let (status, json) = make_error(
                         StatusCode::BAD_REQUEST,
-                        &format!("Unsupported 'response_format': {text:?}. Only 'json' is supported."),
+                        &format!(
+                            "Unsupported 'response_format': {text:?}. Only 'json' is supported."
+                        ),
                     );
                     return (status, json).into_response();
                 }
-            }
+            },
             _ => {
                 // Ignore other fields (e.g. "model").
-            }
+            },
         }
     }
 
     let Some(audio_bytes) = audio_bytes else {
-        let (status, json) = make_error(StatusCode::BAD_REQUEST, "Missing 'file' field with audio data.");
+        let (status, json) = make_error(
+            StatusCode::BAD_REQUEST,
+            "Missing 'file' field with audio data.",
+        );
         return (status, json).into_response();
     };
 
@@ -143,16 +150,18 @@ pub async fn transcriptions(
     match rx.await {
         Ok(Ok(text)) => Json(TranscriptionResponse { text }).into_response(),
         Ok(Err(err)) => {
-            let (status, json) =
-                make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Transcription failed: {err}"));
+            let (status, json) = make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Transcription failed: {err}"),
+            );
             (status, json).into_response()
-        }
+        },
         Err(_) => {
             let (status, json) = make_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ASR engine did not respond.",
             );
             (status, json).into_response()
-        }
+        },
     }
 }

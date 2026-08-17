@@ -15,7 +15,7 @@
 use std::io::{Read, Seek};
 
 use candle_core::{DType, Result, Tensor};
-use candle_nn::{layer_norm, LayerNorm, Linear, Module, VarBuilder};
+use candle_nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm};
 
 use crate::models::hunyuan_dense::modeling::Gguf;
 
@@ -56,7 +56,11 @@ impl CrossAttention {
     /// instead; concatenated back into the packed layout this struct's
     /// `proj()` expects, so nothing else about `CrossAttention` needs to
     /// change for the GGUF path.
-    fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, embed_dim: usize, num_heads: usize) -> Result<Self> {
+    fn from_gguf<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        embed_dim: usize,
+        num_heads: usize,
+    ) -> Result<Self> {
         let q_w = gg.dequant_tensor("resampler.attn.q.weight")?;
         let k_w = gg.dequant_tensor("resampler.attn.k.weight")?;
         let v_w = gg.dequant_tensor("resampler.attn.v.weight")?;
@@ -65,14 +69,32 @@ impl CrossAttention {
         let k_b = gg.dequant_tensor("resampler.attn.k.bias")?.flatten_all()?;
         let v_b = gg.dequant_tensor("resampler.attn.v.bias")?.flatten_all()?;
         let in_proj_bias = Tensor::cat(&[&q_b, &k_b, &v_b], 0)?;
-        let out_proj = Linear::new(gg.dequant_tensor("resampler.attn.out.weight")?, Some(gg.dequant_tensor("resampler.attn.out.bias")?.flatten_all()?));
+        let out_proj = Linear::new(
+            gg.dequant_tensor("resampler.attn.out.weight")?,
+            Some(
+                gg.dequant_tensor("resampler.attn.out.bias")?
+                    .flatten_all()?,
+            ),
+        );
         let head_dim = embed_dim / num_heads;
-        Ok(Self { in_proj_weight, in_proj_bias, out_proj, num_heads, head_dim, embed_dim, scale: 1.0 / (head_dim as f64).sqrt() })
+        Ok(Self {
+            in_proj_weight,
+            in_proj_bias,
+            out_proj,
+            num_heads,
+            head_dim,
+            embed_dim,
+            scale: 1.0 / (head_dim as f64).sqrt(),
+        })
     }
 
     fn proj(&self, xs: &Tensor, third: usize) -> Result<Tensor> {
-        let w = self.in_proj_weight.narrow(0, third * self.embed_dim, self.embed_dim)?;
-        let b = self.in_proj_bias.narrow(0, third * self.embed_dim, self.embed_dim)?;
+        let w = self
+            .in_proj_weight
+            .narrow(0, third * self.embed_dim, self.embed_dim)?;
+        let b = self
+            .in_proj_bias
+            .narrow(0, third * self.embed_dim, self.embed_dim)?;
         Linear::new(w, Some(b)).forward(xs)
     }
 
@@ -82,7 +104,13 @@ impl CrossAttention {
     /// `key_padding_mask`: `[batch, kv_len]`, `true` at padded (masked-out) positions.
     ///
     /// Returns `[q_len, batch, embed_dim]`.
-    fn forward(&self, query: &Tensor, key: &Tensor, value: &Tensor, key_padding_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(
+        &self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        key_padding_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let (q_len, batch, _) = query.dims3()?;
         let (kv_len, _, _) = key.dims3()?;
 
@@ -114,11 +142,12 @@ impl CrossAttention {
                     .reshape((batch * self.num_heads, 1, kv_len))?
                     .to_dtype(attn_weights.dtype())?;
                 attn_weights.broadcast_add(&mask)?
-            }
+            },
             None => attn_weights,
         };
 
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?.to_dtype(q.dtype())?;
+        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?
+            .to_dtype(q.dtype())?;
         let attn_output = attn_weights.matmul(&v)?; // [B*heads, q_len, head_dim]
 
         let attn_output = attn_output
@@ -138,7 +167,12 @@ impl CrossAttention {
 /// half the **h** coordinate — `np.meshgrid(grid_w, grid_h)` puts the
 /// w-index in `grid[0]` and the code feeds `grid[0]` into what it calls
 /// `emb_h`.
-fn sincos_pos_embed_2d(embed_dim: usize, h: usize, w: usize, device: &candle_core::Device) -> Result<Tensor> {
+fn sincos_pos_embed_2d(
+    embed_dim: usize,
+    h: usize,
+    w: usize,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
     let quarter = embed_dim / 4;
     let mut omega = vec![0f32; quarter];
     for (i, o) in omega.iter_mut().enumerate() {
@@ -180,10 +214,20 @@ pub struct Resampler {
 }
 
 impl Resampler {
-    pub fn new(num_queries: usize, embed_dim: usize, num_heads: usize, kv_dim: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        num_queries: usize,
+        embed_dim: usize,
+        num_heads: usize,
+        kv_dim: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let query = vb.get((num_queries, embed_dim), "query")?;
         let kv_proj = if kv_dim != embed_dim {
-            Some(candle_nn::linear_no_bias(kv_dim, embed_dim, vb.pp("kv_proj"))?)
+            Some(candle_nn::linear_no_bias(
+                kv_dim,
+                embed_dim,
+                vb.pp("kv_proj"),
+            )?)
         } else {
             None
         };
@@ -192,7 +236,16 @@ impl Resampler {
         let ln_kv = layer_norm(embed_dim, 1e-6, vb.pp("ln_kv"))?;
         let ln_post = layer_norm(embed_dim, 1e-6, vb.pp("ln_post"))?;
         let proj = vb.get((embed_dim, embed_dim), "proj")?;
-        Ok(Self { query, kv_proj, attn, ln_q, ln_kv, ln_post, proj, embed_dim })
+        Ok(Self {
+            query,
+            kv_proj,
+            attn,
+            ln_q,
+            ln_kv,
+            ln_post,
+            proj,
+            embed_dim,
+        })
     }
 
     /// GGUF equivalent of [`Self::new`] — loads from the same standalone
@@ -222,15 +275,48 @@ impl Resampler {
     ///
     /// Returns an error if a required tensor is missing or has an
     /// unexpected shape.
-    pub fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, num_heads: usize, kv_dim: usize, embed_dim: usize) -> Result<Self> {
+    pub fn from_gguf<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        num_heads: usize,
+        kv_dim: usize,
+        embed_dim: usize,
+    ) -> Result<Self> {
         let query = gg.dequant_tensor("resampler.query")?;
-        let kv_proj = if kv_dim != embed_dim { Some(Linear::new(gg.dequant_tensor("resampler.kv.weight")?, None)) } else { None };
+        let kv_proj = if kv_dim != embed_dim {
+            Some(Linear::new(gg.dequant_tensor("resampler.kv.weight")?, None))
+        } else {
+            None
+        };
         let attn = CrossAttention::from_gguf(gg, embed_dim, num_heads)?;
-        let ln_q = LayerNorm::new(gg.dequant_tensor("resampler.ln_q.weight")?, gg.dequant_tensor("resampler.ln_q.bias")?, 1e-6);
-        let ln_kv = LayerNorm::new(gg.dequant_tensor("resampler.ln_kv.weight")?, gg.dequant_tensor("resampler.ln_kv.bias")?, 1e-6);
-        let ln_post = LayerNorm::new(gg.dequant_tensor("resampler.ln_post.weight")?, gg.dequant_tensor("resampler.ln_post.bias")?, 1e-6);
-        let proj = gg.dequant_tensor("resampler.proj.weight")?.t()?.contiguous()?;
-        Ok(Self { query, kv_proj, attn, ln_q, ln_kv, ln_post, proj, embed_dim })
+        let ln_q = LayerNorm::new(
+            gg.dequant_tensor("resampler.ln_q.weight")?,
+            gg.dequant_tensor("resampler.ln_q.bias")?,
+            1e-6,
+        );
+        let ln_kv = LayerNorm::new(
+            gg.dequant_tensor("resampler.ln_kv.weight")?,
+            gg.dequant_tensor("resampler.ln_kv.bias")?,
+            1e-6,
+        );
+        let ln_post = LayerNorm::new(
+            gg.dequant_tensor("resampler.ln_post.weight")?,
+            gg.dequant_tensor("resampler.ln_post.bias")?,
+            1e-6,
+        );
+        let proj = gg
+            .dequant_tensor("resampler.proj.weight")?
+            .t()?
+            .contiguous()?;
+        Ok(Self {
+            query,
+            kv_proj,
+            attn,
+            ln_q,
+            ln_kv,
+            ln_post,
+            proj,
+            embed_dim,
+        })
     }
 
     /// `x`: `[batch, max_patches, kv_dim]` (padded vision-tower output).
@@ -257,7 +343,9 @@ impl Resampler {
             let dst_start = b * max_patches * self.embed_dim;
             pos_embed_data[dst_start..dst_start + h * w * self.embed_dim].copy_from_slice(&pe);
         }
-        let pos_embed = Tensor::from_vec(pos_embed_data, (batch, max_patches, self.embed_dim), device)?.to_dtype(dtype)?;
+        let pos_embed =
+            Tensor::from_vec(pos_embed_data, (batch, max_patches, self.embed_dim), device)?
+                .to_dtype(dtype)?;
 
         let key_padding_mask = if tgt_sizes.iter().any(|&(h, w)| h * w != max_patches) {
             let mut mask_data = vec![0u8; batch * max_patches];
@@ -276,9 +364,14 @@ impl Resampler {
         let kv_with_pos = (&kv + &pos_embed.transpose(0, 1)?.contiguous()?)?;
 
         let q = self.ln_q.forward(&self.query)?; // [num_queries, embed_dim]
-        let q = q.unsqueeze(1)?.broadcast_as((q.dim(0)?, batch, self.embed_dim))?.contiguous()?;
+        let q = q
+            .unsqueeze(1)?
+            .broadcast_as((q.dim(0)?, batch, self.embed_dim))?
+            .contiguous()?;
 
-        let out = self.attn.forward(&q, &kv_with_pos, &kv, key_padding_mask.as_ref())?; // [num_queries, batch, embed_dim]
+        let out = self
+            .attn
+            .forward(&q, &kv_with_pos, &kv, key_padding_mask.as_ref())?; // [num_queries, batch, embed_dim]
         let out = out.transpose(0, 1)?.contiguous()?; // [batch, num_queries, embed_dim]
 
         let out = self.ln_post.forward(&out)?;

@@ -50,7 +50,9 @@ fn main() -> anyhow::Result<()> {
     };
 
     if matches!(device, Device::Cpu) {
-        eprintln!("WARNING: Voxtral TTS on CPU will be extremely slow (14 transformer passes per frame). GPU strongly recommended.");
+        eprintln!(
+            "WARNING: Voxtral TTS on CPU will be extremely slow (14 transformer passes per frame). GPU strongly recommended."
+        );
     }
 
     println!("Loading Voxtral TTS from: {model_path}");

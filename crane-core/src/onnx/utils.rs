@@ -15,8 +15,11 @@ use std::collections::{HashMap, HashSet};
 // entries, matching how the caller's `remaining_uses` counts every
 // occurrence individually.
 pub(crate) fn captured_names(subgraph: &GraphProto) -> Vec<&str> {
-    let locally_produced: HashSet<&str> =
-        subgraph.node.iter().flat_map(|node| node.output.iter().map(String::as_str)).collect();
+    let locally_produced: HashSet<&str> = subgraph
+        .node
+        .iter()
+        .flat_map(|node| node.output.iter().map(String::as_str))
+        .collect();
     subgraph
         .node
         .iter()
@@ -37,7 +40,9 @@ pub(crate) fn collect_all_captures<'a>(subgraph: &'a GraphProto, result: &mut Ve
     result.extend(captured_names(subgraph));
     for node in &subgraph.node {
         for attribute in &node.attribute {
-            let Some(nested) = &attribute.g else { continue };
+            let Some(nested) = &attribute.g else {
+                continue;
+            };
             collect_all_captures(nested, result);
         }
     }
@@ -60,7 +65,9 @@ pub(crate) fn count_nested_subgraph_captures<'a>(
 ) {
     for node in &graph.node {
         for attribute in &node.attribute {
-            let Some(subgraph) = &attribute.g else { continue };
+            let Some(subgraph) = &attribute.g else {
+                continue;
+            };
             let mut captures = Vec::new();
             collect_all_captures(subgraph, &mut captures);
             for name in captures {
@@ -119,15 +126,24 @@ mod tests {
                 output: vec!["branch_out".to_string()],
                 ..Default::default()
             }],
-            output: vec![ValueInfoProto { name: "branch_out".to_string(), ..Default::default() }],
+            output: vec![ValueInfoProto {
+                name: "branch_out".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
         let model = ModelProto {
             graph: Some(GraphProto {
                 input: vec![
-                    ValueInfoProto { name: "x".to_string(), ..Default::default() },
-                    ValueInfoProto { name: "cond".to_string(), ..Default::default() },
+                    ValueInfoProto {
+                        name: "x".to_string(),
+                        ..Default::default()
+                    },
+                    ValueInfoProto {
+                        name: "cond".to_string(),
+                        ..Default::default()
+                    },
                 ],
                 node: vec![
                     NodeProto {
@@ -152,8 +168,14 @@ mod tests {
                     },
                 ],
                 output: vec![
-                    ValueInfoProto { name: "if_out".to_string(), ..Default::default() },
-                    ValueInfoProto { name: "y2".to_string(), ..Default::default() },
+                    ValueInfoProto {
+                        name: "if_out".to_string(),
+                        ..Default::default()
+                    },
+                    ValueInfoProto {
+                        name: "y2".to_string(),
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }),
@@ -191,15 +213,24 @@ mod tests {
                 output: vec!["branch_out".to_string()],
                 ..Default::default()
             }],
-            output: vec![ValueInfoProto { name: "branch_out".to_string(), ..Default::default() }],
+            output: vec![ValueInfoProto {
+                name: "branch_out".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
         let model = ModelProto {
             graph: Some(GraphProto {
                 input: vec![
-                    ValueInfoProto { name: "raw".to_string(), ..Default::default() },
-                    ValueInfoProto { name: "cond".to_string(), ..Default::default() },
+                    ValueInfoProto {
+                        name: "raw".to_string(),
+                        ..Default::default()
+                    },
+                    ValueInfoProto {
+                        name: "cond".to_string(),
+                        ..Default::default()
+                    },
                 ],
                 node: vec![
                     NodeProto {
@@ -231,7 +262,10 @@ mod tests {
                         ..Default::default()
                     },
                 ],
-                output: vec![ValueInfoProto { name: "if_out".to_string(), ..Default::default() }],
+                output: vec![ValueInfoProto {
+                    name: "if_out".to_string(),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }),
             ..Default::default()
@@ -267,7 +301,10 @@ mod tests {
                 output: vec!["branch_out".to_string()],
                 ..Default::default()
             }],
-            output: vec![ValueInfoProto { name: "branch_out".to_string(), ..Default::default() }],
+            output: vec![ValueInfoProto {
+                name: "branch_out".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let else_branch = GraphProto {
@@ -277,14 +314,23 @@ mod tests {
                 output: vec!["branch_out".to_string()],
                 ..Default::default()
             }],
-            output: vec![ValueInfoProto { name: "branch_out".to_string(), ..Default::default() }],
+            output: vec![ValueInfoProto {
+                name: "branch_out".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
         let graph = GraphProto {
             input: vec![
-                ValueInfoProto { name: "raw".to_string(), ..Default::default() },
-                ValueInfoProto { name: "cond".to_string(), ..Default::default() },
+                ValueInfoProto {
+                    name: "raw".to_string(),
+                    ..Default::default()
+                },
+                ValueInfoProto {
+                    name: "cond".to_string(),
+                    ..Default::default()
+                },
             ],
             node: vec![
                 NodeProto {
@@ -323,12 +369,18 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            output: vec![ValueInfoProto { name: "if_out".to_string(), ..Default::default() }],
+            output: vec![ValueInfoProto {
+                name: "if_out".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
         let mut values: HashMap<String, Value> = HashMap::new();
-        values.insert("raw".to_string(), Value::new(&[1f32, 2., 3.], &Device::Cpu)?);
+        values.insert(
+            "raw".to_string(),
+            Value::new(&[1f32, 2., 3.], &Device::Cpu)?,
+        );
         values.insert("cond".to_string(), Value::new(&[1u8], &Device::Cpu)?);
         let outputs = simple_eval_(&graph, &mut values)?;
 
@@ -385,9 +437,18 @@ mod tests {
 
         let graph = GraphProto {
             input: vec![
-                ValueInfoProto { name: "raw".to_string(), ..Default::default() },
-                ValueInfoProto { name: "cond".to_string(), ..Default::default() },
-                ValueInfoProto { name: "inner_cond".to_string(), ..Default::default() },
+                ValueInfoProto {
+                    name: "raw".to_string(),
+                    ..Default::default()
+                },
+                ValueInfoProto {
+                    name: "cond".to_string(),
+                    ..Default::default()
+                },
+                ValueInfoProto {
+                    name: "inner_cond".to_string(),
+                    ..Default::default()
+                },
             ],
             node: vec![
                 NodeProto {
@@ -416,12 +477,18 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            output: vec![ValueInfoProto { name: "if_out".to_string(), ..Default::default() }],
+            output: vec![ValueInfoProto {
+                name: "if_out".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
         let mut values: HashMap<String, Value> = HashMap::new();
-        values.insert("raw".to_string(), Value::new(&[1f32, 2., 3.], &Device::Cpu)?);
+        values.insert(
+            "raw".to_string(),
+            Value::new(&[1f32, 2., 3.], &Device::Cpu)?,
+        );
         values.insert("cond".to_string(), Value::new(&[1u8], &Device::Cpu)?);
         values.insert("inner_cond".to_string(), Value::new(&[1u8], &Device::Cpu)?);
         let outputs = simple_eval_(&graph, &mut values)?;

@@ -1,9 +1,9 @@
-use candle_core::{Result, Tensor, D};
+use candle_core::{D, Result, Tensor};
 use candle_nn::{Activation, Module, VarBuilder};
 
+use crate::models::with_tracing::{Linear, linear_no_bias};
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::utils::DeviceExt;
-use crate::models::with_tracing::{linear_no_bias, Linear};
 
 /// `SwiGLU` feed-forward network with merged gate/up projection.
 ///
@@ -69,8 +69,7 @@ impl Module for SwiGluFfn {
         if matches!(self.activation, Activation::Silu)
             && (gu.device().is_cuda() || gu.device().is_rocm())
         {
-            let activated =
-                crate::ops::fused_silu_mul(&gu.contiguous()?, self.intermediate_size)?;
+            let activated = crate::ops::fused_silu_mul(&gu.contiguous()?, self.intermediate_size)?;
             return self.down_proj.forward(&activated);
         }
 
@@ -123,7 +122,13 @@ mod tests {
 
     fn identity_vb(hidden: usize) -> candle_nn::VarBuilder<'static> {
         let eye: Vec<f32> = (0..hidden * hidden)
-            .map(|idx| if idx / hidden == idx % hidden { 1.0_f32 } else { 0.0 })
+            .map(|idx| {
+                if idx / hidden == idx % hidden {
+                    1.0_f32
+                } else {
+                    0.0
+                }
+            })
             .collect();
         make_vb(hidden, hidden, eye.clone(), eye.clone(), eye)
     }
@@ -205,9 +210,10 @@ mod tests {
 
         let vb_silu = make_vb(hidden, intermediate, gate.clone(), up.clone(), down.clone());
         let vb_gelu = make_vb(hidden, intermediate, gate, up, down);
-        let ffn_silu = SwiGluFfn::new(hidden, intermediate, Activation::Silu, vb_silu).expect("silu");
-        let ffn_gelu =
-            SwiGluFfn::new(hidden, intermediate, Activation::GeluPytorchTanh, vb_gelu).expect("gelu");
+        let ffn_silu =
+            SwiGluFfn::new(hidden, intermediate, Activation::Silu, vb_silu).expect("silu");
+        let ffn_gelu = SwiGluFfn::new(hidden, intermediate, Activation::GeluPytorchTanh, vb_gelu)
+            .expect("gelu");
 
         let x = Tensor::ones((1, hidden), DType::F32, device).expect("ones");
         let out_silu = ffn_silu.forward(&x).expect("silu forward");
@@ -252,16 +258,17 @@ mod tests {
             .reshape((1, 2))
             .expect("reshape");
         let y = ffn.forward(&x).expect("forward");
-        let got = y.squeeze(0).expect("squeeze").to_vec1::<f32>().expect("to_vec1");
+        let got = y
+            .squeeze(0)
+            .expect("squeeze")
+            .to_vec1::<f32>()
+            .expect("to_vec1");
 
         let silu = |v: f32| v / (1.0 + (-v).exp());
         let expected = [silu(1.0_f32) * 2.0, silu(0.5_f32) * 1.0];
 
         for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (g - e).abs() < 1e-5,
-                "output[{i}]: got {g}, expected {e}"
-            );
+            assert!((g - e).abs() < 1e-5, "output[{i}]: got {g}, expected {e}");
         }
     }
 
@@ -298,7 +305,10 @@ mod tests {
                 .expect("max_all")
                 .to_scalar()
                 .expect("scalar");
-            assert!(diff < 1e-6, "batch row {b} differs from single: max_diff={diff}");
+            assert!(
+                diff < 1e-6,
+                "batch row {b} differs from single: max_diff={diff}"
+            );
         }
     }
 }

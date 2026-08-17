@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
-use crane_core::models::qwen3_5::processor::load_preprocessor_config;
 use crane_core::models::qwen3_5::Qwen3_5VLModel;
+use crane_core::models::qwen3_5::processor::load_preprocessor_config;
 
 const TEST_IMAGE: &str = "/tmp/test_image.png";
 
@@ -44,8 +44,7 @@ fn main() -> Result<()> {
     );
 
     let merge = pp.merge_size;
-    let n_image_tokens =
-        ((h / merge as u32) * (w / merge as u32)) as usize;
+    let n_image_tokens = ((h / merge as u32) * (w / merge as u32)) as usize;
 
     let img_token_str = "<|image_pad|>";
     let img_pad_id = model

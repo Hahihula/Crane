@@ -161,13 +161,13 @@ impl ChatTemplateProcessor for HunyuanChatTemplate {
                 "user" => {
                     result.push_str(USER);
                     result.push_str(&msg.text_content());
-                }
+                },
                 "assistant" => {
                     result.push_str(ASSISTANT);
                     result.push_str(&msg.text_content());
                     result.push_str(EOS);
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 

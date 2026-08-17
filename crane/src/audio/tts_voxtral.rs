@@ -22,7 +22,11 @@ const VOICE_LANGUAGE_PREFIXES: &[&str] = &["ar", "de", "es", "fr", "hi", "it", "
 /// followed by `_` would be misclassified.
 fn voice_name_languages(name: &str) -> Vec<String> {
     let prefix = name.split_once('_').map_or(name, |(prefix, _)| prefix);
-    let language = if VOICE_LANGUAGE_PREFIXES.contains(&prefix) { prefix } else { "en" };
+    let language = if VOICE_LANGUAGE_PREFIXES.contains(&prefix) {
+        prefix
+    } else {
+        "en"
+    };
     vec![language.to_string()]
 }
 
@@ -45,7 +49,10 @@ impl Tts for Model {
     fn voices(&self) -> Vec<VoiceInfo> {
         self.available_voices()
             .into_iter()
-            .map(|name| VoiceInfo { name: name.to_string(), languages: voice_name_languages(name) })
+            .map(|name| VoiceInfo {
+                name: name.to_string(),
+                languages: voice_name_languages(name),
+            })
             .collect()
     }
 

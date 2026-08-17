@@ -6,19 +6,19 @@ use std::io::Write;
 use anyhow::{Context, Error as E, Result};
 use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device, Module, Tensor};
-use candle_nn::{embedding, Linear, VarBuilder};
+use candle_nn::{Linear, VarBuilder, embedding};
 
+use crate::ops::linear::{LinearLayer, parse_ggml_dtype, quantize_linear};
 use crate::utils::DeviceExt;
-use crate::ops::linear::{parse_ggml_dtype, quantize_linear, LinearLayer};
 // TODO(candle-transformers-removal): Generation helpers only; see CANDLE_TRANSFORMERS.md.
 use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
-use super::config::{load_config, Config, HiddenAct, LayerType, RopeParameters, TextConfig};
+use super::config::{Config, HiddenAct, LayerType, RopeParameters, TextConfig, load_config};
 use super::kv_cache::{KvCache, KvCacheKind};
 use super::modeling::{DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm, RopeSlice};
-use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
+use crate::generation::based::ModelForCausalLM;
 use crate::models::hunyuan_dense::modeling::Gguf;
 use crate::models::modules::embedding::EmbeddingLayer;
 use crate::utils::token_output_stream::TokenOutputStream;
@@ -84,7 +84,12 @@ impl Qwen3_5TextModel {
         let layer_types = text_cfg.layer_types();
         let mut layers = Vec::with_capacity(text_cfg.num_hidden_layers);
         for (idx, &layer_type) in layer_types.iter().enumerate() {
-            layers.push(DecoderLayer::load(&text_cfg, layer_type, vb_lm.pp("layers").pp(idx), quant)?);
+            layers.push(DecoderLayer::load(
+                &text_cfg,
+                layer_type,
+                vb_lm.pp("layers").pp(idx),
+                quant,
+            )?);
         }
 
         let norm = Qwen35RmsNorm::load(
@@ -103,7 +108,8 @@ impl Qwen3_5TextModel {
         } else {
             let shape = (text_cfg.vocab_size, text_cfg.hidden_size);
             let mut tied = false;
-            let w = vb.get(shape, "lm_head.weight")
+            let w = vb
+                .get(shape, "lm_head.weight")
                 .or_else(|_| vb_lm.get(shape, "lm_head.weight"))
                 .or_else(|_| {
                     eprintln!(
@@ -286,13 +292,13 @@ impl Qwen3_5TextModel {
 
         let mut layers = Vec::with_capacity(num_hidden_layers);
         for (idx, &layer_type) in layer_types.iter().enumerate() {
-            layers.push(DecoderLayer::from_gguf(&text_cfg, layer_type, &mut gg, idx)?);
+            layers.push(DecoderLayer::from_gguf(
+                &text_cfg, layer_type, &mut gg, idx,
+            )?);
         }
 
-        let norm = Qwen35RmsNorm::from_folded(
-            gg.dequant_tensor("output_norm.weight")?,
-            rms_norm_eps,
-        );
+        let norm =
+            Qwen35RmsNorm::from_folded(gg.dequant_tensor("output_norm.weight")?, rms_norm_eps);
         let lm_head = if tie_word_embeddings {
             // Tied: the output projection is this very table, so it reuses the
             // same buffer rather than materializing a dense copy.
@@ -392,7 +398,7 @@ impl Qwen3_5TextModel {
         start_pos: usize,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        use crate::ops::prof::{timed, Span};
+        use crate::ops::prof::{Span, timed};
 
         let seq_len = input_ids.dim(1)?;
         let xs = timed(Span::Embed, || self.embed_tokens.forward(input_ids))?;
@@ -470,14 +476,20 @@ impl Qwen3_5TextModel {
             let attn_slot = self.attn_caches[i].as_mut();
             xs = layer.forward(&xs, rope, attention_mask, gdn_slot, attn_slot)?;
             if debug {
-                let last = xs.narrow(1, xs.dim(1)? - 1, 1)?.flatten_all()?.to_dtype(DType::F32)?;
+                let last = xs
+                    .narrow(1, xs.dim(1)? - 1, 1)?
+                    .flatten_all()?
+                    .to_dtype(DType::F32)?;
                 let v = last.to_vec1::<f32>()?;
                 let n = v.len() as f32;
                 let mean = v.iter().sum::<f32>() / n;
                 let min = v.iter().cloned().fold(f32::INFINITY, f32::min);
                 let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let nonfinite = v.iter().filter(|x| !x.is_finite()).count();
-                eprintln!("[qwen3_5:debug] layer[{i}]: min={min:.4} max={max:.4} mean={mean:.4} non_finite={nonfinite}/{}", v.len());
+                eprintln!(
+                    "[qwen3_5:debug] layer[{i}]: min={min:.4} max={max:.4} mean={mean:.4} non_finite={nonfinite}/{}",
+                    v.len()
+                );
             }
         }
         Ok(xs)
@@ -516,7 +528,9 @@ fn build_layer_caches(
     let mut attn_caches = Vec::with_capacity(layers.len());
     for layer in layers {
         if layer.is_linear() {
-            gdn_caches.push(Some(crate::ops::gdn::GdnLayerCache::new(cfg, dtype, device)?));
+            gdn_caches.push(Some(crate::ops::gdn::GdnLayerCache::new(
+                cfg, dtype, device,
+            )?));
             attn_caches.push(None);
         } else {
             gdn_caches.push(None);
@@ -532,7 +546,10 @@ fn build_layer_caches(
 /// metadata field can only hold one id, so a GGUF-only export (no sidecar
 /// `generation_config.json`) silently drops whichever canonical stop token the
 /// exporter didn't pick.
-fn merge_canonical_eos_ids(eos_token_ids: &mut Vec<u32>, vocab: &std::collections::HashMap<String, u32>) {
+fn merge_canonical_eos_ids(
+    eos_token_ids: &mut Vec<u32>,
+    vocab: &std::collections::HashMap<String, u32>,
+) {
     for name in ["<|im_end|>", "<|endoftext|>"] {
         if let Some(&id) = vocab.get(name)
             && !eos_token_ids.contains(&id)
@@ -573,7 +590,6 @@ fn read_eos_token_ids(model_path: &str) -> Vec<u32> {
     }
     Vec::new()
 }
-
 
 /// Format of model weights on disk. `Auto` picks GGUF when the path is a
 /// `.gguf` file, safetensors otherwise.
@@ -643,8 +659,12 @@ impl Model {
                     .extension()
                     .map(|e| e.eq_ignore_ascii_case("gguf"))
                     .unwrap_or(false);
-                if is_gguf { ModelFormat::Gguf } else { ModelFormat::Safetensors }
-            }
+                if is_gguf {
+                    ModelFormat::Gguf
+                } else {
+                    ModelFormat::Safetensors
+                }
+            },
             other => other,
         };
         match format {
@@ -656,7 +676,7 @@ impl Model {
                     );
                 }
                 Self::from_gguf_file(model_path, device)
-            }
+            },
             ModelFormat::Auto => unreachable!("Auto is resolved above"),
         }
     }
@@ -685,8 +705,9 @@ impl Model {
         // Prefer the embedded tokenizer; fall back to a sibling tokenizer.json
         // only when the GGUF lacks the necessary metadata.
         let tokenizer = if gguf_has_embedded_tokenizer(&ct) {
-            build_tokenizer_from_gguf_path(gguf_path)?
-                .ok_or_else(|| anyhow::anyhow!("GGUF reports embedded tokenizer but build returned None"))?
+            build_tokenizer_from_gguf_path(gguf_path)?.ok_or_else(|| {
+                anyhow::anyhow!("GGUF reports embedded tokenizer but build returned None")
+            })?
         } else {
             let tokenizer_path = parent.join("tokenizer.json");
             if !tokenizer_path.exists() {
@@ -907,9 +928,7 @@ impl ModelForCausalLM for Model {
             }
         }
 
-        if !finalized
-            && let Some(ref mut s) = streamer
-        {
+        if !finalized && let Some(ref mut s) = streamer {
             s.finalize()?;
         }
 
@@ -935,10 +954,12 @@ mod tests {
     // documented multi-id EOS set.
     fn merge_adds_missing_canonical_id() {
         let mut eos_token_ids = vec![248_046];
-        let vocab: HashMap<String, u32> =
-            [("<|im_end|>".to_string(), 248_046), ("<|endoftext|>".to_string(), 248_044)]
-                .into_iter()
-                .collect();
+        let vocab: HashMap<String, u32> = [
+            ("<|im_end|>".to_string(), 248_046),
+            ("<|endoftext|>".to_string(), 248_044),
+        ]
+        .into_iter()
+        .collect();
         merge_canonical_eos_ids(&mut eos_token_ids, &vocab);
         assert_eq!(eos_token_ids, vec![248_046, 248_044]);
     }
@@ -948,10 +969,12 @@ mod tests {
     // must not be duplicated.
     fn merge_does_not_duplicate_existing_id() {
         let mut eos_token_ids = vec![248_046, 248_044];
-        let vocab: HashMap<String, u32> =
-            [("<|im_end|>".to_string(), 248_046), ("<|endoftext|>".to_string(), 248_044)]
-                .into_iter()
-                .collect();
+        let vocab: HashMap<String, u32> = [
+            ("<|im_end|>".to_string(), 248_046),
+            ("<|endoftext|>".to_string(), 248_044),
+        ]
+        .into_iter()
+        .collect();
         merge_canonical_eos_ids(&mut eos_token_ids, &vocab);
         assert_eq!(eos_token_ids, vec![248_046, 248_044]);
     }

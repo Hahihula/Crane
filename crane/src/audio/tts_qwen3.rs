@@ -6,7 +6,7 @@ use crane_core::generation::SpeechOptions;
 use crane_core::models::qwen3_tts::Model;
 use crane_core::models::qwen3_tts::modeling::TalkerConfig;
 
-use super::pcm::{load_wav_f32, AudioInfo};
+use super::pcm::{AudioInfo, load_wav_f32};
 use super::tts::{Tts, TtsStream, VoiceInfo};
 
 /// Maps a `codec_language_id` language name to its ISO 639-1 code.
@@ -59,8 +59,11 @@ fn language_code_to_name(code: &str) -> String {
 /// `spk_is_dialect`'s values, e.g. `"beijing_dialect"`) rather than a
 /// standalone language.
 fn talker_languages(cfg: &TalkerConfig) -> Vec<String> {
-    let dialects: std::collections::HashSet<&str> =
-        cfg.spk_is_dialect.values().filter_map(serde_json::Value::as_str).collect();
+    let dialects: std::collections::HashSet<&str> = cfg
+        .spk_is_dialect
+        .values()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
     let mut languages: Vec<String> = cfg
         .codec_language_id
         .keys()
@@ -88,9 +91,12 @@ impl Tts for Model {
                     .talker_config
                     .spk_id
                     .keys()
-                    .map(|name| VoiceInfo { name: name.clone(), languages: languages.clone() })
+                    .map(|name| VoiceInfo {
+                        name: name.clone(),
+                        languages: languages.clone(),
+                    })
                     .collect()
-            }
+            },
             _ => vec![],
         }
     }
@@ -147,9 +153,9 @@ impl Tts for Model {
 
 #[cfg(test)]
 mod tests {
+    use super::TalkerConfig;
     use super::language_code_to_name;
     use super::talker_languages;
-    use super::TalkerConfig;
 
     #[test]
     fn language_code_to_name_known_codes() {
@@ -194,10 +200,7 @@ mod tests {
 
     #[test]
     fn talker_languages_excludes_auto_and_sorts() {
-        let cfg = talker_config(
-            r#"{"english": 0, "auto": 1, "chinese": 2}"#,
-            "{}",
-        );
+        let cfg = talker_config(r#"{"english": 0, "auto": 1, "chinese": 2}"#, "{}");
         assert_eq!(talker_languages(&cfg), vec!["en", "zh"]);
     }
 

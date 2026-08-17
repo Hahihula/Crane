@@ -5,7 +5,7 @@
 //! dispatch so callers just pass a `Tensor`.
 
 use candle_core::{DType, Result, Tensor};
-use candle_nn::attention::{flash_attn, AttnMask};
+use candle_nn::attention::{AttnMask, flash_attn};
 
 /// Dispatch `flash_attn` to the monomorphised instantiation matching `q`'s
 /// dtype.
@@ -26,7 +26,13 @@ use candle_nn::attention::{flash_attn, AttnMask};
 /// tensor regardless of the input dtype. Callers must cast the output back
 /// to the model's working dtype before feeding it into layers whose weights
 /// are in that dtype.
-pub fn dispatch_flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, mask: AttnMask) -> Result<Tensor> {
+pub fn dispatch_flash_attn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    mask: AttnMask,
+) -> Result<Tensor> {
     match q.dtype() {
         DType::F32 => flash_attn::<f32>(q, k, v, scale, mask, None, None),
         DType::F16 => flash_attn::<half::f16>(q, k, v, scale, mask, None, None),

@@ -73,11 +73,7 @@ pub fn causal_conv1d(
 ///   `kernel`-wide slice, so it is materialized once instead of twice.
 ///
 /// Verified against the general path by `decode_matches_general_path`.
-fn decode_conv1d(
-    x: &Tensor,
-    conv1d_weight: &Tensor,
-    cache: &mut GdnLayerCache,
-) -> Result<Tensor> {
+fn decode_conv1d(x: &Tensor, conv1d_weight: &Tensor, cache: &mut GdnLayerCache) -> Result<Tensor> {
     let (b, _, c) = x.dims3()?;
     let kernel = cache.conv_state.dim(2)?;
 
@@ -138,9 +134,9 @@ fn shift_accumulate(
 
 #[cfg(test)]
 mod tests {
-    use super::{causal_conv1d, shift_accumulate, GdnDims, GdnLayerCache};
+    use super::{GdnDims, GdnLayerCache, causal_conv1d, shift_accumulate};
     use crate::ops::gdn::config::VHeadOrder;
-    use candle_core::{DType, Device, Tensor, D};
+    use candle_core::{D, DType, Device, Tensor};
 
     fn dims(conv_dim: usize, kernel: usize) -> GdnDims {
         GdnDims {
@@ -254,8 +250,18 @@ mod tests {
         }
 
         // And the carried state, or the *next* token diverges silently.
-        let ws = whole_cache.conv_state.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let ss = step_cache.conv_state.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let ws = whole_cache
+            .conv_state
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let ss = step_cache
+            .conv_state
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         for (a, b) in ws.iter().zip(&ss) {
             assert!((a - b).abs() < 1e-6, "decode conv state {a} != {b}");
         }
@@ -294,8 +300,7 @@ mod tests {
     fn shift_accumulate_matches_the_windowed_reference() {
         let dev = Device::Cpu;
         let (b, c, kernel, seq_len, offset) = (2usize, 3usize, 4usize, 5usize, 2usize);
-        let padded =
-            Tensor::rand(0f32, 1.0, (b, c, offset + seq_len + kernel - 1), &dev).unwrap();
+        let padded = Tensor::rand(0f32, 1.0, (b, c, offset + seq_len + kernel - 1), &dev).unwrap();
         let weight = Tensor::rand(0f32, 1.0, (c, kernel), &dev).unwrap();
 
         let got = shift_accumulate(&padded, &weight, seq_len, offset).unwrap();

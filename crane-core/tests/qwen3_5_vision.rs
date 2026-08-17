@@ -13,7 +13,7 @@ fn qwen3_5_vision_forward_shape() {
     use candle_core::{DType, IndexOp, Tensor};
     use candle_nn::VarBuilder;
 
-    use crane_core::models::qwen3_5::{load_config, Qwen3_5VisionModel};
+    use crane_core::models::qwen3_5::{Qwen3_5VisionModel, load_config};
     use crane_core::utils::utils::get_safetensors_files;
 
     let dir = std::env::var("CRANE_QWEN35_VL_DIR")
@@ -46,13 +46,12 @@ fn qwen3_5_vision_forward_shape() {
     #[cfg(not(feature = "cuda"))]
     let (device, dtype) = (Device::Cpu, DType::F32);
 
-    let filenames = get_safetensors_files(&dir)
-        .expect("locate safetensors");
+    let filenames = get_safetensors_files(&dir).expect("locate safetensors");
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device) }
         .expect("mmap safetensors");
 
-    let vision = Qwen3_5VisionModel::new(vcfg, vb.pp("model").pp("visual"))
-        .expect("build vision tower");
+    let vision =
+        Qwen3_5VisionModel::new(vcfg, vb.pp("model").pp("visual")).expect("build vision tower");
 
     // 408x408 image → resize to multiple of 32 (patch * merge) → 416x416.
     // patches per side = 416 / 16 = 26.
@@ -62,7 +61,8 @@ fn qwen3_5_vision_forward_shape() {
     let n_patches = t_patches * h_patches * w_patches;
     let in_dim = vcfg.in_channels * vcfg.temporal_patch_size * vcfg.patch_size * vcfg.patch_size;
 
-    let pixel_values = Tensor::zeros((n_patches, in_dim), dtype, &device).expect("zero pixel_values");
+    let pixel_values =
+        Tensor::zeros((n_patches, in_dim), dtype, &device).expect("zero pixel_values");
     let grid_thw = Tensor::from_vec(
         vec![t_patches as u32, h_patches as u32, w_patches as u32],
         (1, 3),
@@ -70,7 +70,9 @@ fn qwen3_5_vision_forward_shape() {
     )
     .expect("grid_thw");
 
-    let (out, _deepstack) = vision.forward(&pixel_values, &grid_thw).expect("vision forward");
+    let (out, _deepstack) = vision
+        .forward(&pixel_values, &grid_thw)
+        .expect("vision forward");
 
     // After 2x2 spatial merge: n_patches / 4 tokens.
     let merged = n_patches / vcfg.spatial_merge_size.pow(2);

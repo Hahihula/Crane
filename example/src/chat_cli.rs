@@ -6,8 +6,8 @@ use crane::common::config::{CommonConfig, DataType, DeviceConfig};
 use crane::llm::{GenerationConfig, LlmModelType};
 use crane::prelude::*;
 use crane::utils::gpu_memory_info;
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 const RESET: &str = "\x1b[0m";
 const BLUE: &str = "\x1b[34m";
@@ -179,7 +179,7 @@ fn main() -> Result<()> {
                 format_bytes(total),
                 format_bytes(after_used.saturating_sub(before_used)),
             );
-        }
+        },
         _ => println!("{} {}", grey("GPU memory:"), yellow("unavailable")),
     }
     print_help();
@@ -203,18 +203,18 @@ fn main() -> Result<()> {
             "/help" => {
                 print_help();
                 continue;
-            }
+            },
             "/clear" => {
                 chat_client.clear_history();
                 println!("{}", grey("Conversation cleared."));
                 continue;
-            }
+            },
             "/history" => {
                 for (idx, msg) in chat_client.get_history().iter().enumerate() {
                     println!("{} {:?}: {}", idx + 1, msg.role, msg.content);
                 }
                 continue;
-            }
+            },
             "/stats" => {
                 let turns = chat_client.get_history().len() / 2;
                 println!(
@@ -225,8 +225,8 @@ fn main() -> Result<()> {
                     chat_client.get_history().len()
                 );
                 continue;
-            }
-            _ => {}
+            },
+            _ => {},
         }
 
         print!("{} ", green_bold("AI:"));

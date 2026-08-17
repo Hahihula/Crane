@@ -9,8 +9,8 @@
 //!   cargo run --bin qwen3_5_vl_simple --features cuda -- <model> <image> "what colour is the bird?"
 
 use anyhow::{Context, Result};
-use crane_core::models::qwen3_5::{Qwen3_5VLModel, VlGenerationConfig};
 use crane_core::models::DType;
+use crane_core::models::qwen3_5::{Qwen3_5VLModel, VlGenerationConfig};
 use std::io::Write;
 
 fn main() -> Result<()> {
@@ -26,7 +26,11 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "Briefly describe this image.".to_string());
 
     let device = crane_core::models::Device::cuda_if_available(0)?;
-    let dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
+    let dtype = if device.is_cuda() {
+        DType::F16
+    } else {
+        DType::F32
+    };
 
     eprintln!("Loading Qwen 3.5 VL from: {model_path}");
     eprintln!("Device: {device:?}, dtype: {dtype:?}");
@@ -36,7 +40,10 @@ fn main() -> Result<()> {
     eprintln!("Image: {image_path} ({}x{})", image.width(), image.height());
     eprintln!("Prompt: {prompt}\n");
 
-    let config = VlGenerationConfig { max_new_tokens: 256, ..Default::default() };
+    let config = VlGenerationConfig {
+        max_new_tokens: 256,
+        ..Default::default()
+    };
 
     // Stream tokens as they are decoded, then keep the assembled answer.
     let started = std::time::Instant::now();
@@ -46,6 +53,10 @@ fn main() -> Result<()> {
     })?;
     println!();
 
-    eprintln!("\n--- {} chars in {:.2?} ---", answer.len(), started.elapsed());
+    eprintln!(
+        "\n--- {} chars in {:.2?} ---",
+        answer.len(),
+        started.elapsed()
+    );
     Ok(())
 }

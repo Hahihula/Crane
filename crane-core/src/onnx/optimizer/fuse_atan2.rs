@@ -69,40 +69,54 @@ fn try_fuse_where(node: &mut NodeProto, producers: &HashMap<String, NodeProto>) 
     let true_val = &node.input[1];
     let false_val = &node.input[2];
 
-    let Some(less) = producers.get(cond) else { return false };
+    let Some(less) = producers.get(cond) else {
+        return false;
+    };
     if less.op_type != "Less" || less.input.len() != 2 {
         return false;
     }
     let x = &less.input[0];
 
-    let Some(atan) = producers.get(false_val) else { return false };
+    let Some(atan) = producers.get(false_val) else {
+        return false;
+    };
     if atan.op_type != "Atan" || atan.input.len() != 1 {
         return false;
     }
     let atan_output = &atan.output[0];
 
-    let Some(div) = producers.get(&atan.input[0]) else { return false };
+    let Some(div) = producers.get(&atan.input[0]) else {
+        return false;
+    };
     if div.op_type != "Div" || div.input.len() != 2 || div.input[1] != *x {
         return false;
     }
     let y = &div.input[0];
 
-    let Some(inner_where) = producers.get(true_val) else { return false };
+    let Some(inner_where) = producers.get(true_val) else {
+        return false;
+    };
     if inner_where.op_type != "Where" || inner_where.input.len() != 3 {
         return false;
     }
 
-    let Some(greater) = producers.get(&inner_where.input[0]) else { return false };
+    let Some(greater) = producers.get(&inner_where.input[0]) else {
+        return false;
+    };
     if greater.op_type != "Greater" || greater.input.len() != 2 || greater.input[0] != *y {
         return false;
     }
 
-    let Some(add) = producers.get(&inner_where.input[1]) else { return false };
+    let Some(add) = producers.get(&inner_where.input[1]) else {
+        return false;
+    };
     if add.op_type != "Add" || !add.input.contains(atan_output) {
         return false;
     }
 
-    let Some(sub) = producers.get(&inner_where.input[2]) else { return false };
+    let Some(sub) = producers.get(&inner_where.input[2]) else {
+        return false;
+    };
     if sub.op_type != "Sub" || !sub.input.contains(atan_output) {
         return false;
     }
@@ -214,11 +228,18 @@ mod tests {
         nodes.push(binary_node("Greater", "imag2", "zero", "greater2"));
         nodes.push(binary_node("Add", "atan2_", "pi", "add_pi2"));
         nodes.push(binary_node("Sub", "atan2_", "pi", "sub_pi2"));
-        nodes.push(where_node("inner2", "greater2", "add_pi2", "sub_pi2", "where02"));
+        nodes.push(where_node(
+            "inner2", "greater2", "add_pi2", "sub_pi2", "where02",
+        ));
         nodes.push(binary_node("Less", "real2", "zero", "less2"));
-        nodes.push(where_node("outer2", "less2", "where02", "atan2_", "result2"));
+        nodes.push(where_node(
+            "outer2", "less2", "where02", "atan2_", "result2",
+        ));
 
-        let mut graph = GraphProto { node: nodes, ..Default::default() };
+        let mut graph = GraphProto {
+            node: nodes,
+            ..Default::default()
+        };
 
         let fused = fuse_atan2_decomposition(&mut graph);
         assert_eq!(fused, 2);

@@ -20,9 +20,9 @@
 //! 12. **Layer scalar** — learnable per-layer scaling factor.
 
 use candle_core::quantized::gguf_file;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::rotary_emb::rope;
-use candle_nn::{linear_no_bias, Activation, Embedding, Linear, RmsNorm, VarBuilder};
+use candle_nn::{Activation, Embedding, Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
@@ -183,9 +183,7 @@ impl RotaryEmbedding {
 
         let positions: Vec<f32> = (0..max_pos).map(|i| i as f32).collect();
         let positions = Tensor::new(positions.as_slice(), device)?;
-        let freqs = positions
-            .unsqueeze(1)?
-            .matmul(&inv_freq.unsqueeze(0)?)?;
+        let freqs = positions.unsqueeze(1)?.matmul(&inv_freq.unsqueeze(0)?)?;
 
         let cos_table = freqs.cos()?.contiguous()?;
         let sin_table = freqs.sin()?.contiguous()?;
@@ -391,17 +389,15 @@ impl Attention {
                     let total = full_k.dim(2)?;
                     let room = 256;
                     let (b, h, _, d) = full_k.dims4()?;
-                    let new_buf_k =
-                        Tensor::zeros((b, h, total + room, d), k.dtype(), k.device())?;
-                    let new_buf_v =
-                        Tensor::zeros((b, h, total + room, d), v.dtype(), v.device())?;
+                    let new_buf_k = Tensor::zeros((b, h, total + room, d), k.dtype(), k.device())?;
+                    let new_buf_v = Tensor::zeros((b, h, total + room, d), v.dtype(), v.device())?;
                     new_buf_k.slice_set(&full_k, 2, 0)?;
                     new_buf_v.slice_set(&full_v, 2, 0)?;
                     self.kv_cache = Some((new_buf_k, new_buf_v));
                     self.cache_seq_len = total;
                     Ok((full_k, full_v))
                 }
-            }
+            },
             None => {
                 let (b, h, s, d) = k.dims4()?;
                 let room = 256;
@@ -412,7 +408,7 @@ impl Attention {
                 self.kv_cache = Some((buf_k, buf_v));
                 self.cache_seq_len = s;
                 Ok((k, v))
-            }
+            },
         }
     }
 
@@ -464,7 +460,7 @@ impl Attention {
                     let k = rope(&k.contiguous()?, cos, sin)?;
                     (q, k)
                 }
-            }
+            },
             LayerType::FullAttention => {
                 let rdim = rotated_dim.unwrap_or(self.head_dim);
                 if self.is_shared {
@@ -478,7 +474,7 @@ impl Attention {
                 } else {
                     apply_partial_rope(&q, &k, cos, sin, rdim)?
                 }
-            }
+            },
         };
 
         // Update KV cache (non-shared layers only)
@@ -493,8 +489,9 @@ impl Attention {
 
         if n_rep > 1 && seq_len == 1 {
             // Gemma4: scaling = 1.0 (QK norms handle normalization)
-            let q_g =
-                q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))?.contiguous()?;
+            let q_g = q
+                .reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))?
+                .contiguous()?;
             let k_t = k.transpose(2, 3)?.contiguous()?;
             let attn_weights = q_g.matmul(&k_t)?;
 
@@ -540,10 +537,11 @@ impl Attention {
         let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
         let attn_output = attn_weights.matmul(&v)?;
 
-        let attn_output = attn_output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((b_sz, seq_len, ()))?;
+        let attn_output =
+            attn_output
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((b_sz, seq_len, ()))?;
 
         self.o_proj.forward(&attn_output)
     }
@@ -599,7 +597,7 @@ impl Mlp {
                 let gate = Activation::GeluPytorchTanh.forward(&gate)?;
                 let up = up_proj.forward(x)?;
                 down_proj.forward(&(gate * up)?)
-            }
+            },
         }
     }
 }
@@ -672,8 +670,11 @@ impl DecoderLayer {
             config.hidden_size,
             vb.pp("per_layer_projection"),
         )?);
-        let post_per_layer_input_norm =
-            candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, vb.pp("post_per_layer_input_norm"))?;
+        let post_per_layer_input_norm = candle_nn::rms_norm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            vb.pp("post_per_layer_input_norm"),
+        )?;
 
         Ok(Self {
             self_attn,
@@ -712,18 +713,22 @@ impl DecoderLayer {
 
         let input_layernorm =
             gg.rms_norm(&format!("{prefix}.attn_norm.weight"), config.rms_norm_eps)?;
-        let post_attention_layernorm =
-            gg.rms_norm(&format!("{prefix}.post_attention_norm.weight"), config.rms_norm_eps)?;
+        let post_attention_layernorm = gg.rms_norm(
+            &format!("{prefix}.post_attention_norm.weight"),
+            config.rms_norm_eps,
+        )?;
         let pre_feedforward_layernorm =
             gg.rms_norm(&format!("{prefix}.ffn_norm.weight"), config.rms_norm_eps)?;
-        let post_feedforward_layernorm =
-            gg.rms_norm(&format!("{prefix}.post_ffw_norm.weight"), config.rms_norm_eps)?;
+        let post_feedforward_layernorm = gg.rms_norm(
+            &format!("{prefix}.post_ffw_norm.weight"),
+            config.rms_norm_eps,
+        )?;
 
         // Layer scalar: GGUF stores it as a tensor
         let layer_scalar = match gg.tensor(&format!("{prefix}.layer_output_scale.weight")) {
-            Ok(qt) => qt.dequantize(&Device::Cpu).unwrap_or_else(|_| {
-                Tensor::ones(1, DType::F32, &Device::Cpu).unwrap()
-            }),
+            Ok(qt) => qt
+                .dequantize(&Device::Cpu)
+                .unwrap_or_else(|_| Tensor::ones(1, DType::F32, &Device::Cpu).unwrap()),
             Err(_) => Tensor::ones(1, DType::F32, &Device::Cpu).unwrap(),
         };
 
@@ -845,7 +850,9 @@ impl Gemma4Model {
             model_vb.pp("embed_tokens"),
         )?;
 
-        let ple_vocab = config.vocab_size_per_layer_input.unwrap_or(config.vocab_size);
+        let ple_vocab = config
+            .vocab_size_per_layer_input
+            .unwrap_or(config.vocab_size);
         let ple_dim = config.hidden_size_per_layer_input.unwrap_or(256);
         let ple_total_dim = config.num_hidden_layers * ple_dim;
         let embed_tokens_per_layer = candle_nn::embedding(
@@ -881,14 +888,17 @@ impl Gemma4Model {
             } else {
                 config.intermediate_size
             };
-            layers.push(DecoderLayer::new(config, lt, is_shared, intermediate_size, layers_vb.pp(i))?);
+            layers.push(DecoderLayer::new(
+                config,
+                lt,
+                is_shared,
+                intermediate_size,
+                layers_vb.pp(i),
+            )?);
         }
 
-        let norm = candle_nn::rms_norm(
-            config.hidden_size,
-            config.rms_norm_eps,
-            model_vb.pp("norm"),
-        )?;
+        let norm =
+            candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
 
         let lm_head = if config.tie_word_embeddings {
             LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
@@ -958,8 +968,7 @@ impl Gemma4Model {
 
         let num_attention_heads =
             md_get(&format!("{arch}.attention.head_count"))?.to_u32()? as usize;
-        let num_kv_heads =
-            md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
+        let num_kv_heads = md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
         let num_hidden_layers = md_get(&format!("{arch}.block_count"))?.to_u32()? as usize;
         let hidden_size = md_get(&format!("{arch}.embedding_length"))?.to_u32()? as usize;
         // feed_forward_length can be a single u32 or a per-layer i32 array (Gemma4 uses
@@ -978,7 +987,7 @@ impl Gemma4Model {
                     })
                     .collect();
                 sizes.first().copied().unwrap_or(6144)
-            }
+            },
             _ => candle_core::bail!("unexpected type for feed_forward_length"),
         };
         let max_position_embeddings = gg
@@ -1097,8 +1106,7 @@ impl Gemma4Model {
 
         // Model-level PLE projection
         let per_layer_model_projection = gg.linear("per_layer_model_proj.weight")?;
-        let per_layer_projection_norm =
-            gg.rms_norm("per_layer_proj_norm.weight", rms_norm_eps)?;
+        let per_layer_projection_norm = gg.rms_norm("per_layer_proj_norm.weight", rms_norm_eps)?;
 
         let config = Gemma4TextConfig {
             vocab_size: actual_vocab_size,
@@ -1140,12 +1148,8 @@ impl Gemma4Model {
         // rotated_dim = global_head_dim / 4 = 512 / 4 = 128
         let full_rotated_dim = global_head_dim / 4;
 
-        let rotary_sliding = RotaryEmbedding::new(
-            sliding_theta,
-            swa_head_dim,
-            max_position_embeddings,
-            device,
-        )?;
+        let rotary_sliding =
+            RotaryEmbedding::new(sliding_theta, swa_head_dim, max_position_embeddings, device)?;
         let rotary_full = RotaryEmbedding::new(
             full_theta,
             full_rotated_dim,
@@ -1269,19 +1273,19 @@ impl Gemma4Model {
         // Shape: [B, S, num_layers * ple_dim]
 
         // 2. Model projection: project hidden_states → per-layer dims
-        let per_layer_projection = self
-            .per_layer_model_projection
-            .forward(&hidden_states)?;
+        let per_layer_projection = self.per_layer_model_projection.forward(&hidden_states)?;
         let per_layer_projection = (per_layer_projection * self.ple_projection_scale)?;
         // Shape: [B, S, num_layers * ple_dim]
 
         // Reshape to [B, S, num_layers, ple_dim] for norm, then flatten back
         let (b_sz, s_len, _) = per_layer_projection.dims3()?;
-        let per_layer_projection = per_layer_projection
-            .reshape((b_sz, s_len, num_layers, ple_dim))?;
-        let per_layer_projection = self.per_layer_projection_norm.forward(&per_layer_projection)?;
-        let per_layer_projection = per_layer_projection
-            .reshape((b_sz, s_len, num_layers * ple_dim))?;
+        let per_layer_projection =
+            per_layer_projection.reshape((b_sz, s_len, num_layers, ple_dim))?;
+        let per_layer_projection = self
+            .per_layer_projection_norm
+            .forward(&per_layer_projection)?;
+        let per_layer_projection =
+            per_layer_projection.reshape((b_sz, s_len, num_layers * ple_dim))?;
 
         // 3. Combine: (projection + token_embeds) * 2^-0.5
         let per_layer_inputs =
@@ -1313,16 +1317,13 @@ impl Gemma4Model {
         // Forward pass through layers
         let mut hidden_states = hidden_states;
         let first_shared = self.config.first_kv_shared_layer();
-        let mut shared_kv_states: Vec<Option<(Tensor, Tensor)>> =
-            vec![None; first_shared];
+        let mut shared_kv_states: Vec<Option<(Tensor, Tensor)>> = vec![None; first_shared];
 
         for i in 0..self.layers.len() {
             let lt = self.layer_types[i];
 
             let (cos, sin, mask) = match lt {
-                LayerType::SlidingAttention => {
-                    (&cos_sliding, &sin_sliding, sliding_mask.as_ref())
-                }
+                LayerType::SlidingAttention => (&cos_sliding, &sin_sliding, sliding_mask.as_ref()),
                 LayerType::FullAttention => (&cos_full, &sin_full, causal_mask.as_ref()),
             };
 
@@ -1362,7 +1363,6 @@ impl Gemma4Model {
             .lm_head
             .forward(&hidden_states.narrow(1, seq_len - 1, 1)?)?;
 
-
         // Logit softcapping
         if let Some(cap) = self.config.final_logit_softcapping {
             let cap_t = Tensor::new(cap, logits.device())?.to_dtype(logits.dtype())?;
@@ -1392,8 +1392,8 @@ impl Gemma4Model {
                 }
             }
         }
-        let mask = Tensor::from_vec(mask_data, (seq_len, total_len), device)?
-            .to_dtype(self.dtype)?;
+        let mask =
+            Tensor::from_vec(mask_data, (seq_len, total_len), device)?.to_dtype(self.dtype)?;
         Ok(mask.unsqueeze(0)?.unsqueeze(0)?)
     }
 
@@ -1412,8 +1412,8 @@ impl Gemma4Model {
                 }
             }
         }
-        let mask = Tensor::from_vec(mask_data, (seq_len, total_len), device)?
-            .to_dtype(self.dtype)?;
+        let mask =
+            Tensor::from_vec(mask_data, (seq_len, total_len), device)?.to_dtype(self.dtype)?;
         Ok(mask.unsqueeze(0)?.unsqueeze(0)?)
     }
 

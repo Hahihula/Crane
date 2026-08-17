@@ -189,7 +189,7 @@ impl EnglishG2p {
                     }
                 }
                 results
-            }
+            },
             _ => Vec::new(),
         };
 
@@ -287,7 +287,10 @@ mod tests {
     #[test]
     fn multi_word_input_joins_with_spaces() {
         let engine = test_engine();
-        assert_eq!(engine.text_to_ipa("Hello, world!").unwrap(), "həlˈoʊ wˈɜɹld");
+        assert_eq!(
+            engine.text_to_ipa("Hello, world!").unwrap(),
+            "həlˈoʊ wˈɜɹld"
+        );
     }
 
     #[test]
@@ -418,8 +421,11 @@ mod tests {
         // into a single OOV inference call; that call errors on the empty
         // graph, and both words must still fall back to hand rules rather
         // than one word's failure aborting the whole `text_to_ipa` call.
-        let expected =
-            format!("{} {}", hand_oov_rules_ipa("xyzzy"), hand_oov_rules_ipa("wibbly"));
+        let expected = format!(
+            "{} {}",
+            hand_oov_rules_ipa("xyzzy"),
+            hand_oov_rules_ipa("wibbly")
+        );
         assert_eq!(engine.text_to_ipa("xyzzy wibbly").unwrap(), expected);
     }
 
@@ -447,8 +453,7 @@ mod tests {
 
     #[test]
     fn oov_cache_not_populated_on_model_miss() {
-        let engine =
-            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model()), false).unwrap();
+        let engine = EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model()), false).unwrap();
         // "xyzzy" misses the lexicon and the failing OOV model errors, so
         // hand rules produce the result — but a failed inference must not
         // pollute the cache.
@@ -457,8 +462,7 @@ mod tests {
 
     #[test]
     fn oov_model_skipped_when_word_exceeds_max_seq_len() {
-        let engine =
-            EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model()), false).unwrap();
+        let engine = EnglishG2p::new("hello\thəlˈoʊ\n", Some(failing_oov_model()), false).unwrap();
         // failing_oov_model's max_seq_len is 64.
         let long_word = "x".repeat(100);
         // Seed the cache as if a prior call had succeeded, proving the
@@ -555,8 +559,7 @@ mod tests {
     #[test]
     #[ignore = "needs a local G2P model directory (CRANE_G2P_EN_US_DIR)"]
     fn cer_benchmark_with_oov() {
-        let oov_model =
-            oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model");
+        let oov_model = oov_onnx::Model::load(&model_dir().join("oov")).expect("load OOV model");
         let result = run_cer_benchmark(Some(oov_model), "with-oov");
         assert!(
             result.cer <= REFERENCE_CER_EN_US,
@@ -620,7 +623,9 @@ mod tests {
             .expect("text_to_ipa");
         let sequential = format!(
             "{} {}",
-            sequential_engine.text_to_ipa("zoinks").expect("text_to_ipa"),
+            sequential_engine
+                .text_to_ipa("zoinks")
+                .expect("text_to_ipa"),
             sequential_engine
                 .text_to_ipa("archaeopteryx")
                 .expect("text_to_ipa")

@@ -69,13 +69,13 @@ pub fn parse_output(text: &str) -> ParsedOutput {
                     tool_calls.push(call);
                 }
                 rest = &after[end + CALL_CLOSE.len()..];
-            }
+            },
             None => {
                 // Truncated mid-call: the prose already copied above is kept,
                 // the fragment is dropped, and nothing after it can exist.
                 rest = "";
                 break;
-            }
+            },
         }
     }
     content.push_str(rest);
@@ -99,7 +99,9 @@ fn parse_call(block: &str, index: usize) -> Option<ToolCall> {
     let mut rest = &block[name_end..];
     while let Some(p) = rest.find(PARAM_OPEN) {
         let after = &rest[p + PARAM_OPEN.len()..];
-        let Some(key_end) = after.find('>') else { break };
+        let Some(key_end) = after.find('>') else {
+            break;
+        };
         let key = after[..key_end].trim().to_string();
         let value_region = &after[key_end + 1..];
         let Some(value_end) = value_region.find(PARAM_CLOSE) else {
@@ -244,7 +246,8 @@ mod tests {
     /// client would then execute.
     #[test]
     fn drops_an_unterminated_call() {
-        let out = parse_output("Checking.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nPar");
+        let out =
+            parse_output("Checking.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nPar");
         assert!(out.tool_calls.is_empty());
         assert_eq!(out.content, "Checking.");
     }
@@ -272,15 +275,25 @@ mod tests {
     fn stream_withholds_tool_markup() {
         let mut s = ToolCallStream::default();
         let mut streamed = String::new();
-        for tok in ["Let me ", "check.", "\n<", "tool", "_call>", "\n<function=get_weather>\n",
-                    "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"] {
+        for tok in [
+            "Let me ",
+            "check.",
+            "\n<",
+            "tool",
+            "_call>",
+            "\n<function=get_weather>\n",
+            "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+        ] {
             streamed.push_str(&s.push(tok));
         }
         let (tail, calls) = s.finish();
         streamed.push_str(&tail);
 
         assert_eq!(streamed.trim(), "Let me check.");
-        assert!(!streamed.contains("tool_call"), "markup leaked: {streamed:?}");
+        assert!(
+            !streamed.contains("tool_call"),
+            "markup leaked: {streamed:?}"
+        );
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
     }

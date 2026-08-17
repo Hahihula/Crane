@@ -92,9 +92,7 @@ pub fn compute_mel_spectrogram(
     let n_mels = config.n_mels;
 
     if hop > n_fft {
-        candle_core::bail!(
-            "hop_length ({hop}) must not exceed n_fft ({n_fft})"
-        );
+        candle_core::bail!("hop_length ({hop}) must not exceed n_fft ({n_fft})");
     }
 
     let hann = hann_window(win);

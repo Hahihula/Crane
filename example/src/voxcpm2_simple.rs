@@ -117,7 +117,11 @@ fn main() -> anyhow::Result<()> {
     println!("Device: {device:?}  dtype: {dtype:?}");
 
     let mut model = VoxCpm2Model::new(&args.model_path, &device, &dtype)?;
-    println!("Sample rate: {} Hz, encoder sample rate: {} Hz", model.sample_rate, model.encoder_sample_rate());
+    println!(
+        "Sample rate: {} Hz, encoder sample rate: {} Hz",
+        model.sample_rate,
+        model.encoder_sample_rate()
+    );
 
     std::fs::create_dir_all(&args.output_dir)?;
 
@@ -131,7 +135,9 @@ fn main() -> anyhow::Result<()> {
             .as_deref()
             .map(|path| -> anyhow::Result<_> {
                 let samples = crane::audio::load_wav_f32(path, model.encoder_sample_rate())?;
-                model.encode_reference_audio(&samples, false).map_err(anyhow::Error::from)
+                model
+                    .encode_reference_audio(&samples, false)
+                    .map_err(anyhow::Error::from)
             })
             .transpose()?;
         let prompt = args
@@ -147,17 +153,26 @@ fn main() -> anyhow::Result<()> {
         let conditioning = match (ref_feat, prompt) {
             (Some(r), Some((prompt_text, prompt_feat))) => {
                 println!("Mode: combined reference + continuation");
-                VoxCpm2Conditioning::RefContinuation { ref_feat: r, prompt_text, prompt_feat }
-            }
+                VoxCpm2Conditioning::RefContinuation {
+                    ref_feat: r,
+                    prompt_text,
+                    prompt_feat,
+                }
+            },
             (Some(r), None) => {
                 println!("Mode: reference-only (Controllable Cloning, no transcript)");
                 VoxCpm2Conditioning::Reference(r)
-            }
+            },
             (None, Some((prompt_text, prompt_feat))) => {
                 println!("Mode: continuation-only (Ultimate Cloning)");
-                VoxCpm2Conditioning::Continuation { prompt_text, prompt_feat }
-            }
-            (None, None) => unreachable!("wants_conditioning implies at least one of ref_wav/prompt_wav"),
+                VoxCpm2Conditioning::Continuation {
+                    prompt_text,
+                    prompt_feat,
+                }
+            },
+            (None, None) => {
+                unreachable!("wants_conditioning implies at least one of ref_wav/prompt_wav")
+            },
         };
 
         println!("  Text: {text}");
@@ -171,8 +186,14 @@ fn main() -> anyhow::Result<()> {
             vec![(text.as_str(), "voxcpm2_custom.wav")]
         } else {
             vec![
-                ("Hello! I am Crane, an ultra-fast inference engine written in Rust.", "voxcpm2_en.wav"),
-                ("VoxCPM2 supports thirty languages with tokenizer-free speech generation.", "voxcpm2_en_2.wav"),
+                (
+                    "Hello! I am Crane, an ultra-fast inference engine written in Rust.",
+                    "voxcpm2_en.wav",
+                ),
+                (
+                    "VoxCPM2 supports thirty languages with tokenizer-free speech generation.",
+                    "voxcpm2_en_2.wav",
+                ),
             ]
         };
 

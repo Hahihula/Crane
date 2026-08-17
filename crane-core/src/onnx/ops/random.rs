@@ -23,7 +23,10 @@ pub(crate) fn parse_random_float_dtype(
         return Ok(fallback);
     };
     let Ok(dt_i32) = i32::try_from(dt) else {
-        bail!("unsupported 'dtype' value {dt:?} for {op_name} {}", node.name)
+        bail!(
+            "unsupported 'dtype' value {dt:?} for {op_name} {}",
+            node.name
+        )
     };
     match DataType::try_from(dt_i32) {
         Ok(DataType::Undefined) => Ok(fallback),
@@ -36,11 +39,17 @@ pub(crate) fn parse_random_float_dtype(
             },
             Some(dt) => Ok(dt),
             None => {
-                bail!("unsupported 'dtype' value {dt:?} for {op_name} {}", node.name)
+                bail!(
+                    "unsupported 'dtype' value {dt:?} for {op_name} {}",
+                    node.name
+                )
             },
         },
         Err(_) => {
-            bail!("unsupported 'dtype' value {dt_i32:?} for {op_name} {}", node.name)
+            bail!(
+                "unsupported 'dtype' value {dt_i32:?} for {op_name} {}",
+                node.name
+            )
         },
     }
 }
@@ -122,7 +131,10 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        let x = Tensor::new(&[[0f32, 0., 0., 0., 0.], [0., 0., 0., 0., 0.]], &Device::Cpu)?;
+        let x = Tensor::new(
+            &[[0f32, 0., 0., 0., 0.], [0., 0., 0., 0., 0.]],
+            &Device::Cpu,
+        )?;
 
         let y = random_uniform_like(&node, &x)?;
 
@@ -200,7 +212,10 @@ mod tests {
         assert_eq!(y.dtype(), DType::F32);
         let values = y.to_vec1::<f32>()?;
         let sample_mean = values.iter().sum::<f32>() / values.len() as f32;
-        assert!((sample_mean - 5.0).abs() < 0.2, "sample mean {sample_mean} far from 5.0");
+        assert!(
+            (sample_mean - 5.0).abs() < 0.2,
+            "sample mean {sample_mean} far from 5.0"
+        );
         Ok(())
     }
 }

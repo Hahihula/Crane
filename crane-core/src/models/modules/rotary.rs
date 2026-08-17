@@ -167,8 +167,7 @@ mod tests {
     // At position 1 freqs equal inv_freq, so we can verify each cos/sin value.
     #[test]
     fn test_inv_freq_values() {
-        let rope = RotaryEmbedding::new(8, 2, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(8, 2, 10000.0, &Device::Cpu).expect("new failed");
         let (cos, sin) = rope.forward(1, 1).expect("forward failed");
         let cos_vals = rope_vec2(&cos);
         let sin_vals = rope_vec2(&sin);
@@ -194,8 +193,7 @@ mod tests {
     // so the sin row at position 1 must be strictly decreasing across columns.
     #[test]
     fn test_inv_freq_monotonic_decay() {
-        let rope = RotaryEmbedding::new(64, 4, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(64, 4, 10000.0, &Device::Cpu).expect("new failed");
         let (_, sin) = rope.forward(1, 1).expect("forward failed");
         let sin_row = rope_vec2(&sin);
         let vals = &sin_row[0];
@@ -213,8 +211,7 @@ mod tests {
     // dim=4, theta=100 => inv_freq = [1.0, 0.1]; verify cos/sin at several positions.
     #[test]
     fn test_table_values_at_specific_positions() {
-        let rope = RotaryEmbedding::new(4, 16, 100.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(4, 16, 100.0, &Device::Cpu).expect("new failed");
         for &pos in &[0usize, 1, 5, 10] {
             let (cos, sin) = rope.forward(pos, 1).expect("forward failed");
             let cos_vals = rope_vec2(&cos);
@@ -242,10 +239,9 @@ mod tests {
     // identity (cos≈1, sin≈0) because its frequencies are lower.
     #[test]
     fn test_different_theta_changes_frequencies() {
-        let rope_a = RotaryEmbedding::new(64, 32, 10_000.0, &Device::Cpu)
-            .expect("new (a) failed");
-        let rope_b = RotaryEmbedding::new(64, 32, 1_000_000.0, &Device::Cpu)
-            .expect("new (b) failed");
+        let rope_a = RotaryEmbedding::new(64, 32, 10_000.0, &Device::Cpu).expect("new (a) failed");
+        let rope_b =
+            RotaryEmbedding::new(64, 32, 1_000_000.0, &Device::Cpu).expect("new (b) failed");
         let (cos_a, _) = rope_a.forward(10, 1).expect("forward (a) failed");
         let (cos_b, _) = rope_b.forward(10, 1).expect("forward (b) failed");
         assert!(
@@ -280,8 +276,7 @@ mod tests {
     #[test]
     fn test_dim_controls_table_width() {
         for dim in [8usize, 16, 32, 64, 128] {
-            let rope = RotaryEmbedding::new(dim, 4, 10000.0, &Device::Cpu)
-                .expect("new failed");
+            let rope = RotaryEmbedding::new(dim, 4, 10000.0, &Device::Cpu).expect("new failed");
             let (cos, sin) = rope.forward(0, 4).expect("forward failed");
             assert_eq!(cos.dims(), &[4, dim / 2], "dim={dim}: cos width mismatch");
             assert_eq!(sin.dims(), &[4, dim / 2], "dim={dim}: sin width mismatch");
@@ -293,10 +288,9 @@ mod tests {
     // apply() on a non-zero input at a non-zero position must change the values.
     #[test]
     fn test_apply_nonzero_changes_values() {
-        let rope = RotaryEmbedding::new(8, 16, 10000.0, &Device::Cpu)
-            .expect("new failed");
-        let q = Tensor::ones((1, 1, 1, 8), candle_core::DType::F32, &Device::Cpu)
-            .expect("ones failed");
+        let rope = RotaryEmbedding::new(8, 16, 10000.0, &Device::Cpu).expect("new failed");
+        let q =
+            Tensor::ones((1, 1, 1, 8), candle_core::DType::F32, &Device::Cpu).expect("ones failed");
         let k = q.clone();
         let (q_rot, k_rot) = rope.apply(&q, &k, 5, 1).expect("apply failed");
         assert!(
@@ -312,13 +306,11 @@ mod tests {
     // RoPE is a rotation so it preserves the total squared norm of the input.
     #[test]
     fn test_apply_preserves_norm() {
-        let rope = RotaryEmbedding::new(64, 128, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(64, 128, 10000.0, &Device::Cpu).expect("new failed");
         let data: Vec<f32> = (0..1 * 2 * 8 * 64)
             .map(|i| (i as f32 + 1.0) * 0.001)
             .collect();
-        let q = Tensor::from_vec(data, (1usize, 2, 8, 64), &Device::Cpu)
-            .expect("from_vec failed");
+        let q = Tensor::from_vec(data, (1usize, 2, 8, 64), &Device::Cpu).expect("from_vec failed");
         let k = q.clone();
         let (q_rot, k_rot) = rope.apply(&q, &k, 0, 8).expect("apply failed");
         let sq_sum = |t: &Tensor| -> f32 {
@@ -342,10 +334,9 @@ mod tests {
     // Identical input at different positions must produce different outputs.
     #[test]
     fn test_apply_position_matters() {
-        let rope = RotaryEmbedding::new(8, 32, 10000.0, &Device::Cpu)
-            .expect("new failed");
-        let q = Tensor::ones((1, 1, 1, 8), candle_core::DType::F32, &Device::Cpu)
-            .expect("ones failed");
+        let rope = RotaryEmbedding::new(8, 32, 10000.0, &Device::Cpu).expect("new failed");
+        let q =
+            Tensor::ones((1, 1, 1, 8), candle_core::DType::F32, &Device::Cpu).expect("ones failed");
         let k = q.clone();
         let (q0, _) = rope.apply(&q, &k, 0, 1).expect("apply pos 0");
         let (q5, _) = rope.apply(&q, &k, 5, 1).expect("apply pos 5");
@@ -358,15 +349,13 @@ mod tests {
     // At position 0 all cos=1 and sin=0, so apply must be the identity.
     #[test]
     fn test_apply_at_position_zero_is_identity() {
-        let rope = RotaryEmbedding::new(64, 16, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(64, 16, 10000.0, &Device::Cpu).expect("new failed");
         let data: Vec<f32> = (0..1 * 2 * 1 * 64)
             .map(|i| (i as f32 + 1.0) * 0.01)
             .collect();
-        let q = Tensor::from_vec(data.clone(), (1usize, 2, 1, 64), &Device::Cpu)
-            .expect("from_vec q");
-        let k = Tensor::from_vec(data, (1usize, 2, 1, 64), &Device::Cpu)
-            .expect("from_vec k");
+        let q =
+            Tensor::from_vec(data.clone(), (1usize, 2, 1, 64), &Device::Cpu).expect("from_vec q");
+        let k = Tensor::from_vec(data, (1usize, 2, 1, 64), &Device::Cpu).expect("from_vec k");
         let (q_rot, k_rot) = rope.apply(&q, &k, 0, 1).expect("apply failed");
         assert!(
             max_abs_diff(&q, &q_rot) < 1e-5,
@@ -382,8 +371,7 @@ mod tests {
     // half-split formula gives exact expected values we can compute by hand.
     #[test]
     fn test_apply_rotation_formula_manual() {
-        let rope = RotaryEmbedding::new(4, 8, 100.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(4, 8, 100.0, &Device::Cpu).expect("new failed");
         // q = [1.0, 2.0, 3.0, 4.0], shape [1, 1, 1, 4]
         let q = Tensor::new(&[1.0f32, 2.0, 3.0, 4.0], &Device::Cpu)
             .expect("new tensor")
@@ -427,13 +415,12 @@ mod tests {
     #[test]
     fn test_sequential_vs_batch_equivalence() {
         let seq_len = 8usize;
-        let rope = RotaryEmbedding::new(64, 128, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(64, 128, 10000.0, &Device::Cpu).expect("new failed");
         let q_data: Vec<f32> = (0..1 * 2 * seq_len * 64)
             .map(|i| (i as f32 + 1.0) * 0.001)
             .collect();
-        let q = Tensor::from_vec(q_data, (1usize, 2, seq_len, 64), &Device::Cpu)
-            .expect("from_vec q");
+        let q =
+            Tensor::from_vec(q_data, (1usize, 2, seq_len, 64), &Device::Cpu).expect("from_vec q");
         let k = q.clone();
         let (q_batch, k_batch) = rope.apply(&q, &k, 0, seq_len).expect("batch apply");
         for t in 0..seq_len {
@@ -444,21 +431,26 @@ mod tests {
             let k_batch_t = k_batch.narrow(2, t, 1).expect("narrow k_batch_t");
             let q_diff = max_abs_diff(&q_batch_t, &q_t_rot);
             let k_diff = max_abs_diff(&k_batch_t, &k_t_rot);
-            assert!(q_diff < 1e-5, "token {t}: q sequential/batch mismatch: {q_diff}");
-            assert!(k_diff < 1e-5, "token {t}: k sequential/batch mismatch: {k_diff}");
+            assert!(
+                q_diff < 1e-5,
+                "token {t}: q sequential/batch mismatch: {q_diff}"
+            );
+            assert!(
+                k_diff < 1e-5,
+                "token {t}: k sequential/batch mismatch: {k_diff}"
+            );
         }
     }
 
     // Identical sequences in different batch slots must receive identical embeddings.
     #[test]
     fn test_multi_batch_consistency() {
-        let rope = RotaryEmbedding::new(64, 64, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(64, 64, 10000.0, &Device::Cpu).expect("new failed");
         let single_data: Vec<f32> = (0..1 * 2 * 4 * 64)
             .map(|i| (i as f32 + 1.0) * 0.01)
             .collect();
-        let single = Tensor::from_vec(single_data, (1usize, 2, 4, 64), &Device::Cpu)
-            .expect("from_vec");
+        let single =
+            Tensor::from_vec(single_data, (1usize, 2, 4, 64), &Device::Cpu).expect("from_vec");
         let batched = Tensor::cat(&[&single, &single, &single], 0).expect("cat");
         let (q_rot, _) = rope.apply(&batched, &batched, 0, 4).expect("apply");
         let b0 = q_rot.narrow(0, 0, 1).expect("narrow b0");
@@ -471,18 +463,15 @@ mod tests {
     // GQA: q and k may have different head counts; shapes must be preserved.
     #[test]
     fn test_apply_different_q_k_heads() {
-        let rope = RotaryEmbedding::new(64, 32, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(64, 32, 10000.0, &Device::Cpu).expect("new failed");
         let q_data: Vec<f32> = (0..1 * 8 * 4 * 64)
             .map(|i| (i as f32 + 1.0) * 0.001)
             .collect();
         let k_data: Vec<f32> = (0..1 * 2 * 4 * 64)
             .map(|i| (i as f32 + 1.0) * 0.001)
             .collect();
-        let q = Tensor::from_vec(q_data, (1usize, 8, 4, 64), &Device::Cpu)
-            .expect("from_vec q");
-        let k = Tensor::from_vec(k_data, (1usize, 2, 4, 64), &Device::Cpu)
-            .expect("from_vec k");
+        let q = Tensor::from_vec(q_data, (1usize, 8, 4, 64), &Device::Cpu).expect("from_vec q");
+        let k = Tensor::from_vec(k_data, (1usize, 2, 4, 64), &Device::Cpu).expect("from_vec k");
         let (q_rot, k_rot) = rope.apply(&q, &k, 0, 4).expect("apply");
         assert_eq!(q_rot.dims(), &[1, 8, 4, 64]);
         assert_eq!(k_rot.dims(), &[1, 2, 4, 64]);
@@ -506,13 +495,11 @@ mod tests {
     // Models like Qwen2.5 use the latter; SpeechTokenizer uses the former.
     #[test]
     fn test_forward_then_manual_rope_matches_apply() {
-        let rope_emb = RotaryEmbedding::new(64, 64, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope_emb = RotaryEmbedding::new(64, 64, 10000.0, &Device::Cpu).expect("new failed");
         let q_data: Vec<f32> = (0..1 * 4 * 8 * 64)
             .map(|i| (i as f32 + 1.0) * 0.001)
             .collect();
-        let q = Tensor::from_vec(q_data, (1usize, 4, 8, 64), &Device::Cpu)
-            .expect("from_vec q");
+        let q = Tensor::from_vec(q_data, (1usize, 4, 8, 64), &Device::Cpu).expect("from_vec q");
         let k = q.clone();
         let (q1, k1) = rope_emb.apply(&q, &k, 5, 8).expect("apply");
         let (cos, sin) = rope_emb.forward(5, 8).expect("forward");
@@ -537,18 +524,20 @@ mod tests {
     fn test_rope_thd_bshd_matches_rope_bhsd() {
         use candle_nn::rotary_emb::rope_thd;
 
-        let rope_emb = RotaryEmbedding::new(64, 64, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope_emb = RotaryEmbedding::new(64, 64, 10000.0, &Device::Cpu).expect("new failed");
         let (cos, sin) = rope_emb.forward(3, 8).expect("forward failed");
 
         let data: Vec<f32> = (0..1 * 8 * 4 * 64)
             .map(|i| (i as f32 + 1.0) * 0.001)
             .collect();
         // BSHD [B, S, H, D]
-        let bshd = Tensor::from_vec(data, (1usize, 8, 4, 64), &Device::Cpu)
-            .expect("from_vec bshd");
+        let bshd = Tensor::from_vec(data, (1usize, 8, 4, 64), &Device::Cpu).expect("from_vec bshd");
         // Same data, BHSD [B, H, S, D]
-        let bhsd = bshd.transpose(1, 2).expect("transpose").contiguous().expect("contiguous");
+        let bhsd = bshd
+            .transpose(1, 2)
+            .expect("transpose")
+            .contiguous()
+            .expect("contiguous");
 
         let out_thd = rope_thd(&bshd, &cos, &sin).expect("rope_thd");
         let out_bhsd = rope(&bhsd, &cos, &sin).expect("rope");
@@ -566,13 +555,13 @@ mod tests {
     // dim=2 is the smallest valid dimension (one frequency pair).
     #[test]
     fn test_dim_2_minimal() {
-        let rope = RotaryEmbedding::new(2, 4, 10000.0, &Device::Cpu)
-            .expect("new with dim=2 failed");
+        let rope =
+            RotaryEmbedding::new(2, 4, 10000.0, &Device::Cpu).expect("new with dim=2 failed");
         let (cos, sin) = rope.forward(0, 4).expect("forward failed");
         assert_eq!(cos.dims(), &[4, 1]);
         assert_eq!(sin.dims(), &[4, 1]);
-        let q = Tensor::ones((1, 1, 2, 2), candle_core::DType::F32, &Device::Cpu)
-            .expect("ones failed");
+        let q =
+            Tensor::ones((1, 1, 2, 2), candle_core::DType::F32, &Device::Cpu).expect("ones failed");
         let (q_rot, _) = rope.apply(&q, &q, 0, 2).expect("apply failed");
         assert_eq!(q_rot.dims(), &[1, 1, 2, 2]);
     }
@@ -580,8 +569,7 @@ mod tests {
     // forward() must return Err when start_pos + seq_len > max_pos.
     #[test]
     fn test_forward_out_of_bounds_errors() {
-        let rope = RotaryEmbedding::new(8, 10, 10000.0, &Device::Cpu)
-            .expect("new failed");
+        let rope = RotaryEmbedding::new(8, 10, 10000.0, &Device::Cpu).expect("new failed");
         assert!(rope.forward(8, 3).is_err(), "8+3=11 > 10 should error");
         assert!(rope.forward(10, 1).is_err(), "10+1=11 > 10 should error");
         assert!(rope.forward(0, 11).is_err(), "0+11=11 > 10 should error");
