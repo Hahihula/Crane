@@ -7,9 +7,9 @@ use futures::stream::Stream;
 use tokio::sync::mpsc;
 
 use crate::engine::EngineResponse;
+use crate::now_epoch;
 use crate::openai_api::*;
 use crate::sglang_api::*;
-use crate::now_epoch;
 
 // ─────────────────────────────────────────────────────────────
 //  Chat completions SSE

@@ -5,13 +5,13 @@ use candle_core::quantized::GgmlDType;
 use candle_core::{Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use super::backend::{apply_recurrence, compute_beta_g, l2_alpha, l2_norm_fused, GdnGateConsts};
-use super::conv::causal_conv1d;
+use super::backend::{GdnGateConsts, apply_recurrence, compute_beta_g, l2_alpha, l2_norm_fused};
 use super::cache::GdnLayerCache;
 use super::config::{GdnConfig, GdnDims, VHeadOrder};
+use super::conv::causal_conv1d;
 use super::norm::RmsNormGated;
 use super::projection::{GdnInputProjection, GdnInputProjectionKind};
-use crate::ops::linear::{linear_layer, LinearLayer};
+use crate::ops::linear::{LinearLayer, linear_layer};
 
 /// One linear-attention layer as used by Qwen 3.5 (and similar hybrid models).
 ///
@@ -39,33 +39,44 @@ struct GdnDerived {
 }
 
 impl GatedDeltaNet {
-/// Load weights from `vb.pp("linear_attn")`.
-///
-/// `cfg` supplies the dimensions; `projection_kind` selects the QKV/Z/B/A
-/// weight layout (Qwen 3.5 uses [`GdnInputProjectionKind::Split`]).
-/// `quant` requests in-situ quantization of the large projections
-/// (conv1d / dt_bias / A_log / norm always stay in full precision).
-pub fn load(
+    /// Load weights from `vb.pp("linear_attn")`.
+    ///
+    /// `cfg` supplies the dimensions; `projection_kind` selects the QKV/Z/B/A
+    /// weight layout (Qwen 3.5 uses [`GdnInputProjectionKind::Split`]).
+    /// `quant` requests in-situ quantization of the large projections
+    /// (conv1d / dt_bias / A_log / norm always stay in full precision).
+    pub fn load(
         vb: VarBuilder,
         cfg: &dyn GdnConfig,
         projection_kind: GdnInputProjectionKind,
         quant: Option<GgmlDType>,
-) -> Result<Self> {
+    ) -> Result<Self> {
         let dims = GdnDims::new(cfg);
         let vb_la = vb.pp("linear_attn");
 
         let input_proj = GdnInputProjection::load(vb_la.clone(), &dims, projection_kind, quant)?;
-        let conv1d_weight = vb_la.get(
-            (dims.conv_dim, 1, dims.conv_kernel_size),
-            "conv1d.weight",
-        )?;
+        let conv1d_weight =
+            vb_la.get((dims.conv_dim, 1, dims.conv_kernel_size), "conv1d.weight")?;
         let dt_bias = vb_la.get(dims.num_v_heads, "dt_bias")?;
         let a_log = vb_la.get(dims.num_v_heads, "A_log")?;
 
         let norm = RmsNormGated::new(dims.head_v_dim, cfg.rms_norm_eps(), vb_la.pp("norm"))?;
-        let out_proj = linear_layer(dims.value_dim, dims.hidden_size, vb_la.pp("out_proj"), quant)?;
+        let out_proj = linear_layer(
+            dims.value_dim,
+            dims.hidden_size,
+            vb_la.pp("out_proj"),
+            quant,
+        )?;
 
-        Self::with_derived(input_proj, conv1d_weight, dt_bias, a_log, norm, out_proj, &dims)
+        Self::with_derived(
+            input_proj,
+            conv1d_weight,
+            dt_bias,
+            a_log,
+            norm,
+            out_proj,
+            &dims,
+        )
     }
 
     /// Assemble from already-loaded parts, deriving the per-token constants.
@@ -108,13 +119,8 @@ pub fn load(
     /// place.
     ///
     /// `x: [B, S, hidden_size]`. Returns `[B, S, hidden_size]`.
-    pub fn forward(
-        &self,
-        x: &Tensor,
-        dims: &GdnDims,
-        cache: &mut GdnLayerCache,
-    ) -> Result<Tensor> {
-        use crate::ops::prof::{timed, Span};
+    pub fn forward(&self, x: &Tensor, dims: &GdnDims, cache: &mut GdnLayerCache) -> Result<Tensor> {
+        use crate::ops::prof::{Span, timed};
 
         let (batch_size, seq_len, _) = x.dims3()?;
         let dtype = x.dtype();
@@ -273,7 +279,10 @@ mod tests {
     /// HF: a key head's replicas are adjacent.
     #[test]
     fn repeat_kv_heads_interleaved_groups_replicas_together() {
-        assert_eq!(expanded(VHeadOrder::Interleaved), vec![10.0, 10.0, 20.0, 20.0]);
+        assert_eq!(
+            expanded(VHeadOrder::Interleaved),
+            vec![10.0, 10.0, 20.0, 20.0]
+        );
     }
 
     /// llama.cpp GGUF: one full pass over key heads per replica. Mixing this
@@ -305,7 +314,10 @@ mod tests {
         );
 
         // replica * num_k_heads + key_head
-        let chunked = GdnDims { v_head_order: VHeadOrder::Chunked, ..base };
+        let chunked = GdnDims {
+            v_head_order: VHeadOrder::Chunked,
+            ..base
+        };
         let (q, _) = repeat_kv_heads(&t, &t, &chunked).unwrap();
         assert_eq!(
             q.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
@@ -323,7 +335,10 @@ mod tests {
             dims.value_dim = 2;
             dims.v_per_group = 1;
             let (q, _) = repeat_kv_heads(&t, &t, &dims).unwrap();
-            assert_eq!(q.flatten_all().unwrap().to_vec1::<f32>().unwrap(), vec![10.0, 20.0]);
+            assert_eq!(
+                q.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                vec![10.0, 20.0]
+            );
         }
     }
 }

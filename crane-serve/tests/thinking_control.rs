@@ -14,7 +14,7 @@
 //! ```
 
 use crane_core::autotokenizer::AutoTokenizer;
-use crane_serve::reasoning::{split_complete, ThinkingOptions, THINK_CLOSE, THINK_OPEN};
+use crane_serve::reasoning::{THINK_CLOSE, THINK_OPEN, ThinkingOptions, split_complete};
 
 fn load_tokenizer() -> Option<AutoTokenizer> {
     let path = std::env::var("CRANE_QWEN38_MODEL").ok()?;
@@ -86,7 +86,10 @@ fn thinking_off_pre_closes_the_block_so_output_is_pure_content() {
         return;
     };
 
-    let opts = ThinkingOptions { enable_thinking: Some(false), reasoning_effort: None };
+    let opts = ThinkingOptions {
+        enable_thinking: Some(false),
+        reasoning_effort: None,
+    };
     let prompt = render(&tok, &opts);
     println!("--- enable_thinking=false tail ---\n{}", tail(&prompt));
     assert!(
@@ -124,9 +127,16 @@ fn reasoning_effort_reaches_the_template() {
         )
     };
 
-    let (low, medium, xhigh) = (effort_prompt("low"), effort_prompt("medium"), effort_prompt("xhigh"));
+    let (low, medium, xhigh) = (
+        effort_prompt("low"),
+        effort_prompt("medium"),
+        effort_prompt("xhigh"),
+    );
     for (name, prompt) in [("low", &low), ("medium", &medium), ("xhigh", &xhigh)] {
-        println!("--- reasoning_effort={name} ---\n{}", first_system_line(prompt));
+        println!(
+            "--- reasoning_effort={name} ---\n{}",
+            first_system_line(prompt)
+        );
     }
 
     assert!(low.contains("Reasoning effort is set to low"));
@@ -149,7 +159,10 @@ fn reasoning_effort_reaches_the_template() {
         None,
         Some("turbo"),
     );
-    assert!(bogus.is_err(), "unsupported effort should be rejected by the template");
+    assert!(
+        bogus.is_err(),
+        "unsupported effort should be rejected by the template"
+    );
 }
 
 fn tail(s: &str) -> String {

@@ -275,15 +275,15 @@ impl MT3Tokenizer {
         // 0=PAD, 1=EOS, 2=UNK are reserved; below uses
         // the public tag values used by the audio-craft event encoder.
         let ty = match token_type {
-            0 => 0,   // PAD
-            1 => 1,   // EOS
-            2 => 2,   // UNK
-            3 => 3,   // shift
-            4 => 4,   // pitch
-            5 => 5,   // velocity
-            6 => 6,   // tie
-            7 => 7,   // program
-            8 => 8,   // drum
+            0 => 0, // PAD
+            1 => 1, // EOS
+            2 => 2, // UNK
+            3 => 3, // shift
+            4 => 4, // pitch
+            5 => 5, // velocity
+            6 => 6, // tie
+            7 => 7, // program
+            8 => 8, // drum
             _ => return None,
         };
         self.by_type_value.get(&(ty, value)).copied()
@@ -328,7 +328,7 @@ impl MT3Tokenizer {
             match t {
                 Token::Program(p) if !allowed_programs.contains(p) => out.push(t.id()),
                 Token::Drum(_) if !allow_drums => out.push(t.id()),
-                _ => {}
+                _ => {},
             }
         }
         out
@@ -347,10 +347,7 @@ impl MT3Tokenizer {
 /// prologue; doing so forces the model to guess, but the guess is at
 /// least token-budget-bounded by the chunk's `max_gen_len`.
 #[must_use]
-pub fn tie_section_token_ids(
-    tokenizer: &MT3Tokenizer,
-    open_notes: &[(u8, u8)],
-) -> Vec<u32> {
+pub fn tie_section_token_ids(tokenizer: &MT3Tokenizer, open_notes: &[(u8, u8)]) -> Vec<u32> {
     let mut sorted = open_notes.to_vec();
     sorted.sort_unstable();
 
@@ -407,11 +404,7 @@ pub fn instrument_group_from_names(names: &[&str]) -> Result<String, String> {
             valid_list
         ));
     }
-    Ok(ids
-        .iter()
-        .map(u8::to_string)
-        .collect::<Vec<_>>()
-        .join(" "))
+    Ok(ids.iter().map(u8::to_string).collect::<Vec<_>>().join(" "))
 }
 
 /// Resolve loosely-typed instrument tokens to canonical group names
@@ -467,10 +460,8 @@ pub fn resolve_instrument_names(tokens: &[&str]) -> Result<Vec<String>, String> 
                 hits.iter().map(|n| **n).collect::<Vec<_>>().join(", ")
             ));
         } else {
-            let mut ranked: Vec<(&str, f64)> = valid_names
-                .iter()
-                .map(|n| (*n, closeness(&t, n)))
-                .collect();
+            let mut ranked: Vec<(&str, f64)> =
+                valid_names.iter().map(|n| (*n, closeness(&t, n))).collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let suggestions: Vec<&str> = ranked
                 .iter()
@@ -507,9 +498,9 @@ pub fn instrument_name_for_program(program: u8) -> Option<&'static str> {
     if program == DRUM_PROGRAM {
         return Some("drums");
     }
-    MT3_FULL_PLUS_GROUP_NAMES.iter().find_map(|&(name, gid)| {
-        (first_program_of_group(gid) == Some(program)).then_some(name)
-    })
+    MT3_FULL_PLUS_GROUP_NAMES
+        .iter()
+        .find_map(|&(name, gid)| (first_program_of_group(gid) == Some(program)).then_some(name))
 }
 
 // Borrowed from the upstream `get_group_program_map("MT3_FULL_PLUS")` —

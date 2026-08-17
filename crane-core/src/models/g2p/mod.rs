@@ -8,9 +8,9 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use languages::{LanguageG2p, SUPPORTED_LANGUAGES};
 use languages::english::EnglishG2p;
 use languages::german::GermanG2p;
+use languages::{LanguageG2p, SUPPORTED_LANGUAGES};
 
 pub mod benchmark;
 pub mod ipa_postprocess;
@@ -123,14 +123,21 @@ impl MoonshineG2p {
         let lexicon_tsv = std::fs::read_to_string(&dict_path).ok()?;
 
         let oov_dir = en_us_dir.join("oov");
-        let oov_model = if oov_dir.is_dir() { oov_onnx::Model::load(&oov_dir).ok() } else { None };
+        let oov_model = if oov_dir.is_dir() {
+            oov_onnx::Model::load(&oov_dir).ok()
+        } else {
+            None
+        };
 
         match EnglishG2p::new(&lexicon_tsv, oov_model, false) {
             Ok(engine) => Some(engine),
             Err(err) => {
-                eprintln!("warning: failed to parse G2P lexicon at {}: {err}", dict_path.display());
+                eprintln!(
+                    "warning: failed to parse G2P lexicon at {}: {err}",
+                    dict_path.display()
+                );
                 None
-            }
+            },
         }
     }
 
@@ -143,9 +150,12 @@ impl MoonshineG2p {
         match GermanG2p::new(&lexicon_tsv) {
             Ok(engine) => Some(engine),
             Err(err) => {
-                eprintln!("warning: failed to parse G2P lexicon at {}: {err}", dict_path.display());
+                eprintln!(
+                    "warning: failed to parse G2P lexicon at {}: {err}",
+                    dict_path.display()
+                );
                 None
-            }
+            },
         }
     }
 }
@@ -183,8 +193,7 @@ mod tests {
     #[test]
     fn add_language_enables_text_to_ipa() {
         let mut phonemizer = MoonshineG2p::new();
-        let english =
-            languages::english::EnglishG2p::new("hello\thəlˈoʊ\n", None, false).unwrap();
+        let english = languages::english::EnglishG2p::new("hello\thəlˈoʊ\n", None, false).unwrap();
         phonemizer.add_language(LanguageG2p::English(Box::new(english)));
 
         assert_eq!(phonemizer.text_to_ipa("hello", "en_us").unwrap(), "həlˈoʊ");
@@ -204,7 +213,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let en_us_dir = dir.path().join("en_us");
         std::fs::create_dir_all(&en_us_dir).unwrap();
-        std::fs::write(en_us_dir.join("dict_filtered_heteronyms.tsv"), "hello\thəlˈoʊ\n").unwrap();
+        std::fs::write(
+            en_us_dir.join("dict_filtered_heteronyms.tsv"),
+            "hello\thəlˈoʊ\n",
+        )
+        .unwrap();
 
         let phonemizer = MoonshineG2p::from_g2p_dir(dir.path()).unwrap();
         assert_eq!(phonemizer.text_to_ipa("hello", "en_us").unwrap(), "həlˈoʊ");
@@ -217,7 +230,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let en_us_dir = dir.path().join("en_us");
         std::fs::create_dir_all(en_us_dir.join("oov")).unwrap();
-        std::fs::write(en_us_dir.join("dict_filtered_heteronyms.tsv"), "hello\thəlˈoʊ\n").unwrap();
+        std::fs::write(
+            en_us_dir.join("dict_filtered_heteronyms.tsv"),
+            "hello\thəlˈoʊ\n",
+        )
+        .unwrap();
 
         let phonemizer = MoonshineG2p::from_g2p_dir(dir.path()).unwrap();
         assert_eq!(phonemizer.text_to_ipa("hello", "en_us").unwrap(), "həlˈoʊ");
@@ -244,7 +261,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let en_us_dir = dir.path().join("en_us");
         std::fs::create_dir_all(&en_us_dir).unwrap();
-        std::fs::write(en_us_dir.join("dict_filtered_heteronyms.tsv"), "hello\thəlˈoʊ\n").unwrap();
+        std::fs::write(
+            en_us_dir.join("dict_filtered_heteronyms.tsv"),
+            "hello\thəlˈoʊ\n",
+        )
+        .unwrap();
         let de_dir = dir.path().join("de");
         std::fs::create_dir_all(&de_dir).unwrap();
         std::fs::write(de_dir.join("dict.tsv"), "Haus\thaʊ̯s\n").unwrap();
@@ -269,7 +290,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let en_us_dir = dir.path().join("en_us");
         std::fs::create_dir_all(&en_us_dir).unwrap();
-        std::fs::write(en_us_dir.join("dict_filtered_heteronyms.tsv"), "no-tab-here\n").unwrap();
+        std::fs::write(
+            en_us_dir.join("dict_filtered_heteronyms.tsv"),
+            "no-tab-here\n",
+        )
+        .unwrap();
         let de_dir = dir.path().join("de");
         std::fs::create_dir_all(&de_dir).unwrap();
         std::fs::write(de_dir.join("dict.tsv"), "Haus\thaʊ̯s\n").unwrap();
@@ -286,7 +311,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let en_us_dir = dir.path().join("en_us");
         std::fs::create_dir_all(&en_us_dir).unwrap();
-        std::fs::write(en_us_dir.join("dict_filtered_heteronyms.tsv"), "hello\thəlˈoʊ\n").unwrap();
+        std::fs::write(
+            en_us_dir.join("dict_filtered_heteronyms.tsv"),
+            "hello\thəlˈoʊ\n",
+        )
+        .unwrap();
         let de_dir = dir.path().join("de");
         std::fs::create_dir_all(&de_dir).unwrap();
         std::fs::write(de_dir.join("dict.tsv"), "no-tab-here\n").unwrap();

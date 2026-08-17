@@ -1,13 +1,13 @@
-use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor, D};
+use super::super::modules::ffn::SwiGluFfn;
 use super::super::modules::rotary::RotaryEmbedding;
+use anyhow::Result;
+use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_core::{Module, StreamingModule};
 use candle_nn::{
-    conv1d, conv1d_no_bias, conv_transpose1d, layer_norm, linear, linear_no_bias, Activation,
-    Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, LayerNorm, Linear, RmsNorm,
-    VarBuilder,
+    Activation, Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, LayerNorm, Linear,
+    RmsNorm, VarBuilder, conv_transpose1d, conv1d, conv1d_no_bias, layer_norm, linear,
+    linear_no_bias,
 };
-use super::super::modules::ffn::SwiGluFfn;
 // TODO(candle-transformers-removal): Mimi is a model-component dependency; see
 // CANDLE_TRANSFORMERS.md.
 use candle_transformers::models::mimi;
@@ -124,30 +124,78 @@ pub struct EncoderConfig {
     #[serde(default = "default_enc_vq_hidden_dim")]
     pub vector_quantization_hidden_dimension: usize,
 }
-fn default_enc_num_filters() -> usize { 64 }
-fn default_enc_hidden_size() -> usize { 512 }
-fn default_enc_intermediate_size() -> usize { 2048 }
-fn default_enc_num_hidden_layers() -> usize { 8 }
-fn default_enc_num_attention_heads() -> usize { 8 }
-fn default_enc_num_key_value_heads() -> usize { 8 }
-fn default_enc_head_dim() -> usize { 64 }
-fn default_enc_kernel_size() -> usize { 7 }
-fn default_enc_last_kernel_size() -> usize { 3 }
-fn default_enc_residual_kernel_size() -> usize { 3 }
-fn default_enc_num_residual_layers() -> usize { 1 }
-fn default_enc_upsampling_ratios() -> Vec<usize> { vec![8, 6, 5, 4] }
-fn default_enc_codebook_dim() -> usize { 256 }
-fn default_enc_codebook_size() -> usize { 2048 }
-fn default_enc_num_quantizers() -> usize { 32 }
-fn default_enc_num_semantic_quantizers() -> usize { 1 }
-fn default_enc_layer_scale_init() -> f64 { 0.01 }
-fn default_enc_rms_eps() -> f64 { 1e-5 }
-fn default_enc_rope_theta() -> f64 { 10000.0 }
-fn default_enc_max_pos() -> usize { 8000 }
-fn default_enc_sliding_window() -> usize { 250 }
-fn default_enc_attention_bias() -> bool { false }
-fn default_enc_upsample_groups() -> usize { 512 }
-fn default_enc_vq_hidden_dim() -> usize { 256 }
+fn default_enc_num_filters() -> usize {
+    64
+}
+fn default_enc_hidden_size() -> usize {
+    512
+}
+fn default_enc_intermediate_size() -> usize {
+    2048
+}
+fn default_enc_num_hidden_layers() -> usize {
+    8
+}
+fn default_enc_num_attention_heads() -> usize {
+    8
+}
+fn default_enc_num_key_value_heads() -> usize {
+    8
+}
+fn default_enc_head_dim() -> usize {
+    64
+}
+fn default_enc_kernel_size() -> usize {
+    7
+}
+fn default_enc_last_kernel_size() -> usize {
+    3
+}
+fn default_enc_residual_kernel_size() -> usize {
+    3
+}
+fn default_enc_num_residual_layers() -> usize {
+    1
+}
+fn default_enc_upsampling_ratios() -> Vec<usize> {
+    vec![8, 6, 5, 4]
+}
+fn default_enc_codebook_dim() -> usize {
+    256
+}
+fn default_enc_codebook_size() -> usize {
+    2048
+}
+fn default_enc_num_quantizers() -> usize {
+    32
+}
+fn default_enc_num_semantic_quantizers() -> usize {
+    1
+}
+fn default_enc_layer_scale_init() -> f64 {
+    0.01
+}
+fn default_enc_rms_eps() -> f64 {
+    1e-5
+}
+fn default_enc_rope_theta() -> f64 {
+    10000.0
+}
+fn default_enc_max_pos() -> usize {
+    8000
+}
+fn default_enc_sliding_window() -> usize {
+    250
+}
+fn default_enc_attention_bias() -> bool {
+    false
+}
+fn default_enc_upsample_groups() -> usize {
+    512
+}
+fn default_enc_vq_hidden_dim() -> usize {
+    256
+}
 
 impl Default for EncoderConfig {
     fn default() -> Self {
@@ -190,7 +238,9 @@ pub struct TokenizerV2Config {
     #[serde(default = "default_encoder_valid_num_quantizers")]
     pub encoder_valid_num_quantizers: usize,
 }
-fn default_encoder_valid_num_quantizers() -> usize { 16 }
+fn default_encoder_valid_num_quantizers() -> usize {
+    16
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecoderConfig {
@@ -348,30 +398,30 @@ impl TokenizerAttention {
         let k_t = k.transpose(2, 3)?.contiguous()?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = (q
-            .matmul(&k_t)
-            .map_err(|e| anyhow::anyhow!(
+        let scores = (q.matmul(&k_t).map_err(|e| {
+            anyhow::anyhow!(
                 "TokenizerAttention q@k^T matmul failed (q={:?}, k_t={:?}): {e}",
                 q.dims(),
                 k_t.dims()
-            ))?
-            * scale)?;
-        let mask = causal_sliding_mask(t, self.sliding_window, hidden.device())?.to_dtype(scores.dtype())?;
+            )
+        })? * scale)?;
+        let mask = causal_sliding_mask(t, self.sliding_window, hidden.device())?
+            .to_dtype(scores.dtype())?;
         let scores = scores.broadcast_add(&mask)?;
         // Compute softmax in F32 for numeric stability
         let input_dtype = scores.dtype();
-        let probs = candle_nn::ops::softmax_last_dim(
-            &scores.to_dtype(candle_core::DType::F32)?,
-        )?
-        .to_dtype(input_dtype)?
-        .contiguous()?;
+        let probs = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?
+            .to_dtype(input_dtype)?
+            .contiguous()?;
         let out = probs
             .matmul(&v)
-            .map_err(|e| anyhow::anyhow!(
-                "TokenizerAttention attn@v matmul failed (attn={:?}, v={:?}): {e}",
-                probs.dims(),
-                v.dims()
-            ))?
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "TokenizerAttention attn@v matmul failed (attn={:?}, v={:?}): {e}",
+                    probs.dims(),
+                    v.dims()
+                )
+            })?
             .transpose(1, 2)?
             .reshape((b, t, self.num_heads * self.head_dim))?
             .apply(&self.o_proj)?;
@@ -391,7 +441,7 @@ impl LayerScale {
             Err(_) => {
                 let v = vec![init as f32; channels];
                 Tensor::new(v.as_slice(), vb.device())?
-            }
+            },
         };
         Ok(Self { scale })
     }
@@ -416,8 +466,17 @@ impl TokenizerTransformerLayer {
     fn new(cfg: &DecoderConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             self_attn: TokenizerAttention::new(cfg, vb.pp("self_attn"))?,
-            mlp: SwiGluFfn::new(cfg.hidden_size, cfg.intermediate_size, Activation::Silu, vb.pp("mlp"))?,
-            input_layernorm: candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?,
+            mlp: SwiGluFfn::new(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                Activation::Silu,
+                vb.pp("mlp"),
+            )?,
+            input_layernorm: candle_nn::rms_norm(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                vb.pp("input_layernorm"),
+            )?,
             post_attention_layernorm: candle_nn::rms_norm(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
@@ -498,10 +557,20 @@ impl CausalConvNet {
         groups: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let cfg = Conv1dConfig { stride, dilation, groups, ..Default::default() };
+        let cfg = Conv1dConfig {
+            stride,
+            dilation,
+            groups,
+            ..Default::default()
+        };
         let conv = conv1d(in_channels, out_channels, kernel_size, cfg, vb.pp("conv"))?;
         let effective = (kernel_size - 1) * dilation + 1;
-        Ok(Self { conv, stride, kernel_size: effective, padding: effective.saturating_sub(stride) })
+        Ok(Self {
+            conv,
+            stride,
+            kernel_size: effective,
+            padding: effective.saturating_sub(stride),
+        })
     }
 
     fn new_no_bias(
@@ -513,10 +582,20 @@ impl CausalConvNet {
         groups: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let cfg = Conv1dConfig { stride, dilation, groups, ..Default::default() };
+        let cfg = Conv1dConfig {
+            stride,
+            dilation,
+            groups,
+            ..Default::default()
+        };
         let conv = conv1d_no_bias(in_channels, out_channels, kernel_size, cfg, vb.pp("conv"))?;
         let effective = (kernel_size - 1) * dilation + 1;
-        Ok(Self { conv, stride, kernel_size: effective, padding: effective.saturating_sub(stride) })
+        Ok(Self {
+            conv,
+            stride,
+            kernel_size: effective,
+            padding: effective.saturating_sub(stride),
+        })
     }
 
     fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
@@ -711,7 +790,7 @@ impl EuclideanCodebook {
             Err(_) => {
                 let ones = vec![1f32; codebook_size];
                 Tensor::new(ones.as_slice(), vb.device())?.to_dtype(embedding_sum.dtype())?
-            }
+            },
         };
 
         Ok(Self {
@@ -760,10 +839,19 @@ struct ResidualVectorQuantization {
 }
 
 impl ResidualVectorQuantization {
-    fn new(num_quantizers: usize, dim: usize, codebook_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        num_quantizers: usize,
+        dim: usize,
+        codebook_size: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let mut layers = Vec::with_capacity(num_quantizers);
         for i in 0..num_quantizers {
-            layers.push(VectorQuantization::new(dim, codebook_size, vb.pp("layers").pp(i))?);
+            layers.push(VectorQuantization::new(
+                dim,
+                codebook_size,
+                vb.pp("layers").pp(i),
+            )?);
         }
         Ok(Self { layers, dim })
     }
@@ -771,7 +859,10 @@ impl ResidualVectorQuantization {
     fn decode(&self, codes: &Tensor) -> Result<Tensor> {
         let (_, k, _) = codes.dims3()?;
         if k > self.layers.len() {
-            anyhow::bail!("Too many quantizers: got {k}, model has {}", self.layers.len());
+            anyhow::bail!(
+                "Too many quantizers: got {k}, model has {}",
+                self.layers.len()
+            );
         }
         let mut sum: Option<Tensor> = None;
         for idx in 0..k {
@@ -783,7 +874,7 @@ impl ResidualVectorQuantization {
                         q = q.to_dtype(acc.dtype())?;
                     }
                     (acc + q)?
-                }
+                },
                 None => q,
             });
         }
@@ -825,10 +916,20 @@ impl PointwiseProjNoBias {
 }
 
 impl ResidualVectorQuantizer {
-    fn new(n_q: usize, dimension: usize, bins: usize, output_dimension: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        n_q: usize,
+        dimension: usize,
+        bins: usize,
+        output_dimension: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
             vq: ResidualVectorQuantization::new(n_q, dimension, bins, vb.pp("vq"))?,
-            output_proj: PointwiseProjNoBias::new(dimension, output_dimension, vb.pp("output_proj"))?,
+            output_proj: PointwiseProjNoBias::new(
+                dimension,
+                output_dimension,
+                vb.pp("output_proj"),
+            )?,
         })
     }
 
@@ -873,9 +974,11 @@ impl SplitResidualVectorQuantizer {
             .rvq_first
             .decode(&codes.narrow(1, 0, self.n_q_semantic)?)?;
         if k > self.n_q_semantic {
-            let mut rest = self
-                .rvq_rest
-                .decode(&codes.narrow(1, self.n_q_semantic, k - self.n_q_semantic)?)?;
+            let mut rest = self.rvq_rest.decode(&codes.narrow(
+                1,
+                self.n_q_semantic,
+                k - self.n_q_semantic,
+            )?)?;
             if rest.dtype() != first.dtype() {
                 rest = rest.to_dtype(first.dtype())?;
             }
@@ -919,8 +1022,24 @@ struct EncoderResidualUnit {
 impl EncoderResidualUnit {
     fn new(channels: usize, kernel_size: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
         let mut block = Vec::new();
-        block.push(CausalConvNet::new(channels, channels / 2, kernel_size, 1, dilation, 1, vb.pp("block").pp(1))?);
-        block.push(CausalConvNet::new(channels / 2, channels, 1, 1, 1, 1, vb.pp("block").pp(3))?);
+        block.push(CausalConvNet::new(
+            channels,
+            channels / 2,
+            kernel_size,
+            1,
+            dilation,
+            1,
+            vb.pp("block").pp(1),
+        )?);
+        block.push(CausalConvNet::new(
+            channels / 2,
+            channels,
+            1,
+            1,
+            1,
+            1,
+            vb.pp("block").pp(3),
+        )?);
         Ok(Self { block })
     }
 
@@ -955,15 +1074,25 @@ impl EncoderBlock {
         for i in 0..num_residual {
             let dilation = 2usize.pow(i as u32);
             residuals.push(EncoderResidualUnit::new(
-                in_channels, residual_kernel, dilation,
+                in_channels,
+                residual_kernel,
+                dilation,
                 layers_vb.pp(res_layer_idx),
             )?);
         }
         let downsample = CausalConvNet::new(
-            in_channels, out_channels, stride * 2, stride, 1, 1,
+            in_channels,
+            out_channels,
+            stride * 2,
+            stride,
+            1,
+            1,
             layers_vb.pp(down_layer_idx),
         )?;
-        Ok(Self { residuals, downsample })
+        Ok(Self {
+            residuals,
+            downsample,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -1024,28 +1153,36 @@ impl EncoderTransformerLayer {
 
         // Self-attention with sliding window
         let normed = x.apply(&self.input_ln)?;
-        let q = normed.apply(&self.q_proj)?.reshape((b, t, h, hd))?.transpose(1, 2)?;
-        let k = normed.apply(&self.k_proj)?.reshape((b, t, h, hd))?.transpose(1, 2)?;
-        let v = normed.apply(&self.v_proj)?.reshape((b, t, h, hd))?.transpose(1, 2)?;
+        let q = normed
+            .apply(&self.q_proj)?
+            .reshape((b, t, h, hd))?
+            .transpose(1, 2)?;
+        let k = normed
+            .apply(&self.k_proj)?
+            .reshape((b, t, h, hd))?
+            .transpose(1, 2)?;
+        let v = normed
+            .apply(&self.v_proj)?
+            .reshape((b, t, h, hd))?
+            .transpose(1, 2)?;
 
         let (q, k) = rotary.apply(&q, &k, 0, t)?;
 
         // Sliding window causal attention
         let scale = (hd as f64).sqrt().recip();
         let attn_w = q.matmul(&k.transpose(2, 3)?)?.affine(scale, 0.0)?;
-        let mask = causal_sliding_mask(t, self.sliding_window, x.device())?
-            .to_dtype(x.dtype())?;
+        let mask = causal_sliding_mask(t, self.sliding_window, x.device())?.to_dtype(x.dtype())?;
         let attn_w = attn_w.broadcast_add(&mask)?;
         // Compute softmax in F32 for numeric stability
         let input_dtype = attn_w.dtype();
-        let attn_w = candle_nn::ops::softmax_last_dim(
-            &attn_w.to_dtype(candle_core::DType::F32)?,
-        )?
-        .to_dtype(input_dtype)?;
+        let attn_w = candle_nn::ops::softmax_last_dim(&attn_w.to_dtype(candle_core::DType::F32)?)?
+            .to_dtype(input_dtype)?;
 
-
-        let attn_out = attn_w.matmul(&v.contiguous()?)?
-            .transpose(1, 2)?.contiguous()?.reshape((b, t, h * hd))?;
+        let attn_out = attn_w
+            .matmul(&v.contiguous()?)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((b, t, h * hd))?;
         let attn_out = attn_out.apply(&self.o_proj)?;
         let attn_out = attn_out.broadcast_mul(&self.attn_scale.reshape((1, 1, d))?)?;
         let x_post_attn = (x + &attn_out)?;
@@ -1063,7 +1200,9 @@ impl EuclideanCodebook {
     #[allow(dead_code)]
     fn encode(&self, x: &Tensor) -> Result<Tensor> {
         // x: [B, T, dim] or [T, dim]
-        let usage = self.cluster_usage.clamp(self.epsilon, f64::INFINITY)?
+        let usage = self
+            .cluster_usage
+            .clamp(self.epsilon, f64::INFINITY)?
             .reshape((self.cluster_usage.dims1()?, 1))?;
         let embedding = self.embedding_sum.broadcast_div(&usage)?; // [codebook_size, dim]
 
@@ -1079,7 +1218,8 @@ impl EuclideanCodebook {
         let e_sq = embedding.sqr()?.sum(1)?; // [C]
         let dot = x_flat.matmul(&embedding.t()?)?; // [N, C]
         // dist = x_sq[:, None] - 2*dot + e_sq[None, :]
-        let dist = (x_sq.reshape((n, 1))?.broadcast_sub(&(dot * 2.0)?)? + e_sq.reshape((1, embedding.dims2()?.0))?)?;
+        let dist = (x_sq.reshape((n, 1))?.broadcast_sub(&(dot * 2.0)?)?
+            + e_sq.reshape((1, embedding.dims2()?.0))?)?;
         // argmin over codebook dim
         let codes = dist.argmin(1)?; // [N]
 
@@ -1117,13 +1257,19 @@ impl EncEuclideanCodebook {
             Err(_) => {
                 let ones = vec![1f32; codebook_size];
                 Tensor::new(ones.as_slice(), vb.device())?.to_dtype(embedding_sum.dtype())?
-            }
+            },
         };
-        Ok(Self { embedding_sum, cluster_usage, epsilon: 1e-5 })
+        Ok(Self {
+            embedding_sum,
+            cluster_usage,
+            epsilon: 1e-5,
+        })
     }
 
     fn encode(&self, x: &Tensor) -> Result<Tensor> {
-        let usage = self.cluster_usage.clamp(self.epsilon, f64::INFINITY)?
+        let usage = self
+            .cluster_usage
+            .clamp(self.epsilon, f64::INFINITY)?
             .reshape((self.cluster_usage.dims1()?, 1))?;
         let embedding = self.embedding_sum.broadcast_div(&usage)?; // [C, D]
 
@@ -1135,11 +1281,13 @@ impl EncEuclideanCodebook {
         };
         let (n, _d) = x_flat.dims2()?;
         let c = embedding.dims2()?.0;
-        let x_sq = x_flat.sqr()?.sum(1)?;  // [N]
+        let x_sq = x_flat.sqr()?.sum(1)?; // [N]
         let e_sq = embedding.sqr()?.sum(1)?; // [C]
         let dot = x_flat.matmul(&embedding.t()?)?; // [N, C]
         // dist = x_sq[N,1] - 2*dot[N,C] + e_sq[1,C]
-        let dist = x_sq.reshape((n, 1))?.broadcast_sub(&dot.affine(2.0, 0.0)?)?
+        let dist = x_sq
+            .reshape((n, 1))?
+            .broadcast_sub(&dot.affine(2.0, 0.0)?)?
             .broadcast_add(&e_sq.reshape((1, c))?)?;
         let codes = dist.argmin(1)?;
 
@@ -1152,7 +1300,9 @@ impl EncEuclideanCodebook {
     }
 
     fn decode(&self, codes: &Tensor) -> Result<Tensor> {
-        let usage = self.cluster_usage.clamp(self.epsilon, f64::INFINITY)?
+        let usage = self
+            .cluster_usage
+            .clamp(self.epsilon, f64::INFINITY)?
             .reshape((self.cluster_usage.dims1()?, 1))?;
         let embedding = self.embedding_sum.broadcast_div(&usage)?;
         let flat = codes.flatten_all()?;
@@ -1168,7 +1318,9 @@ struct EncVectorQuantization {
 
 impl EncVectorQuantization {
     fn new(dim: usize, codebook_size: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self { codebook: EncEuclideanCodebook::new(dim, codebook_size, vb.pp("codebook"))? })
+        Ok(Self {
+            codebook: EncEuclideanCodebook::new(dim, codebook_size, vb.pp("codebook"))?,
+        })
     }
 
     fn encode(&self, x: &Tensor) -> Result<Tensor> {
@@ -1200,19 +1352,34 @@ impl EncoderSplitRVQ {
         let sem_vb = vb.pp("semantic_residual_vector_quantizer");
         let aco_vb = vb.pp("acoustic_residual_vector_quantizer");
 
-        let semantic_input_proj = PointwiseProjNoBias::new(cfg.hidden_size, dim, sem_vb.pp("input_proj"))?;
-        let acoustic_input_proj = PointwiseProjNoBias::new(cfg.hidden_size, dim, aco_vb.pp("input_proj"))?;
+        let semantic_input_proj =
+            PointwiseProjNoBias::new(cfg.hidden_size, dim, sem_vb.pp("input_proj"))?;
+        let acoustic_input_proj =
+            PointwiseProjNoBias::new(cfg.hidden_size, dim, aco_vb.pp("input_proj"))?;
 
         let mut semantic_layers = Vec::new();
         for i in 0..n_q_semantic {
-            semantic_layers.push(EncVectorQuantization::new(dim, codebook_size, sem_vb.pp("layers").pp(i))?);
+            semantic_layers.push(EncVectorQuantization::new(
+                dim,
+                codebook_size,
+                sem_vb.pp("layers").pp(i),
+            )?);
         }
         let mut acoustic_layers = Vec::new();
         for i in 0..n_q_acoustic {
-            acoustic_layers.push(EncVectorQuantization::new(dim, codebook_size, aco_vb.pp("layers").pp(i))?);
+            acoustic_layers.push(EncVectorQuantization::new(
+                dim,
+                codebook_size,
+                aco_vb.pp("layers").pp(i),
+            )?);
         }
 
-        Ok(Self { semantic_input_proj, acoustic_input_proj, semantic_layers, acoustic_layers })
+        Ok(Self {
+            semantic_input_proj,
+            acoustic_input_proj,
+            semantic_layers,
+            acoustic_layers,
+        })
     }
 
     /// Encode: x [B, D, T] → codes [B, T, n_q_total].
@@ -1262,7 +1429,15 @@ impl MimiEncoder {
         let layers_vb = vb.pp("encoder").pp("layers");
 
         // Layer 0: first conv [1 → num_filters, k=kernel_size]
-        let first_conv = CausalConvNet::new(1, cfg.num_filters, cfg.kernel_size, 1, 1, 1, layers_vb.pp(0))?;
+        let first_conv = CausalConvNet::new(
+            1,
+            cfg.num_filters,
+            cfg.kernel_size,
+            1,
+            1,
+            1,
+            layers_vb.pp(0),
+        )?;
 
         // Encoder blocks. The actual layer indices in the safetensors are non-sequential.
         // upsampling_ratios = [8, 6, 5, 4] are the DECODER ratios (largest first).
@@ -1281,28 +1456,55 @@ impl MimiEncoder {
             let res_idx = res_indices[block_i];
             let down_idx = down_indices[block_i];
             encoder_layers.push(EncoderBlock::new(
-                in_ch, out_ch, stride,
+                in_ch,
+                out_ch,
+                stride,
                 cfg.num_residual_layers,
                 cfg.residual_kernel_size,
-                res_idx, down_idx,
+                res_idx,
+                down_idx,
                 &layers_vb,
             )?);
             in_ch = out_ch;
         }
 
         // Layer 14: last conv [in_ch → hidden_size, k=last_kernel_size]
-        let last_conv = CausalConvNet::new(in_ch, cfg.hidden_size, cfg.last_kernel_size, 1, 1, 1, layers_vb.pp(14))?;
+        let last_conv = CausalConvNet::new(
+            in_ch,
+            cfg.hidden_size,
+            cfg.last_kernel_size,
+            1,
+            1,
+            1,
+            layers_vb.pp(14),
+        )?;
 
         // Downsample: ConvDownsample1d(compress=2) → kernel_size=2*compress=4, stride=compress=2
         // Weight: encoder.downsample.conv.weight [512, 512, 4] (no bias key)
-        let downsample = CausalConvNet::new_no_bias(cfg.hidden_size, cfg.hidden_size, 4, 2, 1, 1, vb.pp("downsample"))?;
+        let downsample = CausalConvNet::new_no_bias(
+            cfg.hidden_size,
+            cfg.hidden_size,
+            4,
+            2,
+            1,
+            1,
+            vb.pp("downsample"),
+        )?;
 
         // Encoder transformer
         let mut transformer_layers = Vec::new();
         for i in 0..cfg.num_hidden_layers {
-            transformer_layers.push(EncoderTransformerLayer::new(cfg, vb.pp("encoder_transformer").pp("layers").pp(i))?);
+            transformer_layers.push(EncoderTransformerLayer::new(
+                cfg,
+                vb.pp("encoder_transformer").pp("layers").pp(i),
+            )?);
         }
-        let rotary = RotaryEmbedding::new(cfg.head_dim, cfg.max_position_embeddings, cfg.rope_theta, vb.device())?;
+        let rotary = RotaryEmbedding::new(
+            cfg.head_dim,
+            cfg.max_position_embeddings,
+            cfg.rope_theta,
+            vb.device(),
+        )?;
 
         // Quantizer
         let quantizer = EncoderSplitRVQ::new(cfg, vb.pp("quantizer"))?;
@@ -1417,7 +1619,8 @@ impl HfMimiEncoder {
             vb.pp("encoder_transformer"),
         )?;
 
-        let encoder_frame_rate = cfg.sample_rate / cfg.seanet.ratios.iter().product::<usize>() as f64;
+        let encoder_frame_rate =
+            cfg.sample_rate / cfg.seanet.ratios.iter().product::<usize>() as f64;
         let downsample_stride = (encoder_frame_rate / cfg.frame_rate) as usize;
         let downsample = mimi::conv::ConvDownsample1d::new(
             downsample_stride,
@@ -1546,22 +1749,30 @@ impl NativeSpeechTokenizerDecoder {
         )?));
 
         let encoder_hf = match filenames.first() {
-            Some(path) => match HfMimiEncoder::from_safetensors(path, device, cfg.encoder_valid_num_quantizers) {
+            Some(path) => match HfMimiEncoder::from_safetensors(
+                path,
+                device,
+                cfg.encoder_valid_num_quantizers,
+            ) {
                 Ok(enc) => Some(enc),
                 Err(e) => {
                     eprintln!("[speech_tokenizer] Warning: HF-style encoder not loaded: {e}");
                     None
-                }
+                },
             },
             None => None,
         };
 
-        let encoder = match MimiEncoder::new(&cfg.encoder_config, cfg.encoder_valid_num_quantizers, vb.pp("encoder")) {
+        let encoder = match MimiEncoder::new(
+            &cfg.encoder_config,
+            cfg.encoder_valid_num_quantizers,
+            vb.pp("encoder"),
+        ) {
             Ok(enc) => Some(enc),
             Err(e) => {
                 eprintln!("[speech_tokenizer] Warning: encoder not loaded: {e}");
                 None
-            }
+            },
         };
 
         Ok(Self {
@@ -1612,7 +1823,9 @@ impl NativeSpeechTokenizerDecoder {
                 k
             );
         }
-        if debug { eprintln!("[DECODER] input codes: {:?}", codes.dims()); }
+        if debug {
+            eprintln!("[DECODER] input codes: {:?}", codes.dims());
+        }
 
         // Ensure codes are on the right device (I64 indices don't need dtype cast)
         let mut hidden = self.quantizer.decode(codes)?;
@@ -1620,38 +1833,61 @@ impl NativeSpeechTokenizerDecoder {
         if hidden.dtype() != DType::F32 {
             hidden = hidden.to_dtype(DType::F32)?;
         }
-        if debug { eprintln!("[DECODER] after quantizer.decode: {:?}", hidden.dims()); }
+        if debug {
+            eprintln!("[DECODER] after quantizer.decode: {:?}", hidden.dims());
+        }
 
         hidden = self.pre_conv.forward(&hidden)?;
-        if debug { eprintln!("[DECODER] after pre_conv: {:?}", hidden.dims()); }
+        if debug {
+            eprintln!("[DECODER] after pre_conv: {:?}", hidden.dims());
+        }
 
         hidden = hidden.transpose(1, 2)?;
         hidden = self.pre_transformer.forward(&hidden)?;
         hidden = hidden.transpose(1, 2)?;
-        if debug { eprintln!("[DECODER] after pre_transformer: {:?}", hidden.dims()); }
+        if debug {
+            eprintln!("[DECODER] after pre_transformer: {:?}", hidden.dims());
+        }
 
         for (i, (up, block)) in self.upsample.iter().enumerate() {
             hidden = up.forward(&hidden)?;
-            if debug { eprintln!("[DECODER] after upsample[{i}].up: {:?}", hidden.dims()); }
+            if debug {
+                eprintln!("[DECODER] after upsample[{i}].up: {:?}", hidden.dims());
+            }
             hidden = block.forward(&hidden)?;
-            if debug { eprintln!("[DECODER] after upsample[{i}].block: {:?}", hidden.dims()); }
+            if debug {
+                eprintln!("[DECODER] after upsample[{i}].block: {:?}", hidden.dims());
+            }
         }
 
         let mut wav = hidden;
         for (i, block) in self.decoder.iter().enumerate() {
             wav = block.forward(&wav)?;
-            if debug { eprintln!("[DECODER] after decoder[{i}]: {:?}", wav.dims()); }
+            if debug {
+                eprintln!("[DECODER] after decoder[{i}]: {:?}", wav.dims());
+            }
         }
 
-        if debug { eprintln!("[DECODER] final output (before clamp): {:?}", wav.dims()); }
+        if debug {
+            eprintln!("[DECODER] final output (before clamp): {:?}", wav.dims());
+        }
         Ok(wav.clamp(-1.0, 1.0)?)
     }
 
-    pub fn chunked_decode(&self, codes: &Tensor, chunk_size: usize, left_context_size: usize) -> Result<Tensor> {
+    pub fn chunked_decode(
+        &self,
+        codes: &Tensor,
+        chunk_size: usize,
+        left_context_size: usize,
+    ) -> Result<Tensor> {
         let debug = Self::tts_debug();
         let (_, _, t) = codes.dims3()?;
         if debug {
-            eprintln!("[DECODER] chunked_decode: codes={:?} chunk_size={chunk_size} total_upsample={}", codes.dims(), self.total_upsample);
+            eprintln!(
+                "[DECODER] chunked_decode: codes={:?} chunk_size={chunk_size} total_upsample={}",
+                codes.dims(),
+                self.total_upsample
+            );
         }
         let mut wavs = Vec::new();
         let mut start = 0usize;

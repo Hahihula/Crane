@@ -18,8 +18,8 @@
 use crate::models::modules::attention::{AttentionConfig, RopeMode};
 use crate::models::modules::rotary::RotaryEmbedding;
 use crate::models::modules::transformer::TransformerBlock;
-use crate::models::with_tracing::{linear_no_bias, Linear, RmsNorm};
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use crate::models::with_tracing::{Linear, RmsNorm, linear_no_bias};
+use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::{Activation, VarBuilder};
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -155,7 +155,7 @@ impl Model {
                 } else {
                     Some(self.prepare_causal_attention_mask(b_size, seq_len, seqlen_offset)?)
                 }
-            }
+            },
         };
         let mut xs = self.embed_tokens.forward(input_ids)?;
         let (cos, sin) = self.rotary_emb.forward(seqlen_offset, seq_len)?;

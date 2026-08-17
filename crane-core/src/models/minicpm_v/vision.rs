@@ -28,7 +28,10 @@
 //!   length. The remaining encoder layers then run on the shorter sequence.
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{conv2d, embedding, layer_norm, linear, Activation, Conv2d, Conv2dConfig, Embedding, LayerNorm, Linear, VarBuilder};
+use candle_nn::{
+    Activation, Conv2d, Conv2dConfig, Embedding, LayerNorm, Linear, VarBuilder, conv2d, embedding,
+    layer_norm, linear,
+};
 
 use super::config::VisionConfig;
 
@@ -68,17 +71,24 @@ impl VisionAttention {
     /// themselves; see [`blocked_self_attention`].
     fn forward_block(&self, xs: &Tensor) -> Result<Tensor> {
         let (seq_len, _dim) = xs.dims2()?;
-        let q = self.q_proj.forward(xs)?
+        let q = self
+            .q_proj
+            .forward(xs)?
             .reshape((seq_len, self.num_heads, self.head_dim))?
             .transpose(0, 1)?; // [heads, seq, head_dim]
-        let k = self.k_proj.forward(xs)?
+        let k = self
+            .k_proj
+            .forward(xs)?
             .reshape((seq_len, self.num_heads, self.head_dim))?
             .transpose(0, 1)?;
-        let v = self.v_proj.forward(xs)?
+        let v = self
+            .v_proj
+            .forward(xs)?
             .reshape((seq_len, self.num_heads, self.head_dim))?
             .transpose(0, 1)?;
 
-        let attn_weights = (q.contiguous()?.matmul(&k.transpose(1, 2)?.contiguous()?)? * self.scale)?;
+        let attn_weights =
+            (q.contiguous()?.matmul(&k.transpose(1, 2)?.contiguous()?)? * self.scale)?;
         let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
         let attn_output = attn_weights.matmul(&v.contiguous()?)?; // [heads, seq, head_dim]
 
@@ -96,7 +106,11 @@ impl VisionAttention {
 /// `MiniCPMV4_6VisionAttention.forward` — attention never crosses a chunk
 /// boundary, whether chunks are whole images (regular encoder layers) or
 /// 2x2 windows (the window-attention merger).
-fn blocked_self_attention(attn: &VisionAttention, xs: &Tensor, boundaries: &[usize]) -> Result<Tensor> {
+fn blocked_self_attention(
+    attn: &VisionAttention,
+    xs: &Tensor,
+    boundaries: &[usize],
+) -> Result<Tensor> {
     if boundaries.len() == 2 {
         // Single chunk spanning the whole sequence — skip the split/cat.
         return attn.forward_block(xs);
@@ -119,7 +133,12 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(dim: usize, intermediate: usize, activation: Activation, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        dim: usize,
+        intermediate: usize,
+        activation: Activation,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
             fc1: linear(dim, intermediate, vb.pp("fc1"))?,
             fc2: linear(intermediate, dim, vb.pp("fc2"))?,
@@ -157,7 +176,11 @@ impl VisionEmbeddings {
             conv_cfg,
             vb.pp("patch_embedding"),
         )?;
-        let position_embedding = embedding(cfg.num_patches(), cfg.hidden_size, vb.pp("position_embedding"))?;
+        let position_embedding = embedding(
+            cfg.num_patches(),
+            cfg.hidden_size,
+            vb.pp("position_embedding"),
+        )?;
         Ok(Self {
             patch_embedding,
             position_embedding,
@@ -170,7 +193,11 @@ impl VisionEmbeddings {
     /// into `pixel_values`, in order; `sum(h*w) == total_patches`.
     ///
     /// Returns `[1, total_patches, hidden_size]`.
-    pub fn forward(&self, pixel_values: &Tensor, target_sizes: &[(usize, usize)]) -> Result<Tensor> {
+    pub fn forward(
+        &self,
+        pixel_values: &Tensor,
+        target_sizes: &[(usize, usize)],
+    ) -> Result<Tensor> {
         let patch_embeds = self.patch_embedding.forward(pixel_values)?; // [1, hidden, 1, total_patches]
         let (b, hidden, _one, total_patches) = patch_embeds.dims4()?;
         let patch_embeds = patch_embeds
@@ -220,9 +247,18 @@ impl EncoderLayer {
     pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             layer_norm1: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm1"))?,
-            self_attn: VisionAttention::new(cfg.hidden_size, cfg.num_attention_heads, vb.pp("self_attn"))?,
+            self_attn: VisionAttention::new(
+                cfg.hidden_size,
+                cfg.num_attention_heads,
+                vb.pp("self_attn"),
+            )?,
             layer_norm2: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm2"))?,
-            mlp: Mlp::new(cfg.hidden_size, cfg.intermediate_size, Activation::GeluPytorchTanh, vb.pp("mlp"))?,
+            mlp: Mlp::new(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                Activation::GeluPytorchTanh,
+                vb.pp("mlp"),
+            )?,
         })
     }
 
@@ -258,15 +294,27 @@ pub struct WindowAttentionMerger {
 }
 
 impl WindowAttentionMerger {
-    pub fn new(cfg: &VisionConfig, window_kernel_size: (usize, usize), vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &VisionConfig,
+        window_kernel_size: (usize, usize),
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let (window_h, window_w) = window_kernel_size;
         let window_hidden_size = cfg.hidden_size * window_h * window_w;
         let window_intermediate_size = cfg.intermediate_size * window_h * window_w;
         Ok(Self {
             layer_norm1: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm1"))?,
-            self_attn: VisionAttention::new(cfg.hidden_size, cfg.num_attention_heads, vb.pp("self_attn"))?,
+            self_attn: VisionAttention::new(
+                cfg.hidden_size,
+                cfg.num_attention_heads,
+                vb.pp("self_attn"),
+            )?,
             pre_norm: layer_norm(window_hidden_size, cfg.layer_norm_eps, vb.pp("pre_norm"))?,
-            linear_1: linear(window_hidden_size, window_intermediate_size, vb.pp("linear_1"))?,
+            linear_1: linear(
+                window_hidden_size,
+                window_intermediate_size,
+                vb.pp("linear_1"),
+            )?,
             linear_2: linear(window_intermediate_size, cfg.hidden_size, vb.pp("linear_2"))?,
             window_h,
             window_w,
@@ -389,7 +437,12 @@ pub struct VisionModel {
 }
 
 impl VisionModel {
-    pub fn new(cfg: &VisionConfig, insert_layer_id: usize, window_kernel_size: (usize, usize), vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &VisionConfig,
+        insert_layer_id: usize,
+        window_kernel_size: (usize, usize),
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_layers = vb.pp("encoder").pp("layers");
@@ -397,7 +450,8 @@ impl VisionModel {
             layers.push(EncoderLayer::new(cfg, vb_layers.pp(i))?);
         }
         let vit_merger = WindowAttentionMerger::new(cfg, window_kernel_size, vb.pp("vit_merger"))?;
-        let post_layernorm = layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
+        let post_layernorm =
+            layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
         Ok(Self {
             embeddings,
             layers,
@@ -422,7 +476,11 @@ impl VisionModel {
     /// element accounts for the 2x2 merge inside `vit_merger` (each axis
     /// halved), needed by the caller ([`super::merger::Merger`]) to know the
     /// new per-image chunk boundaries.
-    pub fn forward(&self, pixel_values: &Tensor, target_sizes: &[(usize, usize)]) -> Result<(Tensor, Vec<(usize, usize)>)> {
+    pub fn forward(
+        &self,
+        pixel_values: &Tensor,
+        target_sizes: &[(usize, usize)],
+    ) -> Result<(Tensor, Vec<(usize, usize)>)> {
         let embeds = self.embeddings.forward(pixel_values, target_sizes)?;
         let (_b, _s, hidden) = embeds.dims3()?;
         let mut xs = embeds.reshape(((), hidden))?; // drop batch dim: [total_patches, hidden]
@@ -433,7 +491,9 @@ impl VisionModel {
         for (i, layer) in self.layers.iter().enumerate() {
             xs = layer.forward(&xs, &boundaries)?;
             if i == self.insert_layer_id {
-                let (merged, new_sizes) = self.vit_merger.forward(&xs, &cur_target_sizes, &boundaries)?;
+                let (merged, new_sizes) =
+                    self.vit_merger
+                        .forward(&xs, &cur_target_sizes, &boundaries)?;
                 xs = merged;
                 cur_target_sizes = new_sizes;
                 boundaries = Self::image_boundaries(&cur_target_sizes);

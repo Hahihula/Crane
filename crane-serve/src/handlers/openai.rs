@@ -14,14 +14,14 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{
-        sse::{KeepAlive, Sse},
         IntoResponse, Json, Response,
+        sse::{KeepAlive, Sse},
     },
 };
 
 use crate::engine::{EngineResponse, GenerationParams};
 use crate::openai_api::*;
-use crate::{make_error, now_epoch, AppState};
+use crate::{AppState, make_error, now_epoch};
 
 use super::sse;
 use super::vlm;
@@ -67,7 +67,12 @@ pub async fn chat_completions(
     let formatted = state
         .chat_template
         .apply_with(&req.messages, &opts)
-        .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Chat template failed: {e}")))?;
+        .map_err(|e| {
+            make_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Chat template failed: {e}"),
+            )
+        })?;
 
     // Tokenize.
     let input_ids = state
@@ -84,7 +89,10 @@ pub async fn chat_completions(
         .map_or(false, |so| so.include_usage);
 
     let engine = state.engine.as_ref().ok_or_else(|| {
-        make_error(StatusCode::SERVICE_UNAVAILABLE, "Text engine not available (VLM model loaded)")
+        make_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Text engine not available (VLM model loaded)",
+        )
     })?;
 
     let response_rx = engine
@@ -122,8 +130,7 @@ pub async fn chat_completions(
 
         // The opening `<think>` lives in the prompt, not the output, so the
         // split is decided from `formatted`.
-        let (reasoning_content, content) =
-            crate::reasoning::split_complete(&formatted, &full_text);
+        let (reasoning_content, content) = crate::reasoning::split_complete(&formatted, &full_text);
 
         // Tool calls are parsed out of what remains after the scratchpad, so a
         // call the model merely *considered* while thinking is not executed.
@@ -185,7 +192,10 @@ pub async fn completions(
     let request_id = format!("cmpl-{}", uuid::Uuid::new_v4());
 
     let engine = state.engine.as_ref().ok_or_else(|| {
-        make_error(StatusCode::SERVICE_UNAVAILABLE, "Text engine not available (VLM model loaded)")
+        make_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Text engine not available (VLM model loaded)",
+        )
     })?;
 
     let response_rx = engine
@@ -258,7 +268,10 @@ pub async fn retrieve_model(
     } else {
         Err(make_error(
             StatusCode::NOT_FOUND,
-            &format!("Model '{model_id}' not found. Available: {}", state.model_name),
+            &format!(
+                "Model '{model_id}' not found. Available: {}",
+                state.model_name
+            ),
         ))
     }
 }
@@ -286,10 +299,12 @@ pub async fn tokenize(
     // Determine the text to tokenize.
     let text = if let Some(messages) = &req.messages {
         // Apply chat template first.
-        state
-            .chat_template
-            .apply(messages)
-            .map_err(|e| make_error(StatusCode::BAD_REQUEST, &format!("Chat template failed: {e}")))?
+        state.chat_template.apply(messages).map_err(|e| {
+            make_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Chat template failed: {e}"),
+            )
+        })?
     } else if let Some(text) = &req.text {
         text.clone()
     } else {
@@ -340,7 +355,7 @@ async fn collect_response(
         match resp {
             EngineResponse::Token { text, .. } => {
                 full_text.push_str(&text);
-            }
+            },
             EngineResponse::Finished {
                 full_text: ft,
                 prompt_tokens: pt,
@@ -352,10 +367,10 @@ async fn collect_response(
                 completion_tokens = ct;
                 finish_reason = fr;
                 break;
-            }
+            },
             EngineResponse::Error(e) => {
                 return Err(make_error(StatusCode::INTERNAL_SERVER_ERROR, &e));
-            }
+            },
         }
     }
 

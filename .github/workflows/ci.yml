@@ -14,8 +14,7 @@ jobs:
       - name: Install ALSA dev headers
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Format check
-        run: cargo fmt --check
-        continue-on-error: true
+        run: cargo fmt --all --check
       - name: Clippy (pedantic)
         run: cargo clippy -- -W clippy::pedantic -D warnings
         continue-on-error: true

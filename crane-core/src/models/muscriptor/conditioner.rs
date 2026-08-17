@@ -27,8 +27,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{embedding, linear, Embedding, Linear, VarBuilder};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
+use candle_nn::{Embedding, Linear, VarBuilder, embedding, linear};
 use rustfft::num_complex::Complex as FftComplex;
 use rustfft::{Fft, FftPlanner};
 
@@ -307,14 +307,21 @@ impl ConditioningProvider {
     }
 
     /// Run all conditioners over a single chunk's attributes.
-    pub fn forward(&self, attrs: &ConditioningAttributes) -> Result<HashMap<String, (Tensor, Tensor)>> {
+    pub fn forward(
+        &self,
+        attrs: &ConditioningAttributes,
+    ) -> Result<HashMap<String, (Tensor, Tensor)>> {
         let mut out: HashMap<String, (Tensor, Tensor)> = HashMap::new();
         for (name, cond) in &attrs.wav {
-            let Some(c) = self.mel.get(name) else { continue };
+            let Some(c) = self.mel.get(name) else {
+                continue;
+            };
             out.insert(name.clone(), c.forward(cond)?);
         }
         for (name, indices_opt) in &attrs.text {
-            let Some(c) = self.class.get(name) else { continue };
+            let Some(c) = self.class.get(name) else {
+                continue;
+            };
             let indices_t = tokenize_class_indices(&[indices_opt.clone()])?;
             out.insert(name.clone(), c.forward(&indices_t)?);
         }
@@ -359,7 +366,7 @@ fn tokenize_class_indices(values: &[Option<String>]) -> Result<Tensor> {
                     max_l = max_l.max(ids.len());
                 }
                 ids
-            }
+            },
         })
         .collect();
     let mut data = vec![-1i64; b * max_l];
@@ -380,7 +387,8 @@ mod tests {
     fn mel_for_silence_has_expected_frame_count() {
         let device = Device::Cpu;
         let vb = VarBuilder::from_varmap(&VarMap::new(), DType::F32, &device);
-        let cond = MelSpectrogramConditioner::new_without_filterbank(64, &device, DType::F32, vb).unwrap();
+        let cond =
+            MelSpectrogramConditioner::new_without_filterbank(64, &device, DType::F32, vb).unwrap();
         let wav = Tensor::zeros((1, 1, SAMPLE_RATE), DType::F32, &device).unwrap();
         let length = Tensor::from_vec(vec![SAMPLE_RATE as u32], (1,), &device).unwrap();
         let wc = WavCondition {

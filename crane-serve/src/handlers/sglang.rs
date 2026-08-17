@@ -14,8 +14,8 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{
-        sse::{KeepAlive, Sse},
         IntoResponse, Json, Response,
+        sse::{KeepAlive, Sse},
     },
 };
 use serde_json::json;
@@ -23,7 +23,7 @@ use serde_json::json;
 use crate::engine::{EngineResponse, GenerationParams};
 use crate::openai_api::ErrorResponse;
 use crate::sglang_api::*;
-use crate::{make_error, AppState};
+use crate::{AppState, make_error};
 
 use super::sse;
 use super::vlm;
@@ -68,7 +68,10 @@ pub async fn generate(
         .unwrap_or_else(|| format!("gen-{}", uuid::Uuid::new_v4()));
 
     let engine = state.engine.as_ref().ok_or_else(|| {
-        make_error(StatusCode::SERVICE_UNAVAILABLE, "Text engine not available (VLM model loaded)")
+        make_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Text engine not available (VLM model loaded)",
+        )
     })?;
 
     let response_rx = engine
@@ -115,10 +118,10 @@ pub async fn generate(
                     completion_tokens = ct;
                     finish_reason = fr;
                     break;
-                }
+                },
                 EngineResponse::Error(e) => {
                     return Err(make_error(StatusCode::INTERNAL_SERVER_ERROR, &e));
-                }
+                },
             }
         }
 
@@ -158,7 +161,11 @@ pub async fn model_info(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 /// `GET /server_info` — server configuration + live stats.
 pub async fn server_info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let stats = state.engine.as_ref().map(|e| e.stats.snapshot()).unwrap_or_default();
+    let stats = state
+        .engine
+        .as_ref()
+        .map(|e| e.stats.snapshot())
+        .unwrap_or_default();
     Json(ServerInfoResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         model_path: state.model_path.clone(),
@@ -188,7 +195,10 @@ pub async fn health_generate(
     let request_id = format!("health-{}", uuid::Uuid::new_v4());
 
     let engine = state.engine.as_ref().ok_or_else(|| {
-        make_error(StatusCode::SERVICE_UNAVAILABLE, "Text engine not available (VLM model loaded)")
+        make_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Text engine not available (VLM model loaded)",
+        )
     })?;
 
     let response_rx = engine
@@ -196,7 +206,7 @@ pub async fn health_generate(
             request_id,
             probe_tokens,
             GenerationParams {
-                max_tokens: 1, // generate just 1 token
+                max_tokens: 1,          // generate just 1 token
                 temperature: Some(0.0), // greedy
                 top_p: None,
                 top_k: None,
@@ -264,9 +274,7 @@ pub async fn flush_cache() -> impl IntoResponse {
 /// Currently, clients can cancel by dropping their SSE connection (which the
 /// engine detects automatically). This endpoint is provided for API compatibility;
 /// explicit abort via engine control channel is a future enhancement.
-pub async fn abort_request(
-    Json(req): Json<AbortRequest>,
-) -> impl IntoResponse {
+pub async fn abort_request(Json(req): Json<AbortRequest>) -> impl IntoResponse {
     // TODO: Add explicit abort via engine control channel.
     Json(AbortResponse {
         success: true,

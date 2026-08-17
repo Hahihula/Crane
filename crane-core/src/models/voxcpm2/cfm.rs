@@ -26,7 +26,11 @@ pub struct UnifiedCfm {
 impl UnifiedCfm {
     pub fn new(estimator: VoxCpmLocDit, mean_mode: bool) -> Self {
         let in_channels = estimator.in_channels();
-        Self { estimator, in_channels, mean_mode }
+        Self {
+            estimator,
+            in_channels,
+            mean_mode,
+        }
     }
 
     /// `mu`: `[B, 2*hidden_size]` (LM context). `cond`: `[B, in_channels, T']`
@@ -59,7 +63,17 @@ impl UnifiedCfm {
             })
             .collect();
 
-        self.solve_euler(z, &t_span, mu, cond, cfg_value, use_cfg_zero_star, b, device, dtype)
+        self.solve_euler(
+            z,
+            &t_span,
+            mu,
+            cond,
+            cfg_value,
+            use_cfg_zero_star,
+            b,
+            device,
+            dtype,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -147,14 +161,29 @@ mod hf_diff {
         let dtype = DType::F32;
 
         let cfg = load_config(&format!("{model_path}/config.json")).unwrap();
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[format!("{model_path}/model.safetensors")], dtype, &device) }.unwrap();
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                &[format!("{model_path}/model.safetensors")],
+                dtype,
+                &device,
+            )
+        }
+        .unwrap();
 
         let dit_cfg = cfg.lm_config.derive(&cfg.dit_config.shape);
-        let estimator =
-            VoxCpmLocDit::new(&dit_cfg, cfg.feat_dim, cfg.max_length, vb.pp("feat_decoder").pp("estimator")).unwrap();
+        let estimator = VoxCpmLocDit::new(
+            &dit_cfg,
+            cfg.feat_dim,
+            cfg.max_length,
+            vb.pp("feat_decoder").pp("estimator"),
+        )
+        .unwrap();
         let mut cfm = UnifiedCfm::new(estimator, cfg.dit_config.mean_mode);
 
-        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap()).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap(),
+        )
+        .unwrap();
         let (b, patch_size, feat_dim, dit_hidden, n_timesteps) = (
             meta["b"].as_u64().unwrap() as usize,
             meta["patch_size"].as_u64().unwrap() as usize,
@@ -165,10 +194,15 @@ mod hf_diff {
 
         let load = |name: &str, shape: (usize, usize, usize)| -> Tensor {
             let raw = std::fs::read(format!("{diff_dir}/{name}.bin")).unwrap();
-            let floats: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let floats: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             Tensor::from_vec(floats, shape, &device).unwrap()
         };
-        let mu = load("mu", (b, 2 * dit_hidden, 1)).reshape((b, 2 * dit_hidden)).unwrap();
+        let mu = load("mu", (b, 2 * dit_hidden, 1))
+            .reshape((b, 2 * dit_hidden))
+            .unwrap();
         let cond = load("cond", (b, feat_dim, patch_size));
         let z = load("z", (b, feat_dim, patch_size));
 
@@ -181,17 +215,25 @@ mod hf_diff {
             })
             .collect();
 
-        let result = cfm.solve_euler(z, &t_span, &mu, &cond, 2.0, true, b, &device, dtype).unwrap();
+        let result = cfm
+            .solve_euler(z, &t_span, &mu, &cond, 2.0, true, b, &device, dtype)
+            .unwrap();
         eprintln!("result shape: {:?}", result.dims());
 
         let hf: Vec<f32> = {
             let raw = std::fs::read(format!("{diff_dir}/hf_cfm_result.bin")).unwrap();
-            raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+            raw.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
         };
         let rust: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
         assert_eq!(hf.len(), rust.len());
 
-        let diff: f32 = hf.iter().zip(&rust).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let diff: f32 = hf
+            .iter()
+            .zip(&rust)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         let cos = {
             let dot: f32 = hf.iter().zip(&rust).map(|(a, b)| a * b).sum();
             let na: f32 = hf.iter().map(|a| a * a).sum::<f32>().sqrt();

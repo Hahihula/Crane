@@ -1,7 +1,7 @@
 //! Public types shared between engine thread and API handlers.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 
@@ -201,7 +201,12 @@ mod tests {
             completion_tokens: 2,
             finish_reason: "stop".into(),
         };
-        if let EngineResponse::Finished { prompt_tokens, completion_tokens, .. } = &finished {
+        if let EngineResponse::Finished {
+            prompt_tokens,
+            completion_tokens,
+            ..
+        } = &finished
+        {
             assert_eq!(*prompt_tokens, 5);
             assert_eq!(*completion_tokens, 2);
         }

@@ -13,14 +13,14 @@
 //!
 //! These names match the safetensors checkpoint layout for Qwen3-TTS and Qwen2.5.
 
-use candle_core::{DType, Module, Result, Tensor, D};
-use candle_nn::attention::AttnMask;
+use candle_core::{D, DType, Module, Result, Tensor};
 use candle_nn::VarBuilder;
+use candle_nn::attention::AttnMask;
 
 use super::flash_attn::dispatch_flash_attn;
 use super::kv_cache;
 use crate::models::utils::repeat_kv;
-use crate::models::with_tracing::{linear_b, Linear, RmsNorm};
+use crate::models::with_tracing::{Linear, RmsNorm, linear_b};
 
 /// Which rotary position embedding convention to apply in [`GqaAttention::forward`].
 #[derive(Debug, Clone, Copy)]
@@ -249,20 +249,17 @@ impl GqaAttention {
                 };
                 let cos = cos.to_dtype(q.dtype())?;
                 let sin = sin.to_dtype(q.dtype())?;
-                let rope_fn: fn(
-                    &Tensor,
-                    &Tensor,
-                    &Tensor,
-                ) -> candle_core::Result<Tensor> = match mode {
-                    RopeMode::HalfSplit => candle_nn::rotary_emb::rope,
-                    RopeMode::Interleaved => candle_nn::rotary_emb::rope_i,
-                    RopeMode::None => unreachable!(),
-                };
+                let rope_fn: fn(&Tensor, &Tensor, &Tensor) -> candle_core::Result<Tensor> =
+                    match mode {
+                        RopeMode::HalfSplit => candle_nn::rotary_emb::rope,
+                        RopeMode::Interleaved => candle_nn::rotary_emb::rope_i,
+                        RopeMode::None => unreachable!(),
+                    };
                 (
                     rope_fn(&q.contiguous()?, &cos, &sin)?,
                     rope_fn(&k.contiguous()?, &cos, &sin)?,
                 )
-            }
+            },
         };
 
         // 5. KV cache: pre-allocated buffer with in-place `slice_set` writes
@@ -302,8 +299,7 @@ impl GqaAttention {
             // ── GQA-grouped SDPA for decode (seq_len=1), GPU fallback ──
             // Reshape Q to group queries with their KV head instead of
             // repeating K/V n_rep times.
-            let q_g = (q.reshape((b_sz, self.cfg.n_kv_heads, n_rep, self.cfg.head_dim))?
-                * scale)?;
+            let q_g = (q.reshape((b_sz, self.cfg.n_kv_heads, n_rep, self.cfg.head_dim))? * scale)?;
             let k_t = k.transpose(2, 3)?;
             let attn_weights = q_g.matmul(&k_t)?;
             let attn_weights = match attention_mask {
@@ -395,7 +391,7 @@ impl GqaAttention {
                 // AttnMask::Mask takes ownership; Tensor is Arc-backed, so
                 // this is a refcount bump, not a data copy.
                 AttnMask::Mask(mask.clone())
-            }
+            },
             None => AttnMask::None,
         };
 
@@ -1074,7 +1070,9 @@ mod tests {
         let out_prefill = attn_prefill
             .forward(&x, None, Some(&mask))
             .expect("prefill forward");
-        let last_prefill = out_prefill.narrow(1, seq_len - 1, 1).expect("narrow prefill");
+        let last_prefill = out_prefill
+            .narrow(1, seq_len - 1, 1)
+            .expect("narrow prefill");
 
         let prefill_tokens = x.narrow(1, 0, prefill_len).expect("prefill tokens");
         let mut out_last = attn_incr

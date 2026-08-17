@@ -26,9 +26,9 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
-use super::config::{load_config, VisionConfig};
+use super::config::{VisionConfig, load_config};
 use super::model::Qwen3_5TextModel;
-use super::processor::{load_preprocessor_config, PreprocessorConfig};
+use super::processor::{PreprocessorConfig, load_preprocessor_config};
 use super::vision::Qwen3_5VisionModel;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
@@ -46,7 +46,10 @@ pub struct VlGenerationConfig {
 
 impl Default for VlGenerationConfig {
     fn default() -> Self {
-        Self { max_new_tokens: 256, strip_thinking: true }
+        Self {
+            max_new_tokens: 256,
+            strip_thinking: true,
+        }
     }
 }
 
@@ -113,14 +116,18 @@ impl Qwen3_5VLModel {
         let image_token_id = cfg.image_token_id.unwrap_or(248_056);
         eprintln!(
             "[qwen3_5_vl] loading vision tower: depth={} hidden={} out_hidden={} patch={} merge={}",
-            vcfg.depth, vcfg.hidden_size, vcfg.out_hidden_size, vcfg.patch_size, vcfg.spatial_merge_size,
+            vcfg.depth,
+            vcfg.hidden_size,
+            vcfg.out_hidden_size,
+            vcfg.patch_size,
+            vcfg.spatial_merge_size,
         );
         let vision = Qwen3_5VisionModel::new(vcfg, vb.pp("model").pp("visual"))
             .context("build vision tower")?;
 
         eprintln!("[qwen3_5_vl] loading text model");
-        let text = Qwen3_5TextModel::new(&cfg, vb, device, *dtype, quant)
-            .context("build text model")?;
+        let text =
+            Qwen3_5TextModel::new(&cfg, vb, device, *dtype, quant).context("build text model")?;
 
         let preprocessor = load_preprocessor_config(model_path)?;
 
@@ -158,11 +165,7 @@ impl Qwen3_5VLModel {
     ///
     /// Returns projected embeddings ready to splice into the text token stream:
     /// `[total_image_tokens, hidden_size]`.
-    pub fn encode_images(
-        &self,
-        pixel_values: &Tensor,
-        image_grid_thw: &Tensor,
-    ) -> Result<Tensor> {
+    pub fn encode_images(&self, pixel_values: &Tensor, image_grid_thw: &Tensor) -> Result<Tensor> {
         let (out, _deepstack) = self
             .vision
             .forward(pixel_values, image_grid_thw)
@@ -231,7 +234,10 @@ impl Qwen3_5VLModel {
         }
 
         let flat: Vec<u32> = positions.into_iter().flatten().collect();
-        Ok((Tensor::from_vec(flat, (3, seq_len), &self.device)?, next_pos))
+        Ok((
+            Tensor::from_vec(flat, (3, seq_len), &self.device)?,
+            next_pos,
+        ))
     }
 
     /// Forward pass for a vision-language prefill.
@@ -285,11 +291,7 @@ impl Qwen3_5VLModel {
     /// The MRoPE position is *not* `start_pos`: image spans consume far fewer
     /// position slots than tokens, so the rope counter is tracked separately
     /// (seeded by the preceding [`Self::forward`]) and advanced by 1 here.
-    pub fn decode_step(
-        &mut self,
-        token: u32,
-        start_pos: usize,
-    ) -> Result<Tensor> {
+    pub fn decode_step(&mut self, token: u32, start_pos: usize) -> Result<Tensor> {
         let input = Tensor::from_vec(vec![token], (1usize, 1usize), &self.device)?;
         let hidden = self.text.embed_only(&input)?;
         let p = self.next_mrope_pos;
@@ -369,7 +371,7 @@ impl Qwen3_5VLModel {
                 let n = (t * (h / merge) * (w / merge)) as usize;
                 let grid = Tensor::from_vec(vec![t, h, w], (1usize, 3usize), &self.device)?;
                 (Some(&p.pixel_values), Some(grid), n)
-            }
+            },
             None => (None, None, 0),
         };
 
@@ -404,7 +406,11 @@ impl Qwen3_5VLModel {
             .tokenizer
             .decode(&generated, true)
             .map_err(E::msg)?;
-        Ok(if cfg.strip_thinking { strip_thinking(&text) } else { text })
+        Ok(if cfg.strip_thinking {
+            strip_thinking(&text)
+        } else {
+            text
+        })
     }
 }
 
@@ -452,10 +458,7 @@ pub(crate) fn splice_image_features(
                     .narrow(0, img_idx, 1)?
                     .reshape((1, 1, hidden_size))?
                     .to_dtype(result.dtype())?;
-                result = result.slice_assign(
-                    &[b..b + 1, s..s + 1, 0..hidden_size],
-                    &img_emb,
-                )?;
+                result = result.slice_assign(&[b..b + 1, s..s + 1, 0..hidden_size], &img_emb)?;
                 img_idx += 1;
             }
         }

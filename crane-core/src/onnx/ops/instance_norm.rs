@@ -26,7 +26,10 @@ pub(crate) fn instance_normalization(
 
     let rank = x.rank();
     if rank < 3 {
-        bail!("InstanceNormalization node '{}' expects rank >= 3, got {rank}", node.name);
+        bail!(
+            "InstanceNormalization node '{}' expects rank >= 3, got {rank}",
+            node.name
+        );
     }
     let channels = x.dim(1)?;
     if scale.rank() != 1 || scale.dim(0)? != channels {
@@ -64,11 +67,18 @@ pub(crate) fn instance_normalization(
     let scale = scale.reshape(param_shape.as_slice())?;
     let bias = bias.reshape(param_shape)?;
 
-    normalized.to_dtype(x_dtype)?.broadcast_mul(&scale)?.broadcast_add(&bias)
+    normalized
+        .to_dtype(x_dtype)?
+        .broadcast_mul(&scale)?
+        .broadcast_add(&bias)
 }
 
 fn float_attribute(node: &NodeProto, name: &str, default: f64) -> Result<f64> {
-    let Some(attribute) = node.attribute.iter().find(|attribute| attribute.name == name) else {
+    let Some(attribute) = node
+        .attribute
+        .iter()
+        .find(|attribute| attribute.name == name)
+    else {
         return Ok(default);
     };
     if attribute.r#type() != proto::attribute_proto::AttributeType::Float {
@@ -114,7 +124,10 @@ mod tests {
     fn matches_manual_instance_norm_1d() -> Result<()> {
         // A [1, 2, 4] input (batch=1, 2 channels, 4-length spatial dim):
         // each channel is normalized independently over its own 4 values.
-        let x = Tensor::new(&[[[1.0f32, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]], &Device::Cpu)?;
+        let x = Tensor::new(
+            &[[[1.0f32, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]],
+            &Device::Cpu,
+        )?;
         let scale = Tensor::new(&[1.5f32, 0.5], &Device::Cpu)?;
         let bias = Tensor::new(&[0.1f32, -0.2], &Device::Cpu)?;
         let node = node_with_epsilon(1e-5);
@@ -124,10 +137,8 @@ mod tests {
         let mean = 2.5f32;
         let variance = 1.25f32;
         let std_dev = (variance + 1e-5).sqrt();
-        let expected_channel0 = [1.0f32, 2.0, 3.0, 4.0]
-            .map(|v| (v - mean) / std_dev * 1.5 + 0.1);
-        let expected_channel1 = [4.0f32, 3.0, 2.0, 1.0]
-            .map(|v| (v - mean) / std_dev * 0.5 - 0.2);
+        let expected_channel0 = [1.0f32, 2.0, 3.0, 4.0].map(|v| (v - mean) / std_dev * 1.5 + 0.1);
+        let expected_channel1 = [4.0f32, 3.0, 2.0, 1.0].map(|v| (v - mean) / std_dev * 0.5 - 0.2);
 
         let got: Vec<Vec<Vec<f32>>> = output.to_vec3()?;
         for (got, expected) in got[0][0].iter().zip(expected_channel0.iter()) {

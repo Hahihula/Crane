@@ -418,9 +418,7 @@ impl AudioEncoderAttention {
         let qkv = qkv.reshape((batch, seq_len, 3 * self.n_heads, self.head_dim))?;
 
         let query = qkv.narrow(2, 0, self.n_heads)?.transpose(1, 2)?;
-        let key = qkv
-            .narrow(2, self.n_heads, self.n_heads)?
-            .transpose(1, 2)?;
+        let key = qkv.narrow(2, self.n_heads, self.n_heads)?.transpose(1, 2)?;
         let value = qkv
             .narrow(2, 2 * self.n_heads, self.n_heads)?
             .transpose(1, 2)?;
@@ -499,11 +497,20 @@ impl AudioEncoderAttention {
             let v_block = v_bshd.narrow(1, start, len)?;
             // Each block attends only within itself (no cross-block mixing),
             // so an unmasked kernel is correct here.
-            outputs.push(dispatch_flash_attn(&q_block, &k_block, &v_block, scale, AttnMask::None)?);
+            outputs.push(dispatch_flash_attn(
+                &q_block,
+                &k_block,
+                &v_block,
+                scale,
+                AttnMask::None,
+            )?);
         }
 
         let attn_output = if n_blocks == 1 {
-            outputs.into_iter().next().expect("n_blocks == 1 checked above")
+            outputs
+                .into_iter()
+                .next()
+                .expect("n_blocks == 1 checked above")
         } else {
             Tensor::cat(&outputs, 2)?
         };
@@ -546,23 +553,14 @@ impl AudioEncoderAttention {
         let seqlens = Tensor::from_vec(seqlens_vec, n_blocks, q_packed.device())?;
 
         let out = flash_attn_varlen_cpu(
-            &q_packed,
-            &k_packed,
-            &v_packed,
-            None,
-            &seqlens,
-            &seqlens,
-            max_seqlen,
-            max_seqlen,
-            scale,
-            false,
-            None,
-            None,
+            &q_packed, &k_packed, &v_packed, None, &seqlens, &seqlens, max_seqlen, max_seqlen,
+            scale, false, None, None,
         )?;
 
         // [S, H, D] -> [1, S, H, D] -> [1, H, S, D] (BHSD, matching
         // `forward_attn_gpu`'s and the per-block loop's return convention).
-        out.reshape((1, seq_len, n_heads, head_dim))?.transpose(1, 2)
+        out.reshape((1, seq_len, n_heads, head_dim))?
+            .transpose(1, 2)
     }
 
     /// GPU attention core (also used for any non-CPU device): explicit
@@ -606,8 +604,7 @@ impl AudioEncoderAttention {
         // Softmax in f32 for numerical stability, matching GqaAttention's
         // convention, then cast back to the working dtype.
         let softmax_f32 = |weights: &Tensor, out_dtype: DType| -> Result<Tensor> {
-            candle_nn::ops::softmax(&weights.to_dtype(DType::F32)?, D::Minus1)?
-                .to_dtype(out_dtype)
+            candle_nn::ops::softmax(&weights.to_dtype(DType::F32)?, D::Minus1)?.to_dtype(out_dtype)
         };
 
         let mut outputs: Vec<Tensor> = Vec::with_capacity(2);
@@ -617,24 +614,30 @@ impl AudioEncoderAttention {
         if n_full > 0 {
             let total_full_len = n_full * block_len;
             let v_dtype = value.dtype();
-            let q_all = query
-                .narrow(2, 0, total_full_len)?
-                .contiguous()?
-                .reshape((batch * self.n_heads * n_full, block_len, self.head_dim))?;
-            let k_all = key
-                .narrow(2, 0, total_full_len)?
-                .contiguous()?
-                .reshape((batch * self.n_heads * n_full, block_len, self.head_dim))?;
-            let v_all = value
-                .narrow(2, 0, total_full_len)?
-                .contiguous()?
-                .reshape((batch * self.n_heads * n_full, block_len, self.head_dim))?;
+            let q_all = query.narrow(2, 0, total_full_len)?.contiguous()?.reshape((
+                batch * self.n_heads * n_full,
+                block_len,
+                self.head_dim,
+            ))?;
+            let k_all = key.narrow(2, 0, total_full_len)?.contiguous()?.reshape((
+                batch * self.n_heads * n_full,
+                block_len,
+                self.head_dim,
+            ))?;
+            let v_all = value.narrow(2, 0, total_full_len)?.contiguous()?.reshape((
+                batch * self.n_heads * n_full,
+                block_len,
+                self.head_dim,
+            ))?;
 
             let attn_weights = (q_all.matmul(&k_all.transpose(1, 2)?)? * self.scale)?;
             let attn_weights = softmax_f32(&attn_weights, v_dtype)?;
-            let batched = attn_weights
-                .matmul(&v_all)?
-                .reshape((batch, self.n_heads, n_full * block_len, self.head_dim))?;
+            let batched = attn_weights.matmul(&v_all)?.reshape((
+                batch,
+                self.n_heads,
+                n_full * block_len,
+                self.head_dim,
+            ))?;
             outputs.push(batched);
         }
 
@@ -1593,9 +1596,8 @@ mod tests {
         // Block 0 = 8 full chunks = 8 * 13 tokens.
         assert_eq!(cu_seqlens[1] - cu_seqlens[0], 8 * TOKENS_PER_WINDOW);
 
-        let hidden =
-            Tensor::randn(0f32, 1f32, (1, total_tokens, config.d_model), &Device::Cpu)
-                .expect("randn");
+        let hidden = Tensor::randn(0f32, 1f32, (1, total_tokens, config.d_model), &Device::Cpu)
+            .expect("randn");
         let out = layer.forward(&hidden, &cu_seqlens).expect("forward");
         assert_eq!(out.dims(), &[1, total_tokens, config.d_model]);
     }
@@ -1635,9 +1637,8 @@ mod tests {
         assert_eq!(cu_seqlens[n_full + 1] - cu_seqlens[n_full], 7);
 
         let total_tokens = *cu_seqlens.last().unwrap();
-        let hidden =
-            Tensor::randn(0f32, 1f32, (1, total_tokens, config.d_model), &Device::Cpu)
-                .expect("randn hidden");
+        let hidden = Tensor::randn(0f32, 1f32, (1, total_tokens, config.d_model), &Device::Cpu)
+            .expect("randn hidden");
         let (batch, seq_len, _d) = hidden.dims3().expect("dims3");
 
         // query/key/value BHSD via attn's own merged `qkv_proj`, mirroring
@@ -1721,7 +1722,8 @@ mod tests {
                 .contiguous()
                 .expect("contig v");
 
-            let attn_weights = (q_block.matmul(&k_block.transpose(2, 3).expect("transpose k_block"))
+            let attn_weights = (q_block
+                .matmul(&k_block.transpose(2, 3).expect("transpose k_block"))
                 .expect("matmul qk")
                 * attn.scale)
                 .expect("scale");

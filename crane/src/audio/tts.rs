@@ -189,7 +189,11 @@ mod tests {
 
     #[test]
     fn test_tts_stream_once() -> Result<()> {
-        let info = AudioInfo { sample_rate: 24000, channels: 1, bits_per_sample: 16 };
+        let info = AudioInfo {
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         let tensor = Tensor::new(&[0.1f32, 0.2, 0.3], &Device::Cpu)?;
 
         let mut stream = TtsStream::once(info, tensor);
@@ -204,7 +208,11 @@ mod tests {
 
     #[test]
     fn test_tts_stream_multi_chunk() -> Result<()> {
-        let info = AudioInfo { sample_rate: 24000, channels: 1, bits_per_sample: 16 };
+        let info = AudioInfo {
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         let dev = &Device::Cpu;
         let chunks = vec![
             Ok(Tensor::new(&[1.0f32, 2.0], dev)?),
@@ -229,18 +237,31 @@ mod tests {
 
     #[test]
     fn test_tts_stream_error_propagation() {
-        let info = AudioInfo { sample_rate: 24000, channels: 1, bits_per_sample: 16 };
+        let info = AudioInfo {
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         let chunks: Vec<Result<Tensor>> = vec![Err(anyhow::anyhow!("generation failed"))];
         let mut stream = TtsStream::new(info, chunks.into_iter());
 
         let result = stream.next_chunk();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("generation failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("generation failed")
+        );
     }
 
     #[test]
     fn test_tts_stream_empty() -> Result<()> {
-        let info = AudioInfo { sample_rate: 24000, channels: 1, bits_per_sample: 16 };
+        let info = AudioInfo {
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         let chunks: Vec<Result<Tensor>> = vec![];
         let mut stream = TtsStream::new(info, chunks.into_iter());
         assert!(stream.next_chunk()?.is_none());
@@ -253,11 +274,18 @@ mod tests {
 
     impl Tts for MockTts {
         fn audio_info(&self) -> AudioInfo {
-            AudioInfo { sample_rate: 24000, channels: 1, bits_per_sample: 16 }
+            AudioInfo {
+                sample_rate: 24000,
+                channels: 1,
+                bits_per_sample: 16,
+            }
         }
 
         fn voices(&self) -> Vec<VoiceInfo> {
-            vec![VoiceInfo { name: "test".to_string(), languages: vec![] }]
+            vec![VoiceInfo {
+                name: "test".to_string(),
+                languages: vec![],
+            }]
         }
 
         fn generate_speech(
@@ -281,7 +309,12 @@ mod tests {
         let opts = SpeechOptions::default();
         let result = MockTts.generate_voice_clone("hello", "en", "/ref.wav", "hello", &opts);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("voice cloning not supported"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("voice cloning not supported")
+        );
     }
 
     #[test]

@@ -11,8 +11,8 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::backend::{
-    Gemma4Backend, HunyuanBackend, Minicpm5Backend, ModelBackend, Qwen25Backend, Qwen3Backend,
-    Qwen3_5Backend,
+    Gemma4Backend, HunyuanBackend, Minicpm5Backend, ModelBackend, Qwen3_5Backend, Qwen3Backend,
+    Qwen25Backend,
 };
 use crate::chat_template::{AutoChatTemplate, ChatTemplateProcessor, HunyuanChatTemplate};
 
@@ -55,8 +55,10 @@ impl ModelType {
             // Bare "minicpm" is aliased to MiniCPM5 for now, since it's the
             // only OpenBMB family member Crane supports; re-scope this once
             // MiniCPM-o/MiniCPM-V land as their own `ModelType`s.
-            "minicpmv46" | "minicpmv4.6" | "minicpmv4_6" | "minicpm-v4.6" | "minicpm-v-4.6" | "minicpmv" => Self::MinicpmV46,
-            "minicpmo" | "minicpm-o" | "minicpm_o" | "minicpmoduplex" | "minicpm-o-duplex" | "minicpm_o_duplex" => Self::MiniCpmODuplex,
+            "minicpmv46" | "minicpmv4.6" | "minicpmv4_6" | "minicpm-v4.6" | "minicpm-v-4.6"
+            | "minicpmv" => Self::MinicpmV46,
+            "minicpmo" | "minicpm-o" | "minicpm_o" | "minicpmoduplex" | "minicpm-o-duplex"
+            | "minicpm_o_duplex" => Self::MiniCpmODuplex,
             "minicpm5" | "minicpm-5" | "minicpm_5" | "minicpm" => Self::Minicpm5,
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
             "qwen3" => Self::Qwen3,
@@ -72,7 +74,9 @@ impl ModelType {
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
             "kokoro" | "kokoro_tts" | "kokoro-tts" | "kokoro-82m" => Self::Kokoro,
             "voxcpm2" | "voxcpm-2" | "voxcpm_2" | "voxcpm" => Self::VoxCpm2,
-            "paddleocr_vl" | "paddleocrv" | "paddleocr" | "paddle_ocr_vl" | "paddleocrvl" => Self::PaddleOcrVl,
+            "paddleocr_vl" | "paddleocrv" | "paddleocr" | "paddle_ocr_vl" | "paddleocrvl" => {
+                Self::PaddleOcrVl
+            },
             "qwen3_asr" | "qwen3asr" | "qwen3-asr" | "asr" => Self::Qwen3ASR,
             _ => Self::Auto,
         }
@@ -104,13 +108,19 @@ impl ModelType {
     /// Whether this model type is a vision-language model.
     #[must_use]
     pub fn is_vlm(&self) -> bool {
-        matches!(self, Self::PaddleOcrVl | Self::Gemma4VL | Self::Qwen3_5VL | Self::MinicpmV46)
+        matches!(
+            self,
+            Self::PaddleOcrVl | Self::Gemma4VL | Self::Qwen3_5VL | Self::MinicpmV46
+        )
     }
 
     /// Whether this model type is a TTS model.
     #[must_use]
     pub fn is_tts(&self) -> bool {
-        matches!(self, Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro | Self::VoxCpm2)
+        matches!(
+            self,
+            Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro | Self::VoxCpm2
+        )
     }
 
     /// Whether this model type is an ASR model.
@@ -190,7 +200,13 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         // no `model_type`, no plural `architectures`, so this must be
         // checked separately or it's silently invisible to the branches
         // below).
-        if config.architecture.as_deref().map(str::to_lowercase).as_deref() == Some("voxcpm2") {
+        if config
+            .architecture
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref()
+            == Some("voxcpm2")
+        {
             return ModelType::VoxCpm2;
         }
 
@@ -203,7 +219,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                     } else {
                         ModelType::Gemma4
                     };
-                }
+                },
                 "qwen2" | "qwen2.5" => return ModelType::Qwen25,
                 "qwen3" => return ModelType::Qwen3,
                 // Qwen 3.6 / 3.8 27B ship `model_type: "qwen3_5"`; the 3.6/3.8
@@ -214,7 +230,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                     } else {
                         ModelType::Qwen3_5
                     };
-                }
+                },
                 "minicpmv4_6" | "minicpmv4.6" => return ModelType::MinicpmV46,
                 "minicpmo" => return ModelType::MiniCpmODuplex,
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
@@ -222,7 +238,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 "style_text_to_speech_2" => return ModelType::Kokoro,
                 m if m.contains("hunyuan") => return ModelType::HunyuanDense,
                 m if m.contains("paddleocr") => return ModelType::PaddleOcrVl,
-                _ => {}
+                _ => {},
             }
         }
 
@@ -338,15 +354,27 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         // path-name heuristic is the only auto-detect route; use
         // `--model-type minicpm5` explicitly for renamed directories.
         ModelType::Minicpm5
-    } else if path_lower.contains("qwen3-tts") || path_lower.contains("qwen3_tts") || path_lower.contains("qwen3tts") {
+    } else if path_lower.contains("qwen3-tts")
+        || path_lower.contains("qwen3_tts")
+        || path_lower.contains("qwen3tts")
+    {
         ModelType::Qwen3TTS
-    } else if path_lower.contains("qwen3-asr") || path_lower.contains("qwen3_asr") || path_lower.contains("qwen3asr") {
+    } else if path_lower.contains("qwen3-asr")
+        || path_lower.contains("qwen3_asr")
+        || path_lower.contains("qwen3asr")
+    {
         ModelType::Qwen3ASR
-    } else if QWEN3_5_FAMILY_VL_MARKERS.iter().any(|m| path_lower.contains(m)) {
+    } else if QWEN3_5_FAMILY_VL_MARKERS
+        .iter()
+        .any(|m| path_lower.contains(m))
+    {
         // Checked before the text-only branch below: "Qwen3.5-VL" contains
         // "qwen3.5" too, and would otherwise be claimed as text-only.
         ModelType::Qwen3_5VL
-    } else if QWEN3_5_FAMILY_MARKERS.iter().any(|m| path_lower.contains(m)) {
+    } else if QWEN3_5_FAMILY_MARKERS
+        .iter()
+        .any(|m| path_lower.contains(m))
+    {
         ModelType::Qwen3_5
     } else if path_lower.contains("qwen3") {
         ModelType::Qwen3
@@ -371,9 +399,18 @@ const QWEN3_5_FAMILY_MARKERS: &[&str] = &[
 /// VL spellings of [`QWEN3_5_FAMILY_MARKERS`], checked first since every one of
 /// these also contains its text-only marker as a substring.
 const QWEN3_5_FAMILY_VL_MARKERS: &[&str] = &[
-    "qwen3.5-vl", "qwen3.5_vl", "qwen3_5_vl", "qwen35_vl",
-    "qwen3.6-vl", "qwen3.6_vl", "qwen3_6_vl", "qwen36_vl",
-    "qwen3.8-vl", "qwen3.8_vl", "qwen3_8_vl", "qwen38_vl",
+    "qwen3.5-vl",
+    "qwen3.5_vl",
+    "qwen3_5_vl",
+    "qwen35_vl",
+    "qwen3.6-vl",
+    "qwen3.6_vl",
+    "qwen3_6_vl",
+    "qwen36_vl",
+    "qwen3.8-vl",
+    "qwen3.8_vl",
+    "qwen3_8_vl",
+    "qwen38_vl",
 ];
 
 /// Read `general.architecture` from a `.gguf` file's header.
@@ -410,7 +447,7 @@ fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
         other => {
             tracing::warn!("Unrecognized GGUF architecture '{other}'");
             None
-        }
+        },
     }
 }
 
@@ -452,28 +489,36 @@ pub fn create_backend(
     match model_type {
         ModelType::HunyuanDense => {
             let hy_fmt = match format {
-                ModelFormat::Safetensors => crane_core::models::hunyuan_dense::ModelFormat::Safetensors,
+                ModelFormat::Safetensors => {
+                    crane_core::models::hunyuan_dense::ModelFormat::Safetensors
+                },
                 ModelFormat::Gguf => crane_core::models::hunyuan_dense::ModelFormat::Gguf,
                 ModelFormat::Auto => crane_core::models::hunyuan_dense::ModelFormat::Auto,
             };
-            Ok(Box::new(HunyuanBackend::new(model_path, device, dtype, hy_fmt)?))
-        }
+            Ok(Box::new(HunyuanBackend::new(
+                model_path, device, dtype, hy_fmt,
+            )?))
+        },
         ModelType::Gemma4 => {
             let g4_fmt = match format {
                 ModelFormat::Safetensors => crane_core::models::gemma4::ModelFormat::Safetensors,
                 ModelFormat::Gguf => crane_core::models::gemma4::ModelFormat::Gguf,
                 ModelFormat::Auto => crane_core::models::gemma4::ModelFormat::Auto,
             };
-            Ok(Box::new(Gemma4Backend::new(model_path, device, dtype, g4_fmt)?))
-        }
+            Ok(Box::new(Gemma4Backend::new(
+                model_path, device, dtype, g4_fmt,
+            )?))
+        },
         ModelType::Minicpm5 => {
             let mc_fmt = match format {
                 ModelFormat::Safetensors => crane_core::models::minicpm5::ModelFormat::Safetensors,
                 ModelFormat::Gguf => crane_core::models::minicpm5::ModelFormat::Gguf,
                 ModelFormat::Auto => crane_core::models::minicpm5::ModelFormat::Auto,
             };
-            Ok(Box::new(Minicpm5Backend::new(model_path, device, dtype, mc_fmt)?))
-        }
+            Ok(Box::new(Minicpm5Backend::new(
+                model_path, device, dtype, mc_fmt,
+            )?))
+        },
         ModelType::Qwen25 => Ok(Box::new(Qwen25Backend::new(model_path, device, dtype)?)),
         ModelType::Qwen3 => Ok(Box::new(Qwen3Backend::new(model_path, device, dtype)?)),
         ModelType::Qwen3_5 => {
@@ -488,13 +533,17 @@ pub fn create_backend(
             Ok(Box::new(Qwen3_5Backend::new_with_options(
                 model_path, device, dtype, q35_fmt, quant,
             )?))
-        }
+        },
         ModelType::PaddleOcrVl => {
-            anyhow::bail!("PaddleOCR-VL is a VLM model — use create_vlm_model() instead of create_backend()")
-        }
+            anyhow::bail!(
+                "PaddleOCR-VL is a VLM model — use create_vlm_model() instead of create_backend()"
+            )
+        },
         ModelType::Gemma4VL => {
-            anyhow::bail!("Gemma4-VL is a VLM model — use the VLM endpoint instead of create_backend()")
-        }
+            anyhow::bail!(
+                "Gemma4-VL is a VLM model — use the VLM endpoint instead of create_backend()"
+            )
+        },
         ModelType::Qwen3_5VL => {
             anyhow::bail!(
                 "Qwen3_5-VL is a VLM model — use the Qwen3_5-VL endpoint instead of \
@@ -502,28 +551,36 @@ pub fn create_backend(
                  same checkpoint text-only (skips the vision tower's weights entirely, also \
                  unlocks --quant)"
             )
-        }
+        },
         ModelType::MinicpmV46 => {
-            anyhow::bail!("MiniCPM-V-4.6 is a VLM model — use the MiniCPM-V-4.6 endpoint instead of create_backend()")
-        }
+            anyhow::bail!(
+                "MiniCPM-V-4.6 is a VLM model — use the MiniCPM-V-4.6 endpoint instead of create_backend()"
+            )
+        },
         ModelType::Qwen3TTS => {
             anyhow::bail!("Qwen3-TTS is a TTS model — use create_tts() instead of create_backend()")
-        }
+        },
         ModelType::VoxtralTTS => {
-            anyhow::bail!("Voxtral-TTS is a TTS model — use create_tts() instead of create_backend()")
-        }
+            anyhow::bail!(
+                "Voxtral-TTS is a TTS model — use create_tts() instead of create_backend()"
+            )
+        },
         ModelType::Kokoro => {
             anyhow::bail!("Kokoro is a TTS model — use create_tts() instead of create_backend()")
-        }
+        },
         ModelType::VoxCpm2 => {
             anyhow::bail!("VoxCPM2 is a TTS model — use create_tts() instead of create_backend()")
-        }
+        },
         ModelType::Qwen3ASR => {
-            anyhow::bail!("Qwen3-ASR is an ASR model — use create_asr() instead of create_backend()")
-        }
+            anyhow::bail!(
+                "Qwen3-ASR is an ASR model — use create_asr() instead of create_backend()"
+            )
+        },
         ModelType::MiniCpmODuplex => {
-            anyhow::bail!("MiniCPM-o is a full-duplex model — use the duplex WebSocket endpoint instead of create_backend()")
-        }
+            anyhow::bail!(
+                "MiniCPM-o is a full-duplex model — use the duplex WebSocket endpoint instead of create_backend()"
+            )
+        },
         ModelType::Auto => unreachable!(),
     }
 }
@@ -564,13 +621,13 @@ pub fn create_chat_template(
                 Ok(t) => Box::new(t),
                 Err(_) => Box::new(HunyuanChatTemplate),
             }
-        }
+        },
         _ => match AutoChatTemplate::new(model_path) {
             Ok(t) => Box::new(t),
             Err(e) => {
                 tracing::warn!("Failed to load chat template: {e}; using Hunyuan fallback");
                 Box::new(HunyuanChatTemplate)
-            }
+            },
         },
     }
 }
@@ -604,16 +661,20 @@ pub fn create_tts(
     device: &Device,
     dtype: &DType,
 ) -> Result<Box<dyn crane::audio::Tts + Send>> {
-    tracing::info!("Creating {} model from: {}", model_type.display_name(), model_path);
+    tracing::info!(
+        "Creating {} model from: {}",
+        model_type.display_name(),
+        model_path
+    );
     match model_type {
         ModelType::Qwen3TTS => {
             let model = crane_core::models::qwen3_tts::Model::new(model_path, device, dtype)?;
             Ok(Box::new(model))
-        }
+        },
         ModelType::VoxtralTTS => {
             let model = crane_core::models::voxtral_tts::Model::new(model_path, device, dtype)?;
             Ok(Box::new(model))
-        }
+        },
         #[cfg(feature = "onnx")]
         ModelType::Kokoro => create_kokoro_tts(model_path, device, dtype),
         #[cfg(not(feature = "onnx"))]
@@ -621,7 +682,7 @@ pub fn create_tts(
         ModelType::VoxCpm2 => {
             let model = crane_core::models::voxcpm2::VoxCpm2Model::new(model_path, device, dtype)?;
             Ok(Box::new(model))
-        }
+        },
         other => anyhow::bail!("{other:?} is not a TTS model type"),
     }
 }
@@ -655,7 +716,10 @@ fn create_kokoro_tts(
     let phonemizer = crane_core::models::g2p::MoonshineG2p::from_g2p_dir(&g2p_dir)
         .with_context(|| format!("loading Kokoro G2P assets from {}", g2p_dir.display()))?;
 
-    Ok(Box::new(crane::audio::KokoroTts::new(model, Box::new(phonemizer))))
+    Ok(Box::new(crane::audio::KokoroTts::new(
+        model,
+        Box::new(phonemizer),
+    )))
 }
 
 /// Create an ASR model as a trait object.
@@ -673,12 +737,16 @@ pub fn create_asr(
     device: &Device,
     dtype: &DType,
 ) -> Result<Box<dyn crane::audio::Asr + Send>> {
-    tracing::info!("Creating {} model from: {}", model_type.display_name(), model_path);
+    tracing::info!(
+        "Creating {} model from: {}",
+        model_type.display_name(),
+        model_path
+    );
     match model_type {
         ModelType::Qwen3ASR => {
             let model = crane_core::models::qwen3_asr::Model::new(model_path, device, dtype)?;
             Ok(Box::new(model))
-        }
+        },
         other => anyhow::bail!("{other:?} is not an ASR model type"),
     }
 }
@@ -692,7 +760,10 @@ mod tests {
     #[test]
     fn model_type_from_str_hunyuan_variants() {
         assert_eq!(ModelType::from_str("hunyuan"), ModelType::HunyuanDense);
-        assert_eq!(ModelType::from_str("hunyuan_dense"), ModelType::HunyuanDense);
+        assert_eq!(
+            ModelType::from_str("hunyuan_dense"),
+            ModelType::HunyuanDense
+        );
         assert_eq!(ModelType::from_str("hunyuandense"), ModelType::HunyuanDense);
         assert_eq!(ModelType::from_str("HUNYUAN"), ModelType::HunyuanDense);
     }
@@ -744,7 +815,11 @@ mod tests {
     fn detect_from_config_json_architectures_minicpmv4_6() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
-        std::fs::write(&config, r#"{"architectures": ["MiniCPMV4_6ForConditionalGeneration"]}"#).unwrap();
+        std::fs::write(
+            &config,
+            r#"{"architectures": ["MiniCPMV4_6ForConditionalGeneration"]}"#,
+        )
+        .unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::MinicpmV46);
     }
@@ -759,7 +834,10 @@ mod tests {
     fn model_type_from_str_minicpmo_variants() {
         assert_eq!(ModelType::from_str("minicpmo"), ModelType::MiniCpmODuplex);
         assert_eq!(ModelType::from_str("minicpm-o"), ModelType::MiniCpmODuplex);
-        assert_eq!(ModelType::from_str("minicpm_o_duplex"), ModelType::MiniCpmODuplex);
+        assert_eq!(
+            ModelType::from_str("minicpm_o_duplex"),
+            ModelType::MiniCpmODuplex
+        );
         assert_eq!(ModelType::from_str("MINICPMO"), ModelType::MiniCpmODuplex);
     }
 
@@ -888,8 +966,14 @@ mod tests {
 
     #[test]
     fn model_format_from_str() {
-        assert_eq!(ModelFormat::from_str("safetensors"), ModelFormat::Safetensors);
-        assert_eq!(ModelFormat::from_str("SAFETENSORS"), ModelFormat::Safetensors);
+        assert_eq!(
+            ModelFormat::from_str("safetensors"),
+            ModelFormat::Safetensors
+        );
+        assert_eq!(
+            ModelFormat::from_str("SAFETENSORS"),
+            ModelFormat::Safetensors
+        );
         assert_eq!(ModelFormat::from_str("gguf"), ModelFormat::Gguf);
         assert_eq!(ModelFormat::from_str("auto"), ModelFormat::Auto);
         assert_eq!(ModelFormat::from_str("unknown"), ModelFormat::Auto);
@@ -989,7 +1073,9 @@ mod tests {
 
     #[test]
     fn model_type_from_str_qwen3_5_family_variants() {
-        for s in ["qwen3.5", "qwen35", "qwen3.6", "qwen36", "qwen3.8", "qwen3_8", "QWEN3.8"] {
+        for s in [
+            "qwen3.5", "qwen35", "qwen3.6", "qwen36", "qwen3.8", "qwen3_8", "QWEN3.8",
+        ] {
             assert_eq!(ModelType::from_str(s), ModelType::Qwen3_5, "spelling {s}");
         }
         for s in ["qwen3_5_vl", "qwen3.8_vl", "qwen38_vl"] {
@@ -1001,11 +1087,7 @@ mod tests {
     fn detect_from_config_json_architectures() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
-        std::fs::write(
-            &config,
-            r#"{"architectures": ["HunyuanForCausalLM"]}"#,
-        )
-        .unwrap();
+        std::fs::write(&config, r#"{"architectures": ["HunyuanForCausalLM"]}"#).unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::HunyuanDense);
     }
@@ -1014,11 +1096,7 @@ mod tests {
     fn detect_from_config_json_architectures_qwen2() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
-        std::fs::write(
-            &config,
-            r#"{"architectures": ["Qwen2ForCausalLM"]}"#,
-        )
-        .unwrap();
+        std::fs::write(&config, r#"{"architectures": ["Qwen2ForCausalLM"]}"#).unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::Qwen25);
     }
@@ -1027,11 +1105,7 @@ mod tests {
     fn detect_from_config_json_architectures_qwen3() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
-        std::fs::write(
-            &config,
-            r#"{"architectures": ["Qwen3ForCausalLM"]}"#,
-        )
-        .unwrap();
+        std::fs::write(&config, r#"{"architectures": ["Qwen3ForCausalLM"]}"#).unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::Qwen3);
     }

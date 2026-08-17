@@ -8,7 +8,7 @@
 
 use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
 use candle_core::{DType, Module, Result, Tensor};
-use candle_nn::{linear_no_bias, Linear, VarBuilder};
+use candle_nn::{Linear, VarBuilder, linear_no_bias};
 use std::sync::Arc;
 
 /// A linear layer that can be either a standard (f16/f32) Linear or a
@@ -43,7 +43,7 @@ impl Module for LinearLayer {
                 } else {
                     Ok(out)
                 }
-            }
+            },
         }
     }
 }

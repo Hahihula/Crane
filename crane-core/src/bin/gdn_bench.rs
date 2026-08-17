@@ -68,6 +68,8 @@ fn main() -> anyhow::Result<()> {
     // ~ bh * s * v * 4 * k.
     let flops = (bh * s * v * 4 * k) as f64;
     let gflops = flops / (ms / 1000.0) / 1e9;
-    println!("GDN recurrence  BH={bh} S={s} K={k} V={v}  ->  {ms:.3} ms/iter   ({gflops:.0} GFLOP/s)");
+    println!(
+        "GDN recurrence  BH={bh} S={s} K={k} V={v}  ->  {ms:.3} ms/iter   ({gflops:.0} GFLOP/s)"
+    );
     Ok(())
 }

@@ -17,11 +17,11 @@
 //! no KV cache, quantization, or backend plumbing to port, only the
 //! architecture description to confirm against.
 
-use candle_core::quantized::{gguf_file, QTensor};
-use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::rotary_emb::rope;
-use candle_nn::{linear_no_bias, Linear, RmsNorm, VarBuilder};
 use crate::models::modules::rotary::RotaryEmbedding;
+use candle_core::quantized::{QTensor, gguf_file};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
+use candle_nn::rotary_emb::rope;
+use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 use std::sync::Arc;
@@ -238,18 +238,19 @@ impl Attention {
         // replaces three.  `narrow` splits are zero-copy views.
         let q_dim = num_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
-        let qkv_proj = if let (LinearLayer::Standard(q), LinearLayer::Standard(k), LinearLayer::Standard(v)) =
-            (&q_proj, &k_proj, &v_proj)
-        {
-            let qkv_w = Tensor::cat(&[q.weight(), k.weight(), v.weight()], 0)?;
-            let qkv_b = match (q.bias(), k.bias(), v.bias()) {
-                (Some(qb), Some(kb), Some(vb)) => Some(Tensor::cat(&[qb, kb, vb], 0)?),
-                _ => None,
+        let qkv_proj =
+            if let (LinearLayer::Standard(q), LinearLayer::Standard(k), LinearLayer::Standard(v)) =
+                (&q_proj, &k_proj, &v_proj)
+            {
+                let qkv_w = Tensor::cat(&[q.weight(), k.weight(), v.weight()], 0)?;
+                let qkv_b = match (q.bias(), k.bias(), v.bias()) {
+                    (Some(qb), Some(kb), Some(vb)) => Some(Tensor::cat(&[qb, kb, vb], 0)?),
+                    _ => None,
+                };
+                Some(Linear::new(qkv_w, qkv_b))
+            } else {
+                None
             };
-            Some(Linear::new(qkv_w, qkv_b))
-        } else {
-            None
-        };
 
         Ok(Self {
             q_proj,
@@ -346,7 +347,7 @@ impl Attention {
                     self.cache_seq_len = total;
                     Ok((full_k, full_v))
                 }
-            }
+            },
             None => {
                 // First use: allocate buffer with extra room.
                 let (b, h, s, d) = k.dims4()?;
@@ -358,7 +359,7 @@ impl Attention {
                 self.kv_cache = Some((buf_k, buf_v));
                 self.cache_seq_len = s;
                 Ok((k, v))
-            }
+            },
         }
     }
 
@@ -423,8 +424,7 @@ impl Attention {
             let scale = 1.0 / (self.head_dim as f64).sqrt();
 
             // Q: [B, H, 1, D] → [B, kv_heads, n_rep, D], pre-scaled
-            let q_g =
-                (q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))? * scale)?;
+            let q_g = (q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))? * scale)?;
 
             // K^T: [B, kv_heads, D, S] — just a view, no copy
             let k_t = k.transpose(2, 3)?;
@@ -436,7 +436,7 @@ impl Attention {
                 Some(mask) => {
                     // mask [B, 1, 1, S] broadcasts over kv_heads & n_rep
                     attn_weights.broadcast_add(mask)?
-                }
+                },
                 None => attn_weights,
             };
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
@@ -498,9 +498,15 @@ impl Attention {
 /// Gate+up projection: either a merged [2*I, H] weight (Standard) or separate quantized projections.
 enum MlpGateUp {
     /// Merged gate+up weight — one gemv instead of two. Standard (BF16/F16/F32) only.
-    Merged { gate_up_proj: Linear, intermediate_size: usize },
+    Merged {
+        gate_up_proj: Linear,
+        intermediate_size: usize,
+    },
     /// Separate quantized gate and up projections (GGUF).
-    Separate { gate_proj: LinearLayer, up_proj: LinearLayer },
+    Separate {
+        gate_proj: LinearLayer,
+        up_proj: LinearLayer,
+    },
 }
 
 struct Mlp {
@@ -543,26 +549,24 @@ impl Mlp {
         let up_proj = gg.linear(&format!("{prefix}.ffn_up.weight"))?;
         let down_proj = gg.linear(&format!("{prefix}.ffn_down.weight"))?;
         Ok(Self {
-            gate_up: MlpGateUp::Separate {
-                gate_proj,
-                up_proj,
-            },
+            gate_up: MlpGateUp::Separate { gate_proj, up_proj },
             down_proj,
         })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match &self.gate_up {
-            MlpGateUp::Merged { gate_up_proj, intermediate_size } => {
+            MlpGateUp::Merged {
+                gate_up_proj,
+                intermediate_size,
+            } => {
                 let gu = gate_up_proj.forward(x)?; // [B, S, 2*intermediate_size]
 
                 #[cfg(feature = "cuda")]
                 {
                     if gu.device().is_cuda() {
-                        let activated = crate::ops::fused_silu_mul(
-                            &gu.contiguous()?,
-                            *intermediate_size,
-                        )?;
+                        let activated =
+                            crate::ops::fused_silu_mul(&gu.contiguous()?, *intermediate_size)?;
                         return self.down_proj.forward(&activated);
                     }
                 }
@@ -572,13 +576,15 @@ impl Mlp {
                 let up = gu.narrow(D::Minus1, *intermediate_size, *intermediate_size)?;
                 let gate = candle_nn::Activation::Silu.forward(&gate)?;
                 self.down_proj.forward(&(gate * up)?)
-            }
-            MlpGateUp::Separate { gate_proj, up_proj, .. } => {
+            },
+            MlpGateUp::Separate {
+                gate_proj, up_proj, ..
+            } => {
                 let gate = gate_proj.forward(x)?;
                 let gate = candle_nn::Activation::Silu.forward(&gate)?;
                 let up = up_proj.forward(x)?;
                 self.down_proj.forward(&(gate * up)?)
-            }
+            },
         }
     }
 }
@@ -641,7 +647,9 @@ impl DecoderLayer {
     ) -> Result<Tensor> {
         let residual = hidden_states;
         let hidden_states = self.input_layernorm.forward(hidden_states)?;
-        let hidden_states = self.self_attn.forward(&hidden_states, cos, sin, attention_mask)?;
+        let hidden_states = self
+            .self_attn
+            .forward(&hidden_states, cos, sin, attention_mask)?;
         let hidden_states = (residual + hidden_states)?;
 
         let residual = &hidden_states;

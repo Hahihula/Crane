@@ -168,8 +168,7 @@ fn main() -> Result<()> {
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&output, &bytes)
-        .with_context(|| format!("write {output}"))?;
+    std::fs::write(&output, &bytes).with_context(|| format!("write {output}"))?;
     eprintln!("wrote {} ({} bytes)", output, bytes.len());
     Ok(())
 }
@@ -255,25 +254,37 @@ fn read_wav_mono_f32(path: &str, offset: f32, duration: Option<f32>) -> Result<(
                 .unwrap_or(0)
         ));
         let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.args(["-y", "-loglevel", "error", "-ss", &format!("{offset}"), "-i", path]);
+        cmd.args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{offset}"),
+            "-i",
+            path,
+        ]);
         if let Some(d) = duration.filter(|&d| d > 0.0) {
             cmd.args(["-t", &format!("{d}")]);
         }
         cmd.args([
-            "-ac", "1",
-            "-ar", "16000",
-            "-c:a", "pcm_s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
             tmp.to_str().context("tmp path")?,
         ]);
-        let status = cmd.status().with_context(|| format!("spawn ffmpeg for {path}"))?;
+        let status = cmd
+            .status()
+            .with_context(|| format!("spawn ffmpeg for {path}"))?;
         if !status.success() {
             anyhow::bail!("ffmpeg failed to decode {path} (exit {status})");
         }
         tmp.to_str().context("tmp path")?.to_string()
     };
 
-    let reader = hound::WavReader::open(&wav_path)
-        .with_context(|| format!("open {wav_path}"))?;
+    let reader = hound::WavReader::open(&wav_path).with_context(|| format!("open {wav_path}"))?;
     let spec = reader.spec();
     let samples_f32: Vec<f32> = match (spec.bits_per_sample, spec.sample_format) {
         (16, _) => reader
@@ -323,7 +334,10 @@ fn read_wav_mono_f32(path: &str, offset: f32, duration: Option<f32>) -> Result<(
     };
     if start >= mono.len() {
         let pad = (duration * sr).max(160.0) as usize;
-        return Ok((vec![0.0_f32; pad.min(spec.sample_rate as usize)], spec.sample_rate));
+        return Ok((
+            vec![0.0_f32; pad.min(spec.sample_rate as usize)],
+            spec.sample_rate,
+        ));
     }
     let take = (duration * sr).max(160.0) as usize;
     let mut out = mono[start..(start + take).min(mono.len())].to_vec();

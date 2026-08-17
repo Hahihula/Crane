@@ -50,8 +50,14 @@ impl MemoryConfig {
     /// decimal-looking labels ("G" = 2^30), so every suffix here — decimal
     /// spelling ("GB") included — is treated as power-of-two too, to match
     /// what operators see reflected back in our own logs.
-    const SIZE_SUFFIXES: [(&'static str, u32); 6] =
-        [("GIB", 30), ("GB", 30), ("G", 30), ("MIB", 20), ("MB", 20), ("M", 20)];
+    const SIZE_SUFFIXES: [(&'static str, u32); 6] = [
+        ("GIB", 30),
+        ("GB", 30),
+        ("G", 30),
+        ("MIB", 20),
+        ("MB", 20),
+        ("M", 20),
+    ];
 
     fn parse_memory_limit(s: &str, device: &Device) -> u64 {
         let s = s.trim();
@@ -175,37 +181,58 @@ mod tests {
 
     #[test]
     fn parses_gib_suffix() {
-        assert_eq!(MemoryConfig::parse_memory_limit("12GiB", &cpu()), 12 * (1u64 << 30));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("12GiB", &cpu()),
+            12 * (1u64 << 30)
+        );
     }
 
     #[test]
     fn parses_gb_suffix() {
-        assert_eq!(MemoryConfig::parse_memory_limit("8GB", &cpu()), 8 * (1u64 << 30));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("8GB", &cpu()),
+            8 * (1u64 << 30)
+        );
     }
 
     #[test]
     fn parses_bare_g_suffix() {
-        assert_eq!(MemoryConfig::parse_memory_limit("5G", &cpu()), 5 * (1u64 << 30));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("5G", &cpu()),
+            5 * (1u64 << 30)
+        );
     }
 
     #[test]
     fn parses_mib_suffix() {
-        assert_eq!(MemoryConfig::parse_memory_limit("512MiB", &cpu()), 512 * (1u64 << 20));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("512MiB", &cpu()),
+            512 * (1u64 << 20)
+        );
     }
 
     #[test]
     fn parses_mb_suffix() {
-        assert_eq!(MemoryConfig::parse_memory_limit("5120MB", &cpu()), 5120 * (1u64 << 20));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("5120MB", &cpu()),
+            5120 * (1u64 << 20)
+        );
     }
 
     #[test]
     fn parses_bare_m_suffix() {
-        assert_eq!(MemoryConfig::parse_memory_limit("5120M", &cpu()), 5120 * (1u64 << 20));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("5120M", &cpu()),
+            5120 * (1u64 << 20)
+        );
     }
 
     #[test]
     fn parses_suffix_case_insensitively() {
-        assert_eq!(MemoryConfig::parse_memory_limit("12gib", &cpu()), 12 * (1u64 << 30));
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("12gib", &cpu()),
+            12 * (1u64 << 30)
+        );
     }
 
     #[test]
@@ -217,7 +244,10 @@ mod tests {
 
     #[test]
     fn parses_bare_bytes() {
-        assert_eq!(MemoryConfig::parse_memory_limit("5368709120", &cpu()), 5_368_709_120);
+        assert_eq!(
+            MemoryConfig::parse_memory_limit("5368709120", &cpu()),
+            5_368_709_120
+        );
     }
 
     #[test]

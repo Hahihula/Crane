@@ -37,17 +37,17 @@
 //!    one matmul — halves the number of linear-layer dispatches per layer.
 
 use candle_core::quantized::gguf_file;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::attention::AttnMask;
 use candle_nn::rotary_emb::rope_thd;
-use candle_nn::{linear_no_bias, Linear, RmsNorm, VarBuilder};
+use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
-use crate::utils::DeviceExt;
 use crate::models::modules::flash_attn::dispatch_flash_attn;
 use crate::models::modules::kv_cache;
 use crate::models::modules::rotary::RotaryEmbedding;
+use crate::utils::DeviceExt;
 
 // Reuse the polymorphic linear layer and GGUF loader from the shared Hunyuan module.
 pub use crate::models::hunyuan_dense::modeling::{Gguf, LinearLayer};
@@ -189,18 +189,19 @@ impl Attention {
         // replaces three.  `narrow` splits are zero-copy views.
         let q_dim = num_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
-        let qkv_proj = if let (LinearLayer::Standard(q), LinearLayer::Standard(k), LinearLayer::Standard(v)) =
-            (&q_proj, &k_proj, &v_proj)
-        {
-            let qkv_w = Tensor::cat(&[q.weight(), k.weight(), v.weight()], 0)?;
-            let qkv_b = match (q.bias(), k.bias(), v.bias()) {
-                (Some(qb), Some(kb), Some(vb)) => Some(Tensor::cat(&[qb, kb, vb], 0)?),
-                _ => None,
+        let qkv_proj =
+            if let (LinearLayer::Standard(q), LinearLayer::Standard(k), LinearLayer::Standard(v)) =
+                (&q_proj, &k_proj, &v_proj)
+            {
+                let qkv_w = Tensor::cat(&[q.weight(), k.weight(), v.weight()], 0)?;
+                let qkv_b = match (q.bias(), k.bias(), v.bias()) {
+                    (Some(qb), Some(kb), Some(vb)) => Some(Tensor::cat(&[qb, kb, vb], 0)?),
+                    _ => None,
+                };
+                Some(Linear::new(qkv_w, qkv_b))
+            } else {
+                None
             };
-            Some(Linear::new(qkv_w, qkv_b))
-        } else {
-            None
-        };
 
         let (q_norm, k_norm) = if config.use_qk_norm {
             (
@@ -255,14 +256,8 @@ impl Attention {
 
         let (q_norm, k_norm) = if config.use_qk_norm {
             (
-                Some(gg.rms_norm(
-                    &format!("{prefix}.attn_q_norm.weight"),
-                    config.rms_norm_eps,
-                )?),
-                Some(gg.rms_norm(
-                    &format!("{prefix}.attn_k_norm.weight"),
-                    config.rms_norm_eps,
-                )?),
+                Some(gg.rms_norm(&format!("{prefix}.attn_q_norm.weight"), config.rms_norm_eps)?),
+                Some(gg.rms_norm(&format!("{prefix}.attn_k_norm.weight"), config.rms_norm_eps)?),
             )
         } else {
             (None, None)
@@ -452,10 +447,11 @@ impl Attention {
             let attn_output = attn_output.to_dtype(q.dtype())?;
 
             // flash_attn output is BHSD [B, H, S, D] → [B, S, H*D]
-            let attn_output = attn_output
-                .transpose(1, 2)?
-                .contiguous()?
-                .reshape((b_sz, seq_len, ()))?;
+            let attn_output =
+                attn_output
+                    .transpose(1, 2)?
+                    .contiguous()?
+                    .reshape((b_sz, seq_len, ()))?;
             return self.o_proj.forward(&attn_output);
         }
 
@@ -466,8 +462,7 @@ impl Attention {
             // instead of reshape(contiguous) + transpose + contiguous.
 
             // Q: [B, H, 1, D] → [B, kv_heads, n_rep, D], pre-scaled
-            let q_g =
-                (q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))? * scale)?;
+            let q_g = (q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))? * scale)?;
 
             // K^T: [B, kv_heads, D, S] — just a view (0 copies here;
             //       matmul will flatten+contiguous in one pass).
@@ -480,7 +475,7 @@ impl Attention {
                 Some(mask) => {
                     // mask [B, 1, 1, S] broadcasts over kv_heads & n_rep
                     attn_weights.broadcast_add(mask)?
-                }
+                },
                 None => attn_weights,
             };
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
@@ -528,10 +523,11 @@ impl Attention {
         let attn_output = attn_weights.matmul(&v)?;
 
         // [B, H, S, D] → [B, S, H*D]
-        let attn_output = attn_output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((b_sz, seq_len, ()))?;
+        let attn_output =
+            attn_output
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((b_sz, seq_len, ()))?;
 
         self.o_proj.forward(&attn_output)
     }
@@ -547,9 +543,15 @@ impl Attention {
 /// Gate+up projection: either a merged [2*I, H] weight (Standard) or separate quantized projections.
 enum MlpGateUp {
     /// Merged gate+up weight — one gemv instead of two. Standard (BF16/F16/F32) only.
-    Merged { gate_up_proj: Linear, intermediate_size: usize },
+    Merged {
+        gate_up_proj: Linear,
+        intermediate_size: usize,
+    },
     /// Separate quantized gate and up projections (GGUF).
-    Separate { gate_proj: LinearLayer, up_proj: LinearLayer },
+    Separate {
+        gate_proj: LinearLayer,
+        up_proj: LinearLayer,
+    },
 }
 
 struct Mlp {
@@ -588,23 +590,27 @@ impl Mlp {
         Ok(Self { gate_up, down_proj })
     }
 
-    fn new_from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, layer_idx: usize, _intermediate_size: usize) -> Result<Self> {
+    fn new_from_gguf<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        layer_idx: usize,
+        _intermediate_size: usize,
+    ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
         let gate_proj = gg.linear(&format!("{prefix}.ffn_gate.weight"))?;
         let up_proj = gg.linear(&format!("{prefix}.ffn_up.weight"))?;
         let down_proj = gg.linear(&format!("{prefix}.ffn_down.weight"))?;
         Ok(Self {
-            gate_up: MlpGateUp::Separate {
-                gate_proj,
-                up_proj,
-            },
+            gate_up: MlpGateUp::Separate { gate_proj, up_proj },
             down_proj,
         })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match &self.gate_up {
-            MlpGateUp::Merged { gate_up_proj, intermediate_size } => {
+            MlpGateUp::Merged {
+                gate_up_proj,
+                intermediate_size,
+            } => {
                 let gu = gate_up_proj.forward(x)?; // [B, S, 2*intermediate_size]
 
                 // Use the fused GPU kernel when available: eliminates
@@ -612,10 +618,8 @@ impl Mlp {
                 #[cfg(any(feature = "cuda", feature = "rocm"))]
                 {
                     if gu.device().is_cuda() || gu.device().is_rocm() {
-                        let activated = crate::ops::fused_silu_mul(
-                            &gu.contiguous()?,
-                            *intermediate_size,
-                        )?;
+                        let activated =
+                            crate::ops::fused_silu_mul(&gu.contiguous()?, *intermediate_size)?;
                         return self.down_proj.forward(&activated);
                     }
                 }
@@ -625,13 +629,15 @@ impl Mlp {
                 let up = gu.narrow(D::Minus1, *intermediate_size, *intermediate_size)?;
                 let gate = candle_nn::Activation::Silu.forward(&gate)?;
                 self.down_proj.forward(&(gate * up)?)
-            }
-            MlpGateUp::Separate { gate_proj, up_proj, .. } => {
+            },
+            MlpGateUp::Separate {
+                gate_proj, up_proj, ..
+            } => {
                 let gate = gate_proj.forward(x)?;
                 let gate = candle_nn::Activation::Silu.forward(&gate)?;
                 let up = up_proj.forward(x)?;
                 self.down_proj.forward(&(gate * up)?)
-            }
+            },
         }
     }
 }
@@ -698,9 +704,9 @@ impl DecoderLayer {
     ) -> Result<Tensor> {
         let residual = hidden_states;
         let hidden_states = self.input_layernorm.forward(hidden_states)?;
-        let hidden_states =
-            self.self_attn
-                .forward(&hidden_states, cos, sin, attention_mask)?;
+        let hidden_states = self
+            .self_attn
+            .forward(&hidden_states, cos, sin, attention_mask)?;
         let hidden_states = (residual + hidden_states)?;
 
         let residual = &hidden_states;
@@ -839,8 +845,7 @@ impl Qwen3Model {
 
         let num_attention_heads =
             md_get(&format!("{arch}.attention.head_count"))?.to_u32()? as usize;
-        let num_kv_heads =
-            md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
+        let num_kv_heads = md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
         let head_dim = gg
             .metadata()
             .get(&format!("{arch}.attention.key_length"))
@@ -848,8 +853,7 @@ impl Qwen3Model {
             .unwrap_or(128) as usize;
         let num_hidden_layers = md_get(&format!("{arch}.block_count"))?.to_u32()? as usize;
         let hidden_size = md_get(&format!("{arch}.embedding_length"))?.to_u32()? as usize;
-        let intermediate_size =
-            md_get(&format!("{arch}.feed_forward_length"))?.to_u32()? as usize;
+        let intermediate_size = md_get(&format!("{arch}.feed_forward_length"))?.to_u32()? as usize;
         let max_position_embeddings = gg
             .metadata()
             .get(&format!("{arch}.context_length"))
@@ -1014,8 +1018,7 @@ impl Qwen3Model {
 
         let mut hidden_states = hidden_states;
         for layer in &mut self.layers {
-            hidden_states =
-                layer.forward(&hidden_states, &cos, &sin, attention_mask.as_ref())?;
+            hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask.as_ref())?;
         }
 
         let hidden_states = self.norm.forward(&hidden_states)?;
@@ -1117,9 +1120,7 @@ impl Qwen3Model {
     /// Restore per-layer KV caches.
     pub fn set_kv_caches(&mut self, caches: Vec<Option<(Tensor, Tensor)>>) {
         for (layer, cache) in self.layers.iter_mut().zip(caches) {
-            let seq_len = cache
-                .as_ref()
-                .map_or(0, |(k, _)| k.dim(2).unwrap_or(0));
+            let seq_len = cache.as_ref().map_or(0, |(k, _)| k.dim(2).unwrap_or(0));
             layer.self_attn.kv_cache = cache;
             layer.self_attn.cache_seq_len = seq_len;
         }
@@ -1175,10 +1176,8 @@ impl Qwen3Model {
                 let v = v.contiguous()?;
                 if extra_room > 0 {
                     let (b, h, s, d) = k.dims4()?;
-                    let buf_k =
-                        Tensor::zeros((b, h, s + extra_room, d), k.dtype(), k.device())?;
-                    let buf_v =
-                        Tensor::zeros((b, h, s + extra_room, d), v.dtype(), v.device())?;
+                    let buf_k = Tensor::zeros((b, h, s + extra_room, d), k.dtype(), k.device())?;
+                    let buf_v = Tensor::zeros((b, h, s + extra_room, d), v.dtype(), v.device())?;
                     buf_k.slice_set(&k, 2, 0)?;
                     buf_v.slice_set(&v, 2, 0)?;
                     layer.self_attn.kv_cache = Some((buf_k, buf_v));
@@ -1227,8 +1226,7 @@ impl Qwen3Model {
 
         let mut hidden_states = hidden_states;
         for layer in &mut self.layers {
-            hidden_states =
-                layer.forward(&hidden_states, &cos, &sin, attention_mask)?;
+            hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask)?;
         }
 
         let hidden_states = self.norm.forward(&hidden_states)?;
@@ -1382,8 +1380,8 @@ fn pad_and_stack_kv_caches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_nn::attention::flash_attn;
     use candle_nn::VarMap;
+    use candle_nn::attention::flash_attn;
 
     fn tiny_config() -> Config {
         let json = r#"{
@@ -1426,8 +1424,8 @@ mod tests {
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
         let mut model_a = Qwen3Model::new(&cfg, vb.clone()).expect("new");
-        let mut model_b = Qwen3Model::new_from_model_vb(&cfg, vb.pp("model"), vb)
-            .expect("new_from_model_vb");
+        let mut model_b =
+            Qwen3Model::new_from_model_vb(&cfg, vb.pp("model"), vb).expect("new_from_model_vb");
 
         let input_ids = Tensor::new(&[[1u32, 2, 3]], &device).expect("input_ids");
         let out_a = model_a.forward(&input_ids, 0).expect("forward a");
@@ -1495,11 +1493,7 @@ mod tests {
         let scale = 1.0 / (head_dim as f64).sqrt();
 
         // Old algorithm: reshape Q into groups, 3-pass matmul/softmax/matmul.
-        let q_g = (q
-            .reshape((b, kv_heads, n_rep, head_dim))
-            .unwrap()
-            * scale)
-            .unwrap();
+        let q_g = (q.reshape((b, kv_heads, n_rep, head_dim)).unwrap() * scale).unwrap();
         let k_t = k.transpose(2, 3).unwrap();
         let attn_weights = q_g.matmul(&k_t).unwrap();
         let attn_weights = attn_weights.broadcast_add(&mask).unwrap();
@@ -1571,11 +1565,7 @@ mod tests {
         let scale = 1.0 / (head_dim as f64).sqrt();
 
         // Naive algorithm with the mask applied.
-        let q_g = (q
-            .reshape((b, kv_heads, n_rep, head_dim))
-            .unwrap()
-            * scale)
-            .unwrap();
+        let q_g = (q.reshape((b, kv_heads, n_rep, head_dim)).unwrap() * scale).unwrap();
         let k_t = k.transpose(2, 3).unwrap();
         let attn_weights = q_g.matmul(&k_t).unwrap();
         let attn_weights = attn_weights.broadcast_add(&mask).unwrap();
@@ -1697,8 +1687,8 @@ mod tests {
             }
             let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, kv_len), &device).unwrap();
 
-            let attn_weights = (q.matmul(&k_exp.transpose(2, 3).unwrap()).unwrap() * scale)
-                .unwrap();
+            let attn_weights =
+                (q.matmul(&k_exp.transpose(2, 3).unwrap()).unwrap() * scale).unwrap();
             let attn_weights = attn_weights.broadcast_add(&mask).unwrap();
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights).unwrap();
             let naive_out = attn_weights.matmul(&v_exp).unwrap();
@@ -1792,7 +1782,9 @@ mod tests {
 
         // Single prefill.
         let single_ids = Tensor::new(&[[1u32, 2, 3, 4, 5]], &device).expect("single_ids");
-        model_single.forward(&single_ids, 0).expect("single prefill");
+        model_single
+            .forward(&single_ids, 0)
+            .expect("single prefill");
         let out_single = model_single.forward(&decode_id, 5).expect("single decode");
 
         // Chunked prefill: two prefill calls, then decode.
@@ -1800,7 +1792,9 @@ mod tests {
         let chunk_b = Tensor::new(&[[4u32, 5]], &device).expect("chunk_b");
         model_chunked.forward(&chunk_a, 0).expect("chunk a prefill");
         model_chunked.forward(&chunk_b, 3).expect("chunk b prefill");
-        let out_chunked = model_chunked.forward(&decode_id, 5).expect("chunked decode");
+        let out_chunked = model_chunked
+            .forward(&decode_id, 5)
+            .expect("chunked decode");
 
         assert_eq!(out_single.dims(), out_chunked.dims());
         assert!(max_abs_diff(&out_single, &out_chunked) < 1e-4);

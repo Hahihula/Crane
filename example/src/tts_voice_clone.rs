@@ -25,22 +25,36 @@ fn main() -> anyhow::Result<()> {
 
     let device = {
         #[cfg(feature = "cuda")]
-        { Device::new_cuda(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_cuda(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(all(target_os = "macos", not(feature = "cuda")))]
-        { Device::new_metal(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_metal(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(all(not(feature = "cuda"), not(target_os = "macos"), feature = "rocm"))]
-        { Device::new_rocm(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_rocm(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(all(not(target_os = "macos"), not(feature = "cuda"), not(feature = "rocm")))]
-        { Device::Cpu }
+        {
+            Device::Cpu
+        }
     };
     let dtype = {
         #[cfg(feature = "cuda")]
-        { DType::BF16 }
+        {
+            DType::BF16
+        }
         // ROCm defaults to F16: BF16 is still incomplete on the rocm backend.
         #[cfg(all(not(feature = "cuda"), feature = "rocm"))]
-        { DType::F16 }
+        {
+            DType::F16
+        }
         #[cfg(all(not(feature = "cuda"), not(feature = "rocm")))]
-        { DType::F32 }
+        {
+            DType::F32
+        }
     };
 
     println!("Loading Qwen3-TTS Base (voice clone) from: {model_path}");
@@ -54,11 +68,10 @@ fn main() -> anyhow::Result<()> {
     let ref_audio = "data/audio/kinsenka_3.wav";
     let ref_text_path = "data/audio/kinsenka_3.txt";
 
-    let ref_text = std::fs::read_to_string(ref_text_path)
-        .unwrap_or_else(|_| {
-            eprintln!("Warning: could not read {ref_text_path}, using empty ref_text");
-            String::new()
-        });
+    let ref_text = std::fs::read_to_string(ref_text_path).unwrap_or_else(|_| {
+        eprintln!("Warning: could not read {ref_text_path}, using empty ref_text");
+        String::new()
+    });
     let ref_text = ref_text.trim();
 
     println!("Reference audio : {ref_audio}");

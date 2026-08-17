@@ -56,19 +56,19 @@ fn parse_args() -> Result<Args> {
         match arg.as_str() {
             "--port" => {
                 port = it.next().context("--port needs a value")?.parse()?;
-            }
+            },
             "--model-dir" => {
                 model_dir = PathBuf::from(it.next().context("--model-dir needs a value")?);
-            }
+            },
             "--image" => {
                 image = PathBuf::from(it.next().context("--image needs a value")?);
-            }
+            },
             "--max-tokens" => {
                 max_tokens = it.next().context("--max-tokens needs a value")?.parse()?;
-            }
+            },
             "--prompt" => {
                 prompt = it.next().context("--prompt needs a value")?;
-            }
+            },
             "--keep-running" => once = false,
             "-h" | "--help" => {
                 println!(
@@ -76,7 +76,7 @@ fn parse_args() -> Result<Args> {
                      [--max-tokens N] [--prompt \"...\"] [--keep-running]"
                 );
                 std::process::exit(0);
-            }
+            },
             other => anyhow::bail!("Unknown argument: {other}"),
         }
     }
@@ -119,7 +119,12 @@ fn wait_for_health(port: u16, timeout: Duration) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/health");
     let deadline = Instant::now() + timeout;
     loop {
-        if client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+        if client
+            .get(&url)
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -135,7 +140,12 @@ fn base64_encode(path: &PathBuf) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
-fn send_chat_request(port: u16, image_path: &PathBuf, prompt: &str, max_tokens: usize) -> Result<String> {
+fn send_chat_request(
+    port: u16,
+    image_path: &PathBuf,
+    prompt: &str,
+    max_tokens: usize,
+) -> Result<String> {
     let b64 = base64_encode(image_path)?;
     let payload = serde_json::json!({
         "model": "qwen3.5",
@@ -162,8 +172,7 @@ fn send_chat_request(port: u16, image_path: &PathBuf, prompt: &str, max_tokens: 
     if !status.is_success() {
         anyhow::bail!("chat completions returned HTTP {status}: {body}");
     }
-    let json: serde_json::Value =
-        serde_json::from_str(&body).context("decode response JSON")?;
+    let json: serde_json::Value = serde_json::from_str(&body).context("decode response JSON")?;
     let text = json["choices"][0]["message"]["content"]
         .as_str()
         .context("response had no message.content")?;

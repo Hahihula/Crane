@@ -4,10 +4,10 @@
 // Just vision part.
 
 use crate::utils::utils;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{
-    conv2d_no_bias, embedding, layer_norm, linear, Activation, Conv2d, Conv2dConfig,
-    Embedding, LayerNorm, Linear, VarBuilder,
+    Activation, Conv2d, Conv2dConfig, Embedding, LayerNorm, Linear, VarBuilder, conv2d_no_bias,
+    embedding, layer_norm, linear,
 };
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -439,7 +439,6 @@ impl Siglip2VisionModel {
 }
 
 // Siglip2 Processor?
-
 
 pub fn test_main() {
     // let device = Device::Cpu;

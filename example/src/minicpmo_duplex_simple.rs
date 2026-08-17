@@ -80,7 +80,8 @@ struct DuplexChunkEvent {
     audio_sample_rate: Option<u32>,
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 type WsSource = futures_util::stream::SplitStream<WsStream>;
 type PlaybackQueue = Arc<Mutex<VecDeque<f32>>>;
@@ -111,7 +112,10 @@ fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
     if channels <= 1 {
         return interleaved.to_vec();
     }
-    interleaved.chunks_exact(channels as usize).map(|frame| frame.iter().sum::<f32>() / f32::from(channels)).collect()
+    interleaved
+        .chunks_exact(channels as usize)
+        .map(|frame| frame.iter().sum::<f32>() / f32::from(channels))
+        .collect()
 }
 
 async fn send_chunk(write: &mut WsSink, samples: &[f32]) -> Result<()> {
@@ -120,7 +124,10 @@ async fn send_chunk(write: &mut WsSink, samples: &[f32]) -> Result<()> {
         let clamped = s.clamp(-1.0, 1.0);
         bytes.extend_from_slice(&((clamped * f32::from(i16::MAX)) as i16).to_le_bytes());
     }
-    write.send(Message::Binary(bytes.into())).await.context("failed to send audio chunk")?;
+    write
+        .send(Message::Binary(bytes.into()))
+        .await
+        .context("failed to send audio chunk")?;
     Ok(())
 }
 
@@ -133,7 +140,7 @@ async fn recv_event(read: &mut WsSource) -> Result<DuplexChunkEvent> {
                     anyhow::bail!("server error: {err}");
                 }
                 return Ok(serde_json::from_value(value)?);
-            }
+            },
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
             Some(Ok(Message::Close(_))) | None => anyhow::bail!("connection closed by server"),
             Some(Ok(_)) => continue,
@@ -156,7 +163,12 @@ fn print_event(i: usize, event: &DuplexChunkEvent) {
 /// 24kHz) into `accumulated` for the final `--output-wav`, and — if a
 /// playback device is available — resamples and queues it for live
 /// playback too.
-fn handle_audio(event: &DuplexChunkEvent, playback_queue: &PlaybackQueue, playback_rate: u32, accumulated: &mut Vec<f32>) {
+fn handle_audio(
+    event: &DuplexChunkEvent,
+    playback_queue: &PlaybackQueue,
+    playback_rate: u32,
+    accumulated: &mut Vec<f32>,
+) {
     let Some(b64) = &event.audio_base64 else {
         return;
     };
@@ -165,7 +177,10 @@ fn handle_audio(event: &DuplexChunkEvent, playback_queue: &PlaybackQueue, playba
         eprintln!("warning: failed to decode audio_base64");
         return;
     };
-    let samples: Vec<f32> = bytes.chunks_exact(2).map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0).collect();
+    let samples: Vec<f32> = bytes
+        .chunks_exact(2)
+        .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
+        .collect();
     accumulated.extend_from_slice(&samples);
 
     if playback_rate > 0 {
@@ -181,10 +196,14 @@ fn handle_audio(event: &DuplexChunkEvent, playback_queue: &PlaybackQueue, playba
 fn start_playback_stream(queue: PlaybackQueue) -> Result<(Option<cpal::Stream>, u32)> {
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
-        eprintln!("no default output device found; skipping live playback (--output-wav will still be written)");
+        eprintln!(
+            "no default output device found; skipping live playback (--output-wav will still be written)"
+        );
         return Ok((None, 0));
     };
-    let config = device.default_output_config().context("no default output config")?;
+    let config = device
+        .default_output_config()
+        .context("no default output config")?;
     let sample_rate = config.sample_rate();
     let channels = usize::from(config.channels());
     let stream_config: cpal::StreamConfig = config.into();
@@ -213,8 +232,12 @@ fn start_playback_stream(queue: PlaybackQueue) -> Result<(Option<cpal::Stream>, 
 /// input device runs at exactly 16kHz mono.
 fn start_capture_stream(buffer: CaptureBuffer) -> Result<(cpal::Stream, u32, u16)> {
     let host = cpal::default_host();
-    let device = host.default_input_device().context("no default input device found")?;
-    let config = device.default_input_config().context("no default input config")?;
+    let device = host
+        .default_input_device()
+        .context("no default input device found")?;
+    let config = device
+        .default_input_config()
+        .context("no default input config")?;
     let sample_rate = config.sample_rate();
     let channels = config.channels();
     let stream_config: cpal::StreamConfig = config.into();
@@ -236,25 +259,39 @@ fn write_output_wav(path: &str, samples: &[f32]) -> Result<()> {
         println!("no response audio received — nothing to write to {path}");
         return Ok(());
     }
-    let spec = hound::WavSpec { channels: 1, sample_rate: SERVER_AUDIO_SAMPLE_RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SERVER_AUDIO_SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
     let mut writer = hound::WavWriter::create(path, spec)?;
     for &s in samples {
         writer.write_sample((s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)?;
     }
     writer.finalize()?;
-    println!("wrote {path} ({:.2}s)", samples.len() as f32 / SERVER_AUDIO_SAMPLE_RATE as f32);
+    println!(
+        "wrote {path} ({:.2}s)",
+        samples.len() as f32 / SERVER_AUDIO_SAMPLE_RATE as f32
+    );
     Ok(())
 }
 
 fn load_wav_as_16k_mono(path: &str) -> Result<Vec<f32>> {
-    let mut reader = hound::WavReader::open(path).with_context(|| format!("failed to open {path}"))?;
+    let mut reader =
+        hound::WavReader::open(path).with_context(|| format!("failed to open {path}"))?;
     let spec = reader.spec();
     let raw: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<std::result::Result<_, _>>()?,
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<std::result::Result<_, _>>()?,
         hound::SampleFormat::Int => {
             let max = 2f32.powi(i32::from(spec.bits_per_sample) - 1);
-            reader.samples::<i32>().map(|s| s.map(|v| v as f32 / max)).collect::<std::result::Result<_, _>>()?
-        }
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / max))
+                .collect::<std::result::Result<_, _>>()?
+        },
     };
     let mono = downmix_to_mono(&raw, spec.channels);
     Ok(linear_resample(&mono, spec.sample_rate, INPUT_SAMPLE_RATE))
@@ -268,8 +305,12 @@ async fn main() -> Result<()> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(&args.server).await.context("failed to connect to duplex WS endpoint — is crane-serve running with a MiniCPM-o-4.5 checkpoint?")?;
     let (mut write, mut read) = ws_stream.split();
 
-    let prepare = PrepareMessage { system_prompt: args.system_prompt.clone() };
-    write.send(Message::Text(serde_json::to_string(&prepare)?.into())).await?;
+    let prepare = PrepareMessage {
+        system_prompt: args.system_prompt.clone(),
+    };
+    write
+        .send(Message::Text(serde_json::to_string(&prepare)?.into()))
+        .await?;
 
     loop {
         match read.next().await {
@@ -280,7 +321,7 @@ async fn main() -> Result<()> {
                 if text.contains("\"error\"") {
                     anyhow::bail!("server rejected the session: {text}");
                 }
-            }
+            },
             Some(Ok(_)) => continue,
             Some(Err(e)) => anyhow::bail!("WebSocket error while waiting for ready: {e}"),
             None => anyhow::bail!("connection closed before session became ready"),
@@ -297,7 +338,7 @@ async fn main() -> Result<()> {
             Err(e) => {
                 eprintln!("playback unavailable ({e}); continuing without live playback");
                 (None, 0)
-            }
+            },
         }
     };
 
@@ -306,18 +347,30 @@ async fn main() -> Result<()> {
     if let Some(wav_path) = &args.wav {
         let resampled = load_wav_as_16k_mono(wav_path)?;
         let chunks: Vec<&[f32]> = resampled.chunks(CHUNK_SAMPLES).collect();
-        let total = if args.max_chunks > 0 { args.max_chunks.min(chunks.len()) } else { chunks.len() };
+        let total = if args.max_chunks > 0 {
+            args.max_chunks.min(chunks.len())
+        } else {
+            chunks.len()
+        };
         println!("streaming {total} chunk(s) from {wav_path}");
         for (i, chunk) in chunks.iter().take(total).enumerate() {
             send_chunk(&mut write, chunk).await?;
             let event = recv_event(&mut read).await?;
             print_event(i, &event);
-            handle_audio(&event, &playback_queue, playback_rate, &mut all_response_audio);
+            handle_audio(
+                &event,
+                &playback_queue,
+                playback_rate,
+                &mut all_response_audio,
+            );
         }
     } else {
         let capture_buffer: CaptureBuffer = Arc::new(Mutex::new(VecDeque::new()));
-        let (_capture_stream, capture_rate, capture_channels) = start_capture_stream(capture_buffer.clone())?;
-        println!("capturing from the default input device: {capture_rate} Hz, {capture_channels} channel(s) — speak now (Ctrl+C to stop)");
+        let (_capture_stream, capture_rate, capture_channels) =
+            start_capture_stream(capture_buffer.clone())?;
+        println!(
+            "capturing from the default input device: {capture_rate} Hz, {capture_channels} channel(s) — speak now (Ctrl+C to stop)"
+        );
         let raw_samples_per_chunk = capture_rate as usize * usize::from(capture_channels);
         let mut i = 0usize;
         loop {
@@ -328,13 +381,22 @@ async fn main() -> Result<()> {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            let raw_chunk: Vec<f32> = capture_buffer.lock().unwrap().drain(..raw_samples_per_chunk).collect();
+            let raw_chunk: Vec<f32> = capture_buffer
+                .lock()
+                .unwrap()
+                .drain(..raw_samples_per_chunk)
+                .collect();
             let mono = downmix_to_mono(&raw_chunk, capture_channels);
             let resampled = linear_resample(&mono, capture_rate, INPUT_SAMPLE_RATE);
             send_chunk(&mut write, &resampled).await?;
             let event = recv_event(&mut read).await?;
             print_event(i, &event);
-            handle_audio(&event, &playback_queue, playback_rate, &mut all_response_audio);
+            handle_audio(
+                &event,
+                &playback_queue,
+                playback_rate,
+                &mut all_response_audio,
+            );
             i += 1;
         }
     }

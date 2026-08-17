@@ -15,8 +15,8 @@ use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
 use super::modeling::{Gemma4Config, Gemma4Model};
-use crate::generation::based::ModelForCausalLM;
 use crate::generation::GenerationConfig;
+use crate::generation::based::ModelForCausalLM;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 
@@ -52,16 +52,12 @@ impl Model {
         let format = match format {
             ModelFormat::Auto => {
                 let p = std::path::Path::new(model_path);
-                if p.is_file()
-                    && p.extension()
-                        .map(|e| e == "gguf")
-                        .unwrap_or(false)
-                {
+                if p.is_file() && p.extension().map(|e| e == "gguf").unwrap_or(false) {
                     ModelFormat::Gguf
                 } else {
                     ModelFormat::Safetensors
                 }
-            }
+            },
             other => other,
         };
 
@@ -193,11 +189,8 @@ impl Model {
     }
 
     pub fn warmup(&mut self) {
-        if let Err(e) = self.generate(
-            &[2, 651, 9456],
-            &GenerationConfig::with_max_tokens(5),
-            None,
-        ) {
+        if let Err(e) = self.generate(&[2, 651, 9456], &GenerationConfig::with_max_tokens(5), None)
+        {
             eprintln!("warmup failed (non-fatal): {e}");
         }
         self.clear_kv_cache();

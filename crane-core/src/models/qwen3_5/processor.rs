@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use serde::Deserialize;
 
 /// Mirror of HF `preprocessor_config.json`.
@@ -46,8 +46,8 @@ pub fn load_preprocessor_config(model_dir: &str) -> Result<PreprocessorConfig> {
     let path = std::path::Path::new(model_dir).join("preprocessor_config.json");
     let data = std::fs::read(&path)
         .with_context(|| format!("read preprocessor_config.json at {}", path.display()))?;
-    let cfg: PreprocessorConfig = serde_json::from_slice(&data)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let cfg: PreprocessorConfig =
+        serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))?;
     Ok(cfg)
 }
 
@@ -92,8 +92,13 @@ impl PreprocessorConfig {
     /// Resize `image` to multiples of `factor` while keeping pixels in bounds.
     pub fn smart_resize(&self, image: &DynamicImage) -> DynamicImage {
         let (w, h) = image.dimensions();
-        let (h_new, w_new) =
-            smart_resize(h, w, self.factor(), self.size.shortest_edge, self.size.longest_edge);
+        let (h_new, w_new) = smart_resize(
+            h,
+            w,
+            self.factor(),
+            self.size.shortest_edge,
+            self.size.longest_edge,
+        );
         if (h_new, w_new) == (h, w) {
             image.clone()
         } else {
@@ -128,12 +133,10 @@ impl PreprocessorConfig {
         for (x, y, pixel) in rgb.enumerate_pixels() {
             for c in 0..3 {
                 let v = pixel[c] as f32 / 255.0;
-                chw[c * (w * h) as usize + (y * w + x) as usize] =
-                    (v - mean[c]) / std[c];
+                chw[c * (w * h) as usize + (y * w + x) as usize] = (v - mean[c]) / std[c];
             }
         }
-        let chw = Tensor::from_vec(chw, (3, h as usize, w as usize), device)?
-            .to_dtype(dtype)?;
+        let chw = Tensor::from_vec(chw, (3, h as usize, w as usize), device)?.to_dtype(dtype)?;
 
         // 3. Reshape into patches. Each patch covers `patch_size × patch_size`
         //    pixels in 3 channels, repeated `temporal_patch_size` times
@@ -181,7 +184,11 @@ impl PreprocessorConfig {
                                         let y = py * patch_size_u + j;
                                         let x = px * patch_size_u + i;
                                         let src = c * (h_u * w_u) + y * w_u + x;
-                                        let dst = base + c * (t_patch * pp) + t * pp + j * patch_size_u + i;
+                                        let dst = base
+                                            + c * (t_patch * pp)
+                                            + t * pp
+                                            + j * patch_size_u
+                                            + i;
                                         patches[dst] = chw_data[src];
                                     }
                                 }
@@ -193,8 +200,8 @@ impl PreprocessorConfig {
             }
         }
 
-        let pixel_values = Tensor::from_vec(patches, (n_patches, in_dim), device)?
-            .to_dtype(dtype)?;
+        let pixel_values =
+            Tensor::from_vec(patches, (n_patches, in_dim), device)?.to_dtype(dtype)?;
         Ok(ProcessedImage {
             pixel_values,
             grid_thw: (1, h_p, w_p),
@@ -237,7 +244,10 @@ mod tests {
     /// synthetic test images below are not smart-resized at all.
     fn cfg() -> PreprocessorConfig {
         PreprocessorConfig {
-            size: Size { shortest_edge: 16, longest_edge: 16777216 },
+            size: Size {
+                shortest_edge: 16,
+                longest_edge: 16777216,
+            },
             patch_size: 16,
             temporal_patch_size: 2,
             merge_size: 2,
@@ -297,7 +307,11 @@ mod tests {
         // i.e. raster patch indices 0, 1, 4, 5 — then block (0,1) gives 2, 3, 6, 7.
         let decode = |v: f32| ((v * 0.5 + 0.5) * 255.0).round() as u32;
         let got: Vec<u32> = rows.iter().map(|r| decode(r[0])).collect();
-        assert_eq!(got, vec![0, 1, 4, 5, 2, 3, 6, 7], "patch rows must be merge-block-major");
+        assert_eq!(
+            got,
+            vec![0, 1, 4, 5, 2, 3, 6, 7],
+            "patch rows must be merge-block-major"
+        );
 
         // Within a row: channel-major, then temporal. Channel 1 == 7, ch 2 == 9,
         // and both temporal copies of a channel must be identical.

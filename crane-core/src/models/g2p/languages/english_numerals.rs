@@ -15,8 +15,25 @@ use crate::models::g2p::numeral_expand::NumeralWords;
 
 /// Words for 0-19, where the position is the value itself.
 const ONES: [&str; 20] = [
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
     "nineteen",
 ];
 
@@ -30,8 +47,15 @@ const TENS: [&str; 10] = [
 /// Index 0 (the ones/hundreds group) has no scale word. `u64::MAX` is about
 /// 18.4 quintillion, so seven groups (up to "quintillion") cover every
 /// representable value.
-const SCALES: [&str; 7] =
-    ["", "thousand", "million", "billion", "trillion", "quadrillion", "quintillion"];
+const SCALES: [&str; 7] = [
+    "",
+    "thousand",
+    "million",
+    "billion",
+    "trillion",
+    "quadrillion",
+    "quintillion",
+];
 
 /// English [`NumeralWords`] implementation: spells out cardinal numbers in
 /// standard American English form (no "and" before the final group, e.g.
@@ -58,7 +82,11 @@ impl NumeralWords for EnglishNumerals {
             .filter(|&(_, &group)| group != 0)
             .map(|(scale, &group)| {
                 let words = three_digit_words(group);
-                if scale == 0 { words } else { format!("{words} {}", SCALES[scale]) }
+                if scale == 0 {
+                    words
+                } else {
+                    format!("{words} {}", SCALES[scale])
+                }
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -89,7 +117,11 @@ fn two_digit_words(n: u32) -> String {
     }
     let tens = TENS[(n / 10) as usize];
     let ones = n % 10;
-    if ones == 0 { tens.to_string() } else { format!("{tens} {}", ONES[ones as usize]) }
+    if ones == 0 {
+        tens.to_string()
+    } else {
+        format!("{tens} {}", ONES[ones as usize])
+    }
 }
 
 #[cfg(test)]
@@ -167,7 +199,10 @@ mod tests {
     // Verifies a year-style four-digit number spells out every group.
     #[test]
     fn year_style_number() {
-        assert_eq!(EnglishNumerals.cardinal(1891), "one thousand eight hundred ninety one");
+        assert_eq!(
+            EnglishNumerals.cardinal(1891),
+            "one thousand eight hundred ninety one"
+        );
     }
 
     // Verifies a middle thousands group is fully spelled out, not skipped,

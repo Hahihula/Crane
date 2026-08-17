@@ -12,7 +12,7 @@
 //! cargo test -p crane-core --release --features cuda \
 //!   --test qwen3_5_gqa_expand_cost -- --ignored --nocapture
 //! ```
-use candle_core::{DType, Device, Tensor, D};
+use candle_core::{D, DType, Device, Tensor};
 
 // Qwen3.8-27B full-attention geometry.
 const KV_HEADS: usize = 4;
@@ -28,7 +28,7 @@ fn gqa_expansion_cost_grows_linearly_with_context() {
         Err(e) => {
             eprintln!("skipped: no CUDA device ({e})");
             return;
-        }
+        },
     };
 
     println!(
@@ -77,7 +77,11 @@ fn grouped_once(q: &Tensor, k: &Tensor, v: &Tensor) {
     // [b, 24, 1, d] -> [b, 4, 6, d]: the 6 query heads of one KV group become
     // rows of a single small matmul against that group's K.
     let qg = q.reshape((b, kv, N_REP, d)).unwrap();
-    let kt = k.transpose(D::Minus2, D::Minus1).unwrap().contiguous().unwrap();
+    let kt = k
+        .transpose(D::Minus2, D::Minus1)
+        .unwrap()
+        .contiguous()
+        .unwrap();
     let scores = qg.matmul(&kt).unwrap(); // [b, 4, 6, s]
     let w = candle_nn::ops::softmax_last_dim(&scores).unwrap();
     let _y = w.matmul(v).unwrap(); // [b, 4, 6, d]

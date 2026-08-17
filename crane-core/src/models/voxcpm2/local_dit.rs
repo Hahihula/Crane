@@ -7,7 +7,7 @@
 //! `local_dit.py`, which this crate does not implement).
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{linear, Activation, Linear, VarBuilder};
+use candle_nn::{Activation, Linear, VarBuilder, linear};
 
 use super::config::MiniCpm4Config;
 use super::minicpm4::MiniCpm4Model;
@@ -18,7 +18,9 @@ fn sinusoidal_pos_emb(t: &Tensor, dim: usize, scale: f64) -> Result<Tensor> {
     let device = t.device();
     let half_dim = dim / 2;
     let emb_scale = (10000f64).ln() / (half_dim as f64 - 1.0);
-    let freqs: Vec<f32> = (0..half_dim).map(|i| (-(i as f64) * emb_scale).exp() as f32).collect();
+    let freqs: Vec<f32> = (0..half_dim)
+        .map(|i| (-(i as f64) * emb_scale).exp() as f32)
+        .collect();
     let freqs = Tensor::from_vec(freqs, half_dim, device)?; // [half_dim]
 
     let t = t.to_dtype(candle_core::DType::F32)?.unsqueeze(1)?; // [N, 1]
@@ -58,14 +60,23 @@ pub struct VoxCpmLocDit {
 }
 
 impl VoxCpmLocDit {
-    pub fn new(cfg: &MiniCpm4Config, in_channels: usize, max_length: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &MiniCpm4Config,
+        in_channels: usize,
+        max_length: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         Ok(Self {
             in_proj: linear(in_channels, hidden_size, vb.pp("in_proj"))?,
             cond_proj: linear(in_channels, hidden_size, vb.pp("cond_proj"))?,
             out_proj: linear(hidden_size, in_channels, vb.pp("out_proj"))?,
             time_mlp: TimestepEmbedding::new(hidden_size, hidden_size, vb.pp("time_mlp"))?,
-            delta_time_mlp: TimestepEmbedding::new(hidden_size, hidden_size, vb.pp("delta_time_mlp"))?,
+            delta_time_mlp: TimestepEmbedding::new(
+                hidden_size,
+                hidden_size,
+                vb.pp("delta_time_mlp"),
+            )?,
             decoder: MiniCpm4Model::new(cfg, max_length, vb.pp("decoder"))?,
             hidden_size,
             in_channels,
@@ -78,12 +89,21 @@ impl VoxCpmLocDit {
     ///
     /// Stateless / one-shot, same reasoning as [`super::local_encoder::VoxCpmLocEnc`]
     /// — always clears the inner decoder's KV cache first.
-    pub fn forward(&mut self, x: &Tensor, mu: &Tensor, t: &Tensor, cond: &Tensor, dt: &Tensor) -> Result<Tensor> {
+    pub fn forward(
+        &mut self,
+        x: &Tensor,
+        mu: &Tensor,
+        t: &Tensor,
+        cond: &Tensor,
+        dt: &Tensor,
+    ) -> Result<Tensor> {
         self.decoder.clear_kv_cache();
 
         let n = x.dim(0)?;
         let x_h = self.in_proj.forward(&x.transpose(1, 2)?.contiguous()?)?; // [N, T, H]
-        let cond_h = self.cond_proj.forward(&cond.transpose(1, 2)?.contiguous()?)?; // [N, T', H]
+        let cond_h = self
+            .cond_proj
+            .forward(&cond.transpose(1, 2)?.contiguous()?)?; // [N, T', H]
         let prefix = cond_h.dim(1)?;
 
         let t_emb = sinusoidal_pos_emb(t, self.hidden_size, 1000.0)?.to_dtype(x_h.dtype())?;
@@ -102,7 +122,10 @@ impl VoxCpmLocDit {
         let hidden = hidden.narrow(1, total - x_len, x_len)?;
         debug_assert_eq!(prefix + mu_len + 1 + x_len, total);
 
-        self.out_proj.forward(&hidden)?.transpose(1, 2)?.contiguous()
+        self.out_proj
+            .forward(&hidden)?
+            .transpose(1, 2)?
+            .contiguous()
     }
 
     pub fn in_channels(&self) -> usize {

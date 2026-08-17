@@ -117,8 +117,14 @@ mod tests {
 
         let (values, indices) = top_k(&node, &x, &k)?;
 
-        assert_eq!(values.to_vec2::<f32>()?, vec![vec![3., 2., 1.], vec![6., 5., 4.]]);
-        assert_eq!(indices.to_vec2::<i64>()?, vec![vec![0, 2, 1], vec![0, 1, 2]]);
+        assert_eq!(
+            values.to_vec2::<f32>()?,
+            vec![vec![3., 2., 1.], vec![6., 5., 4.]]
+        );
+        assert_eq!(
+            indices.to_vec2::<i64>()?,
+            vec![vec![0, 2, 1], vec![0, 1, 2]]
+        );
         Ok(())
     }
 
@@ -149,7 +155,10 @@ mod tests {
         // closer to the [batch, seq, hidden] shapes TopK sees in practice.
         let node = topk_node(1, 1);
         let x = Tensor::new(
-            &[[[1f32, 2.], [9., 3.], [5., 8.]], [[4., 6.], [7., 1.], [2., 9.]]],
+            &[
+                [[1f32, 2.], [9., 3.], [5., 8.]],
+                [[4., 6.], [7., 1.], [2., 9.]],
+            ],
             &Device::Cpu,
         )?;
         let k = Tensor::new(&[2i64], &Device::Cpu)?;
@@ -158,7 +167,10 @@ mod tests {
 
         assert_eq!(
             values.to_vec3::<f32>()?,
-            vec![vec![vec![9., 8.], vec![5., 3.]], vec![vec![7., 9.], vec![4., 6.]]]
+            vec![
+                vec![vec![9., 8.], vec![5., 3.]],
+                vec![vec![7., 9.], vec![4., 6.]]
+            ]
         );
         assert_eq!(
             indices.to_vec3::<i64>()?,

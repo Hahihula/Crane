@@ -66,7 +66,9 @@ impl IpaNormalizer {
         mut coerce_pool: Vec<char>,
     ) -> Result<Self> {
         debug_assert!(
-            replacements.iter().all(|(from, to)| is_nfc(from) && is_nfc(to)),
+            replacements
+                .iter()
+                .all(|(from, to)| is_nfc(from) && is_nfc(to)),
             "IPA replacement patterns and replacements must be NFC-normalized"
         );
         debug_assert!(
@@ -90,7 +92,10 @@ impl IpaNormalizer {
 
         Ok(Self {
             replacer,
-            replacements: replacements.iter().map(|(_, to)| (*to).to_string()).collect(),
+            replacements: replacements
+                .iter()
+                .map(|(_, to)| (*to).to_string())
+                .collect(),
             vocab,
             coerce_pool,
         })
@@ -152,7 +157,9 @@ impl IpaNormalizer {
         let idx = self.coerce_pool.partition_point(|&pool_c| pool_c < c);
 
         let after = self.coerce_pool.get(idx).copied();
-        let before = idx.checked_sub(1).and_then(|i| self.coerce_pool.get(i).copied());
+        let before = idx
+            .checked_sub(1)
+            .and_then(|i| self.coerce_pool.get(i).copied());
 
         match (before, after) {
             (Some(b), Some(a)) => {
@@ -161,7 +168,7 @@ impl IpaNormalizer {
                 } else {
                     Some(a)
                 }
-            }
+            },
             (Some(b), None) => Some(b),
             (None, Some(a)) => Some(a),
             (None, None) => None,
@@ -197,8 +204,7 @@ mod tests {
 
     #[test]
     fn vocab_filter_drops_unknown_codepoints() {
-        let normalizer =
-            IpaNormalizer::new(&[], vec!['a', 'b', 'c'], Vec::new()).unwrap();
+        let normalizer = IpaNormalizer::new(&[], vec!['a', 'b', 'c'], Vec::new()).unwrap();
         assert_eq!(normalizer.normalize("abd c"), "ab c");
     }
 
@@ -242,8 +248,7 @@ mod tests {
 
     #[test]
     fn no_replacements_passes_through_vocab_filter() {
-        let normalizer =
-            IpaNormalizer::new(&[], vec!['h', 'e', 'l', 'o'], Vec::new()).unwrap();
+        let normalizer = IpaNormalizer::new(&[], vec!['h', 'e', 'l', 'o'], Vec::new()).unwrap();
         assert_eq!(normalizer.normalize("hello"), "hello");
     }
 }

@@ -22,5 +22,5 @@ pub mod minicpm4;
 pub mod model;
 pub mod tokenizer;
 
-pub use config::{load_config, VoxCpm2Config};
+pub use config::{VoxCpm2Config, load_config};
 pub use model::{VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2PromptCache};

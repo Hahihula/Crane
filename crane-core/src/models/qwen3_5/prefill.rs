@@ -264,10 +264,7 @@ mod tests {
             let chunked = logits(&mut model, &ids);
             assert_eq!(single.len(), chunked.len());
             for (i, (a, b)) in single.iter().zip(&chunked).enumerate() {
-                assert!(
-                    (a - b).abs() < 1e-4,
-                    "chunk={chunk} logit[{i}]: {a} != {b}"
-                );
+                assert!((a - b).abs() < 1e-4, "chunk={chunk} logit[{i}]: {a} != {b}");
             }
         }
         unsafe { std::env::remove_var("CRANE_PREFILL_CHUNK") };

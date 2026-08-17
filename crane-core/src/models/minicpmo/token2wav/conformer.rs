@@ -12,7 +12,7 @@
 //! attention masking is skipped — every position attends to every other.
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{layer_norm, linear, linear_no_bias, Activation, LayerNorm, Linear, VarBuilder};
+use candle_nn::{Activation, LayerNorm, Linear, VarBuilder, layer_norm, linear, linear_no_bias};
 
 // ── Relative positional encoding ────────────────────────────────────────
 
@@ -28,7 +28,12 @@ pub struct RelPositionalEncoding {
 }
 
 impl RelPositionalEncoding {
-    pub fn new(d_model: usize, max_len: usize, device: &candle_core::Device, dtype: candle_core::DType) -> Result<Self> {
+    pub fn new(
+        d_model: usize,
+        max_len: usize,
+        device: &candle_core::Device,
+        dtype: candle_core::DType,
+    ) -> Result<Self> {
         let half = d_model / 2;
         let mut div_term = vec![0f32; half];
         for (i, d) in div_term.iter_mut().enumerate() {
@@ -58,7 +63,10 @@ impl RelPositionalEncoding {
         }
         let pe = Tensor::from_vec(pe, (1, 2 * max_len - 1, d_model), device)?.to_dtype(dtype)?;
 
-        Ok(Self { pe, xscale: (d_model as f64).sqrt() })
+        Ok(Self {
+            pe,
+            xscale: (d_model as f64).sqrt(),
+        })
     }
 
     /// `x`: `[1, T, d_model]`. Returns `(x*xscale, pos_emb [1, 2*T-1, d_model])`.
@@ -91,7 +99,11 @@ impl LinearNoSubsampling {
         let linear = linear(idim, odim, vb.pp("out").pp(0))?;
         let norm = layer_norm(odim, 1e-5, vb.pp("out").pp(1))?;
         let pos_enc = RelPositionalEncoding::new(odim, max_len, vb.device(), vb.dtype())?;
-        Ok(Self { linear, norm, pos_enc })
+        Ok(Self {
+            linear,
+            norm,
+            pos_enc,
+        })
     }
 
     /// `x`: `[1, T, idim]`. Returns `(x [1, T, odim], pos_emb)`.
@@ -137,22 +149,47 @@ impl RelPositionMultiHeadedAttention {
         let zero_pad = Tensor::zeros((b, h, t1, 1), x.dtype(), x.device())?;
         let x_padded = Tensor::cat(&[&zero_pad, x], 3)?; // [b, h, t1, n+1]
         let x_padded = x_padded.reshape((b, h, n + 1, t1))?;
-        let x = x_padded.narrow(2, 1, n)?.contiguous()?.reshape((b, h, t1, n))?;
+        let x = x_padded
+            .narrow(2, 1, n)?
+            .contiguous()?
+            .reshape((b, h, t1, n))?;
         x.narrow(3, 0, n / 2 + 1)
     }
 
     /// `x`: `[1, T, dim]`, `pos_emb`: `[1, 2*T-1, dim]`. Returns `[1, T, dim]`.
     fn forward(&self, x: &Tensor, pos_emb: &Tensor) -> Result<Tensor> {
         let (b, t, _) = x.dims3()?;
-        let q = self.linear_q.forward(x)?.reshape((b, t, self.num_heads, self.head_dim))?;
-        let k = self.linear_k.forward(x)?.reshape((b, t, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let v = self.linear_v.forward(x)?.reshape((b, t, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+        let q = self
+            .linear_q
+            .forward(x)?
+            .reshape((b, t, self.num_heads, self.head_dim))?;
+        let k = self
+            .linear_k
+            .forward(x)?
+            .reshape((b, t, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = self
+            .linear_v
+            .forward(x)?
+            .reshape((b, t, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
 
         let (pb, tp, _) = pos_emb.dims3()?;
-        let p = self.linear_pos.forward(pos_emb)?.reshape((pb, tp, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let p = self
+            .linear_pos
+            .forward(pos_emb)?
+            .reshape((pb, tp, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
 
-        let q_with_u = q.broadcast_add(&self.pos_bias_u)?.transpose(1, 2)?.contiguous()?; // [b,h,t,d]
-        let q_with_v = q.broadcast_add(&self.pos_bias_v)?.transpose(1, 2)?.contiguous()?;
+        let q_with_u = q
+            .broadcast_add(&self.pos_bias_u)?
+            .transpose(1, 2)?
+            .contiguous()?; // [b,h,t,d]
+        let q_with_v = q
+            .broadcast_add(&self.pos_bias_v)?
+            .transpose(1, 2)?
+            .contiguous()?;
 
         let matrix_ac = q_with_u.matmul(&k.transpose(2, 3)?.contiguous()?)?; // [b,h,t,t]
         let matrix_bd = q_with_v.matmul(&p.transpose(2, 3)?.contiguous()?)?; // [b,h,t,2t-1]
@@ -160,9 +197,13 @@ impl RelPositionMultiHeadedAttention {
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = ((matrix_ac + matrix_bd)? * scale)?;
-        let attn = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?.to_dtype(scores.dtype())?;
+        let attn = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?
+            .to_dtype(scores.dtype())?;
         let out = attn.matmul(&v)?; // [b,h,t,d]
-        let out = out.transpose(1, 2)?.contiguous()?.reshape((b, t, self.num_heads * self.head_dim))?;
+        let out =
+            out.transpose(1, 2)?
+                .contiguous()?
+                .reshape((b, t, self.num_heads * self.head_dim))?;
         self.linear_out.forward(&out)
     }
 }
@@ -176,11 +217,15 @@ struct PositionwiseFeedForward {
 
 impl PositionwiseFeedForward {
     fn new(dim: usize, hidden: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self { w1: linear(dim, hidden, vb.pp("w_1"))?, w2: linear(hidden, dim, vb.pp("w_2"))? })
+        Ok(Self {
+            w1: linear(dim, hidden, vb.pp("w_1"))?,
+            w2: linear(hidden, dim, vb.pp("w_2"))?,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.w2.forward(&Activation::Silu.forward(&self.w1.forward(x)?)?)
+        self.w2
+            .forward(&Activation::Silu.forward(&self.w1.forward(x)?)?)
     }
 }
 
@@ -226,11 +271,29 @@ struct PreLookaheadLayer {
 
 impl PreLookaheadLayer {
     fn new(channels: usize, pre_lookahead_len: usize, vb: VarBuilder) -> Result<Self> {
-        let conv1_cfg = candle_nn::Conv1dConfig { padding: 0, stride: 1, ..Default::default() };
-        let conv1 = candle_nn::conv1d(channels, channels, pre_lookahead_len + 1, conv1_cfg, vb.pp("conv1"))?;
-        let conv2_cfg = candle_nn::Conv1dConfig { padding: 0, stride: 1, ..Default::default() };
+        let conv1_cfg = candle_nn::Conv1dConfig {
+            padding: 0,
+            stride: 1,
+            ..Default::default()
+        };
+        let conv1 = candle_nn::conv1d(
+            channels,
+            channels,
+            pre_lookahead_len + 1,
+            conv1_cfg,
+            vb.pp("conv1"),
+        )?;
+        let conv2_cfg = candle_nn::Conv1dConfig {
+            padding: 0,
+            stride: 1,
+            ..Default::default()
+        };
         let conv2 = candle_nn::conv1d(channels, channels, 3, conv2_cfg, vb.pp("conv2"))?;
-        Ok(Self { conv1, conv2, pre_lookahead_len })
+        Ok(Self {
+            conv1,
+            conv2,
+            pre_lookahead_len,
+        })
     }
 
     /// `x`: `[1, T, C]`.
@@ -255,7 +318,11 @@ struct Upsample1D {
 
 impl Upsample1D {
     fn new(channels: usize, stride: usize, vb: VarBuilder) -> Result<Self> {
-        let conv_cfg = candle_nn::Conv1dConfig { padding: 0, stride: 1, ..Default::default() };
+        let conv_cfg = candle_nn::Conv1dConfig {
+            padding: 0,
+            stride: 1,
+            ..Default::default()
+        };
         let conv = candle_nn::conv1d(channels, channels, stride * 2 + 1, conv_cfg, vb.pp("conv"))?;
         Ok(Self { conv, stride })
     }
@@ -264,7 +331,11 @@ impl Upsample1D {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (_b, _c, t) = x.dims3()?;
         // `scale_factor=stride` nearest interpolation: repeat each frame `stride` times.
-        let up = x.unsqueeze(3)?.repeat((1, 1, 1, self.stride))?.reshape((x.dim(0)?, x.dim(1)?, t * self.stride))?;
+        let up = x.unsqueeze(3)?.repeat((1, 1, 1, self.stride))?.reshape((
+            x.dim(0)?,
+            x.dim(1)?,
+            t * self.stride,
+        ))?;
         let up = up.pad_with_zeros(2, self.stride * 2, 0)?;
         self.conv.forward(&up)
     }
@@ -297,22 +368,46 @@ impl UpsampleConformerEncoderV2 {
         vb: VarBuilder,
     ) -> Result<Self> {
         let embed = LinearNoSubsampling::new(input_size, output_size, max_len, vb.pp("embed"))?;
-        let pre_lookahead_layer = PreLookaheadLayer::new(output_size, pre_lookahead_len, vb.pp("pre_lookahead_layer"))?;
+        let pre_lookahead_layer =
+            PreLookaheadLayer::new(output_size, pre_lookahead_len, vb.pp("pre_lookahead_layer"))?;
         let vb_enc = vb.pp("encoders");
         let mut encoders = Vec::with_capacity(num_blocks);
         for i in 0..num_blocks {
-            encoders.push(ConformerEncoderLayer::new(output_size, attention_heads, linear_units, vb_enc.pp(i))?);
+            encoders.push(ConformerEncoderLayer::new(
+                output_size,
+                attention_heads,
+                linear_units,
+                vb_enc.pp(i),
+            )?);
         }
         let up_layer = Upsample1D::new(output_size, up_stride, vb.pp("up_layer"))?;
-        let up_embed = LinearNoSubsampling::new(input_size, output_size, max_len * up_stride, vb.pp("up_embed"))?;
+        let up_embed = LinearNoSubsampling::new(
+            input_size,
+            output_size,
+            max_len * up_stride,
+            vb.pp("up_embed"),
+        )?;
         let vb_up = vb.pp("up_encoders");
         let mut up_encoders = Vec::with_capacity(num_up_blocks);
         for i in 0..num_up_blocks {
-            up_encoders.push(ConformerEncoderLayer::new(output_size, attention_heads, linear_units, vb_up.pp(i))?);
+            up_encoders.push(ConformerEncoderLayer::new(
+                output_size,
+                attention_heads,
+                linear_units,
+                vb_up.pp(i),
+            )?);
         }
         let after_norm = layer_norm(output_size, 1e-5, vb.pp("after_norm"))?;
 
-        Ok(Self { embed, pre_lookahead_layer, encoders, up_layer, up_embed, up_encoders, after_norm })
+        Ok(Self {
+            embed,
+            pre_lookahead_layer,
+            encoders,
+            up_layer,
+            up_embed,
+            up_encoders,
+            after_norm,
+        })
     }
 
     /// `xs`: `[1, T, input_size]`. Returns `[1, T*up_stride, output_size]`.

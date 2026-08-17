@@ -54,10 +54,8 @@ impl Gemma4VLModel {
         let model_vb = vb.pp("model");
 
         // Vision tower
-        let vision_tower = Gemma4VisionModel::new(
-            &config.vision_config,
-            model_vb.pp("vision_tower"),
-        )?;
+        let vision_tower =
+            Gemma4VisionModel::new(&config.vision_config, model_vb.pp("vision_tower"))?;
 
         // Vision → text projection
         let embed_vision = Gemma4MultimodalEmbedder::new(
@@ -92,11 +90,9 @@ impl Gemma4VLModel {
         pixel_position_ids: &Tensor,
         padding_positions: &Tensor,
     ) -> Result<Tensor> {
-        let vision_features = self.vision_tower.forward(
-            pixel_values,
-            pixel_position_ids,
-            padding_positions,
-        )?;
+        let vision_features =
+            self.vision_tower
+                .forward(pixel_values, pixel_position_ids, padding_positions)?;
         let projected = self.embed_vision.forward(&vision_features)?;
         Ok(projected)
     }
@@ -118,9 +114,16 @@ impl Gemma4VLModel {
         let pad_token_id = 0u32; // Gemma's pad_token_id
         let llm_input_ids = if image_embeds.is_some() {
             let ids: Vec<u32> = input_ids.flatten_all()?.to_vec1()?;
-            let masked: Vec<u32> = ids.iter().map(|&t| {
-                if t == self.image_token_id { pad_token_id } else { t }
-            }).collect();
+            let masked: Vec<u32> = ids
+                .iter()
+                .map(|&t| {
+                    if t == self.image_token_id {
+                        pad_token_id
+                    } else {
+                        t
+                    }
+                })
+                .collect();
             Tensor::new(masked.as_slice(), input_ids.device())?.reshape(input_ids.shape())?
         } else {
             input_ids.clone()
@@ -162,13 +165,9 @@ impl Gemma4VLModel {
                 let token = ids[b * seq_len + s];
                 if token == self.image_token_id {
                     // Get the image embedding for this position
-                    let img_emb = image_embeds
-                        .narrow(0, b, 1)?
-                        .narrow(1, img_offset, 1)?; // [1, 1, hidden_size]
-                    result = result.slice_assign(
-                        &[b..b + 1, s..s + 1, 0..hidden_size],
-                        &img_emb,
-                    )?;
+                    let img_emb = image_embeds.narrow(0, b, 1)?.narrow(1, img_offset, 1)?; // [1, 1, hidden_size]
+                    result =
+                        result.slice_assign(&[b..b + 1, s..s + 1, 0..hidden_size], &img_emb)?;
                     img_offset += 1;
                 }
             }

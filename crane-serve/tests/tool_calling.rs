@@ -65,19 +65,32 @@ fn tools_reach_the_prompt() {
         return;
     };
     let tools = [weather_tool()];
-    let opts = RenderOptions { tools: Some(&tools), ..Default::default() };
-    let prompt = t.apply_with(&[msg("user", "What is the weather in Paris?")], &opts).unwrap();
+    let opts = RenderOptions {
+        tools: Some(&tools),
+        ..Default::default()
+    };
+    let prompt = t
+        .apply_with(&[msg("user", "What is the weather in Paris?")], &opts)
+        .unwrap();
 
     assert!(prompt.contains("<tools>"), "no tool block rendered");
     assert!(prompt.contains("get_weather"));
     assert!(prompt.contains("Get the current weather for a city"));
     // The template teaches the model the call syntax; without it the model has
     // no way to know what to emit.
-    assert!(prompt.contains("<function=example_function_name>"), "no format instruction");
+    assert!(
+        prompt.contains("<function=example_function_name>"),
+        "no format instruction"
+    );
 
     // And with no tools, none of that appears.
-    let bare = t.apply_with(&[msg("user", "hi")], &RenderOptions::default()).unwrap();
-    assert!(!bare.contains("<tools>"), "tool block rendered without tools");
+    let bare = t
+        .apply_with(&[msg("user", "hi")], &RenderOptions::default())
+        .unwrap();
+    assert!(
+        !bare.contains("<tools>"),
+        "tool block rendered without tools"
+    );
 }
 
 /// The full agentic loop: call → result → follow-up prompt.
@@ -102,23 +115,42 @@ fn assistant_tool_calls_and_results_round_trip() {
     result.name = Some("get_weather".into());
 
     let tools = [weather_tool()];
-    let opts = RenderOptions { tools: Some(&tools), ..Default::default() };
+    let opts = RenderOptions {
+        tools: Some(&tools),
+        ..Default::default()
+    };
     let prompt = t
         .apply_with(
-            &[msg("user", "What is the weather in Paris?"), assistant, result],
+            &[
+                msg("user", "What is the weather in Paris?"),
+                assistant,
+                result,
+            ],
             &opts,
         )
         .unwrap();
 
-    println!("--- rendered follow-up prompt (tail) ---\n{}", &prompt[prompt.len().saturating_sub(600)..]);
+    println!(
+        "--- rendered follow-up prompt (tail) ---\n{}",
+        &prompt[prompt.len().saturating_sub(600)..]
+    );
 
     // The assistant's call must be back in the transcript, in the template's
     // own syntax — not as the raw text we parsed it from.
-    assert!(prompt.contains("<function=get_weather>"), "tool call not replayed");
-    assert!(prompt.contains("<parameter=city>"), "arguments not replayed");
+    assert!(
+        prompt.contains("<function=get_weather>"),
+        "tool call not replayed"
+    );
+    assert!(
+        prompt.contains("<parameter=city>"),
+        "arguments not replayed"
+    );
     assert!(prompt.contains("Paris"));
     // And the tool's answer must come back as a tool_response turn.
-    assert!(prompt.contains("<tool_response>"), "tool result not rendered");
+    assert!(
+        prompt.contains("<tool_response>"),
+        "tool result not rendered"
+    );
     assert!(prompt.contains("cloudy"));
 }
 
@@ -144,7 +176,10 @@ fn json_string_arguments_render_as_parameters() {
     }]);
 
     let prompt = t
-        .apply_with(&[msg("user", "find something"), assistant], &RenderOptions::default())
+        .apply_with(
+            &[msg("user", "find something"), assistant],
+            &RenderOptions::default(),
+        )
         .expect("template must accept string-encoded arguments");
 
     assert!(prompt.contains("<parameter=query>"));

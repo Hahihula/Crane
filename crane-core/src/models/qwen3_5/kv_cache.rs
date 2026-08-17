@@ -23,7 +23,7 @@
 //!   needs the rotation to stay accurate. Each is just another
 //!   `KvCacheBackend` + enum variant.
 
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{D, DType, Result, Tensor};
 
 /// Headroom (in positions) added when (re)allocating, to amortize growth.
 const ROOM: usize = 256;
@@ -145,7 +145,7 @@ fn grow_append(buf: &mut Option<Tensor>, new: &Tensor, filled: usize) -> Result<
             let view = store.narrow(2, 0, add)?;
             *buf = Some(store);
             Ok(view)
-        }
+        },
         Some(store) => {
             if total <= store.dim(2)? {
                 store.slice_set(&new, 2, filled)?;
@@ -161,7 +161,7 @@ fn grow_append(buf: &mut Option<Tensor>, new: &Tensor, filled: usize) -> Result<
                 *buf = Some(grown);
                 Ok(full)
             }
-        }
+        },
     }
 }
 

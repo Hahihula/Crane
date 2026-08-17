@@ -21,7 +21,9 @@ use crate::generation::SpeechOptions;
 use crate::models::g2p::Phonemizer;
 use crate::models::g2p::ipa_postprocess::IpaNormalizer;
 
-use super::ipa::{build_kokoro_normalizer, fix_post_vocalic_rhotic, reposition_stress_before_vowel};
+use super::ipa::{
+    build_kokoro_normalizer, fix_post_vocalic_rhotic, reposition_stress_before_vowel,
+};
 
 /// Kokoro always outputs mono PCM at 24 kHz.
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -155,8 +157,7 @@ fn discover_voices(voice_dir: &Path) -> Result<Vec<String>> {
     let entries = std::fs::read_dir(voice_dir)
         .with_context(|| format!("reading voices directory {}", voice_dir.display()))?;
     for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading entry in {}", voice_dir.display()))?;
+        let entry = entry.with_context(|| format!("reading entry in {}", voice_dir.display()))?;
         let path = entry.path();
         if entry.file_type()?.is_file()
             && path.extension().and_then(|ext| ext.to_str()) == Some("bin")
@@ -174,8 +175,8 @@ fn discover_voices(voice_dir: &Path) -> Result<Vec<String>> {
 /// file size rather than assumed fixed, since shipped voices are not all the
 /// same row count (`af.bin` is 1024 rows; most others are 1020).
 fn load_voice_bin(path: &Path, style_dim: usize) -> Result<Tensor> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading voice file {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading voice file {}", path.display()))?;
 
     if style_dim == 0 {
         bail!("style_dim must be non-zero");
@@ -229,7 +230,11 @@ fn chunk_phonemes(phonemes: &str, max_cp: usize) -> Vec<String> {
     let chars: Vec<char> = phonemes.chars().collect();
     if chars.len() <= max_cp {
         let piece = phonemes.trim();
-        return if piece.is_empty() { Vec::new() } else { vec![piece.to_string()] };
+        return if piece.is_empty() {
+            Vec::new()
+        } else {
+            vec![piece.to_string()]
+        };
     }
 
     let mut chunks = Vec::new();
@@ -345,7 +350,10 @@ impl Model {
         let onnx_path = root.join("onnx").join("model.onnx");
         let mut onnx_graph = crate::onnx::read_file(&onnx_path)
             .with_context(|| format!("loading Kokoro ONNX model from {}", onnx_path.display()))?;
-        let graph = onnx_graph.graph.as_mut().context("Kokoro ONNX model has no graph")?;
+        let graph = onnx_graph
+            .graph
+            .as_mut()
+            .context("Kokoro ONNX model has no graph")?;
 
         let mut decoded_initializers = HashMap::with_capacity(graph.initializer.len());
         for t in &graph.initializer {
@@ -461,7 +469,7 @@ impl Model {
             Entry::Vacant(e) => {
                 let normalizer = build_kokoro_normalizer(language, &self.vocab)?;
                 Ok(e.insert(normalizer))
-            }
+            },
         }
     }
 
@@ -571,16 +579,24 @@ impl Model {
             inputs.insert("input_ids".to_string(), input_ids);
             inputs.insert("style".to_string(), style);
             inputs.insert("speed".to_string(), speed);
-            inputs.extend(self.decoded_initializers.iter().map(|(k, v)| (k.clone(), v.clone())));
+            inputs.extend(
+                self.decoded_initializers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
 
             let mut values = crate::onnx::simple_eval(&self.onnx_graph, inputs)?;
-            let waveform =
-                values.remove("waveform").context("Kokoro ONNX output is missing 'waveform'")?;
+            let waveform = values
+                .remove("waveform")
+                .context("Kokoro ONNX output is missing 'waveform'")?;
             waveform_chunks.push(waveform);
         }
 
         let waveform = if waveform_chunks.len() == 1 {
-            waveform_chunks.into_iter().next().expect("checked len == 1")
+            waveform_chunks
+                .into_iter()
+                .next()
+                .expect("checked len == 1")
         } else {
             Tensor::cat(&waveform_chunks, 1)?
         };
@@ -605,9 +621,7 @@ mod tests {
 
     #[test]
     fn parse_vocab_from_json() {
-        let file = write_temp_json(
-            r#"{"model": {"vocab": {"$": 0, "a": 43, "ˈ": 156}}}"#,
-        );
+        let file = write_temp_json(r#"{"model": {"vocab": {"$": 0, "a": 43, "ˈ": 156}}}"#);
         let vocab = parse_vocab(file.path()).unwrap();
         assert_eq!(vocab.len(), 3);
         assert_eq!(vocab[&'$'], 0);
@@ -708,7 +722,9 @@ mod tests {
     /// `phonemes_to_ids`/`chunk_phonemes` tests below: `$` (pad/BOS/EOS),
     /// `a`, `b`, and a space.
     fn small_vocab() -> HashMap<char, i64> {
-        [('$', 0), ('a', 1), ('b', 2), (' ', 3)].into_iter().collect()
+        [('$', 0), ('a', 1), ('b', 2), (' ', 3)]
+            .into_iter()
+            .collect()
     }
 
     fn test_model_with_vocab(vocab: HashMap<char, i64>) -> Model {
@@ -819,7 +835,10 @@ mod tests {
 
     #[test]
     fn chunk_phonemes_short_input_is_one_chunk() {
-        assert_eq!(chunk_phonemes("hello world", 510), vec!["hello world".to_string()]);
+        assert_eq!(
+            chunk_phonemes("hello world", 510),
+            vec!["hello world".to_string()]
+        );
     }
 
     #[test]
@@ -845,7 +864,10 @@ mod tests {
         let phonemes = "a".repeat(25);
         let chunks = chunk_phonemes(&phonemes, 10);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= 10, "chunk {chunk:?} exceeds max_cp");
+            assert!(
+                chunk.chars().count() <= 10,
+                "chunk {chunk:?} exceeds max_cp"
+            );
         }
         assert_eq!(chunks.concat().len(), 25);
     }
@@ -941,7 +963,10 @@ mod tests {
         // `s != 0.0` alone would also be true for NaN (NaN compares unequal
         // to everything, including itself), so a fully-NaN waveform would
         // slip past that check alone -- require finite, non-zero samples.
-        assert!(samples.iter().all(|s| s.is_finite()), "waveform contains NaN or infinite samples");
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "waveform contains NaN or infinite samples"
+        );
         assert!(samples.iter().any(|&s| s != 0.0), "waveform is all zeros");
     }
 
@@ -982,7 +1007,10 @@ mod tests {
 
         assert_eq!(sample_rate, 24_000);
         let samples = waveform.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        assert!(samples.iter().all(|s| s.is_finite()), "waveform contains NaN or infinite samples");
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "waveform contains NaN or infinite samples"
+        );
         assert!(samples.iter().any(|&s| s != 0.0), "waveform is all zeros");
     }
 }

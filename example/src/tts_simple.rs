@@ -22,22 +22,36 @@ fn main() -> anyhow::Result<()> {
 
     let device = {
         #[cfg(feature = "cuda")]
-        { Device::new_cuda(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_cuda(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(all(target_os = "macos", not(feature = "cuda")))]
-        { Device::new_metal(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_metal(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(all(not(feature = "cuda"), not(target_os = "macos"), feature = "rocm"))]
-        { Device::new_rocm(0).unwrap_or(Device::Cpu) }
+        {
+            Device::new_rocm(0).unwrap_or(Device::Cpu)
+        }
         #[cfg(all(not(target_os = "macos"), not(feature = "cuda"), not(feature = "rocm")))]
-        { Device::Cpu }
+        {
+            Device::Cpu
+        }
     };
     let dtype = {
         #[cfg(feature = "cuda")]
-        { DType::BF16 }
+        {
+            DType::BF16
+        }
         // ROCm defaults to F16: BF16 is still incomplete on the rocm backend.
         #[cfg(all(not(feature = "cuda"), feature = "rocm"))]
-        { DType::F16 }
+        {
+            DType::F16
+        }
         #[cfg(all(not(feature = "cuda"), not(feature = "rocm")))]
-        { DType::F32 }
+        {
+            DType::F32
+        }
     };
 
     println!("Loading Qwen3-TTS from: {model_path}");
@@ -47,7 +61,12 @@ fn main() -> anyhow::Result<()> {
     let output_dir = "data/audio/output";
     std::fs::create_dir_all(output_dir)?;
 
-    let model_type = model.config.tts_model_type.as_deref().unwrap_or("base").to_string();
+    let model_type = model
+        .config
+        .tts_model_type
+        .as_deref()
+        .unwrap_or("base")
+        .to_string();
     println!("Model type: {model_type}");
 
     match model_type.as_str() {
@@ -61,15 +80,17 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Voice-clone mode: Base model + reference audio.
-fn run_voice_clone(model: &mut crane_core::models::qwen3_tts::Model, output_dir: &str) -> anyhow::Result<()> {
+fn run_voice_clone(
+    model: &mut crane_core::models::qwen3_tts::Model,
+    output_dir: &str,
+) -> anyhow::Result<()> {
     let ref_audio = "data/audio/kinsenka_3.wav";
     let ref_text_path = "data/audio/kinsenka_3.txt";
 
-    let ref_text = std::fs::read_to_string(ref_text_path)
-        .unwrap_or_else(|_| {
-            eprintln!("Warning: could not read {ref_text_path}, using empty ref_text");
-            String::new()
-        });
+    let ref_text = std::fs::read_to_string(ref_text_path).unwrap_or_else(|_| {
+        eprintln!("Warning: could not read {ref_text_path}, using empty ref_text");
+        String::new()
+    });
     let ref_text = ref_text.trim();
 
     println!("Reference audio : {ref_audio}");
@@ -111,22 +132,42 @@ fn run_voice_clone(model: &mut crane_core::models::qwen3_tts::Model, output_dir:
 }
 
 /// CustomVoice mode: predefined speaker.
-fn run_custom_voice(model: &mut crane_core::models::qwen3_tts::Model, output_dir: &str) -> anyhow::Result<()> {
-    let speaker = model.config.talker_config.spk_id
-        .keys()
-        .next()
-        .cloned();
-    println!("Available speakers: {:?}", model.config.talker_config.spk_id.keys().collect::<Vec<_>>());
+fn run_custom_voice(
+    model: &mut crane_core::models::qwen3_tts::Model,
+    output_dir: &str,
+) -> anyhow::Result<()> {
+    let speaker = model.config.talker_config.spk_id.keys().next().cloned();
+    println!(
+        "Available speakers: {:?}",
+        model.config.talker_config.spk_id.keys().collect::<Vec<_>>()
+    );
     println!("Using speaker: {:?}", speaker);
 
     let examples: &[(&str, &str, &str)] = &[
-        ("今天天气真好，我们去公园吧！", "chinese", "simple_tts_zh.wav"),
-        ("Hello! I am Crane, an ultra-fast inference engine in Rust.", "english", "simple_tts_en.wav"),
-        ("こんにちは、今日はいい天気ですね。", "japanese", "simple_tts_ja.wav"),
+        (
+            "今天天气真好，我们去公园吧！",
+            "chinese",
+            "simple_tts_zh.wav",
+        ),
+        (
+            "Hello! I am Crane, an ultra-fast inference engine in Rust.",
+            "english",
+            "simple_tts_en.wav",
+        ),
+        (
+            "こんにちは、今日はいい天気ですね。",
+            "japanese",
+            "simple_tts_ja.wav",
+        ),
     ];
 
     for (i, (text, lang, filename)) in examples.iter().enumerate() {
-        println!("\n[{}/{}] lang={lang}  speaker={}", i + 1, examples.len(), speaker.as_deref().unwrap_or("(none)"));
+        println!(
+            "\n[{}/{}] lang={lang}  speaker={}",
+            i + 1,
+            examples.len(),
+            speaker.as_deref().unwrap_or("(none)")
+        );
         println!("  Text: {text}");
 
         let start = std::time::Instant::now();

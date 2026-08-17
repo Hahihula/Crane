@@ -1,6 +1,6 @@
 use crate::common::{
-    config::{CommonConfig, DataType, DeviceConfig},
     CraneError, CraneResult,
+    config::{CommonConfig, DataType, DeviceConfig},
 };
 use crate::llm::{GenerationConfig, LlmModelType};
 use crane_core::generation::based::ModelForCausalLM;
@@ -41,7 +41,7 @@ impl LlmClient {
             DeviceConfig::Cuda(gpu_id) => {
                 crane_core::models::Device::cuda_if_available(*gpu_id as usize)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?
-            }
+            },
             DeviceConfig::Rocm(_gpu_id) => {
                 #[cfg(feature = "rocm")]
                 {
@@ -55,7 +55,7 @@ impl LlmClient {
                             .to_string(),
                     ));
                 }
-            }
+            },
             DeviceConfig::Metal => {
                 #[cfg(target_os = "macos")]
                 {
@@ -68,7 +68,7 @@ impl LlmClient {
                         "Metal device not available on this platform".to_string(),
                     ));
                 }
-            }
+            },
         };
 
         let dtype = match (&config.device, &config.dtype) {
@@ -91,7 +91,7 @@ impl LlmClient {
                         .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 model.warmup();
                 LoadedModel::Qwen25 { model, tokenizer }
-            }
+            },
             LlmModelType::Minicpm5 => {
                 let tokenizer = crane_core::autotokenizer::AutoTokenizer::from_pretrained(
                     &config.model_path,
@@ -104,7 +104,7 @@ impl LlmClient {
                         .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 model.warmup();
                 LoadedModel::Minicpm5 { model, tokenizer }
-            }
+            },
             LlmModelType::HunyuanDense => {
                 let mut model = crane_core::models::hunyuan_dense::Model::new(
                     &config.model_path,
@@ -114,7 +114,7 @@ impl LlmClient {
                 .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 model.warmup();
                 LoadedModel::HunyuanDense { model }
-            }
+            },
             LlmModelType::Qwen3 => {
                 let tokenizer = crane_core::autotokenizer::AutoTokenizer::from_pretrained(
                     &config.model_path,
@@ -127,7 +127,7 @@ impl LlmClient {
                         .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 model.warmup();
                 LoadedModel::Qwen3 { model, tokenizer }
-            }
+            },
             LlmModelType::Qwen35 => {
                 // Runs on CPU/CUDA/Metal. The Gated Delta Net recurrence uses
                 // the device-portable Candle path on GPU (functional; a fused
@@ -143,13 +143,13 @@ impl LlmClient {
                         .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 model.warmup();
                 LoadedModel::Qwen35 { model, tokenizer }
-            }
+            },
             _ => {
                 return Err(CraneError::ConfigError(format!(
                     "Unsupported model type: {:?}",
                     config.model_type
                 )));
-            }
+            },
         };
 
         Ok(Self { model })
@@ -224,7 +224,7 @@ impl LlmClient {
                     .decode(generated_ids, true)
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 Ok(result)
-            }
+            },
             LoadedModel::Qwen3 { model, tokenizer } => {
                 let prompt = tokenizer
                     .apply_chat_template_with_options(
@@ -247,7 +247,7 @@ impl LlmClient {
                     .decode(generated_ids, true)
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 Ok(result)
-            }
+            },
             LoadedModel::Qwen35 { model, tokenizer } => {
                 let prompt = tokenizer
                     .apply_chat_template_with_options(
@@ -270,7 +270,7 @@ impl LlmClient {
                     .decode(generated_ids, true)
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 Ok(result)
-            }
+            },
             LoadedModel::HunyuanDense { model } => {
                 let prompt = hunyuan_apply_chat_template(messages);
                 let input_ids = model
@@ -295,7 +295,7 @@ impl LlmClient {
                     .decode(generated_ids, true)
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 Ok(result)
-            }
+            },
             LoadedModel::Minicpm5 { model, tokenizer } => {
                 let prompt = tokenizer
                     .apply_chat_template_with_options(
@@ -318,7 +318,7 @@ impl LlmClient {
                     .decode(generated_ids, true)
                     .map_err(|e| CraneError::TokenizationError(e.to_string()))?;
                 Ok(result)
-            }
+            },
         }
     }
 
@@ -358,7 +358,7 @@ impl LlmClient {
                     .prepare_inputs(&prompt)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 (input_ids, StreamTokenizer::Auto(tokenizer.clone()))
-            }
+            },
             LoadedModel::Qwen3 { tokenizer, model } => {
                 let prompt = tokenizer
                     .apply_chat_template_with_options(
@@ -372,7 +372,7 @@ impl LlmClient {
                     .prepare_inputs(&prompt)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 (input_ids, StreamTokenizer::Auto(tokenizer.clone()))
-            }
+            },
             LoadedModel::Qwen35 { tokenizer, model } => {
                 let prompt = tokenizer
                     .apply_chat_template_with_options(
@@ -386,7 +386,7 @@ impl LlmClient {
                     .prepare_inputs(&prompt)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 (input_ids, StreamTokenizer::Auto(tokenizer.clone()))
-            }
+            },
             LoadedModel::HunyuanDense { model } => {
                 gen_config.eos_token_id = gen_config.eos_token_id.or(Some(120020));
                 let prompt = hunyuan_apply_chat_template(messages);
@@ -397,7 +397,7 @@ impl LlmClient {
                     input_ids,
                     StreamTokenizer::Tokenizer(model.tokenizer.tokenizer.clone()),
                 )
-            }
+            },
             LoadedModel::Minicpm5 { tokenizer, model } => {
                 let prompt = tokenizer
                     .apply_chat_template_with_options(
@@ -411,7 +411,7 @@ impl LlmClient {
                     .prepare_inputs(&prompt)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?;
                 (input_ids, StreamTokenizer::Auto(tokenizer.clone()))
-            }
+            },
         };
 
         let (mut streamer, receiver) = match tokenizer_for_stream {
@@ -424,19 +424,19 @@ impl LlmClient {
             let gen_handle = scope.spawn(|| match &mut self.model {
                 LoadedModel::Qwen25 { model, .. } => {
                     model.generate(&input_ids, &gen_config, Some(&mut streamer))
-                }
+                },
                 LoadedModel::Qwen3 { model, .. } => {
                     model.generate(&input_ids, &gen_config, Some(&mut streamer))
-                }
+                },
                 LoadedModel::Qwen35 { model, .. } => {
                     model.generate(&input_ids, &gen_config, Some(&mut streamer))
-                }
+                },
                 LoadedModel::HunyuanDense { model } => {
                     model.generate(&input_ids, &gen_config, Some(&mut streamer))
-                }
+                },
                 LoadedModel::Minicpm5 { model, .. } => {
                     model.generate(&input_ids, &gen_config, Some(&mut streamer))
-                }
+                },
             });
 
             for message in receiver {
@@ -444,7 +444,7 @@ impl LlmClient {
                     StreamerMessage::Token(token_text) => {
                         callback(&token_text);
                         response_text.push_str(&token_text);
-                    }
+                    },
                     StreamerMessage::End => break,
                 }
             }
@@ -480,7 +480,7 @@ fn hunyuan_apply_chat_template(messages: &[crane_core::chat::Message]) -> String
     let (system_msg, loop_messages) = match messages.first() {
         Some(first) if matches!(first.role, crane_core::chat::Role::System) => {
             (Some(&first.content), &messages[1..])
-        }
+        },
         _ => (None, messages),
     };
 
@@ -494,13 +494,13 @@ fn hunyuan_apply_chat_template(messages: &[crane_core::chat::Message]) -> String
             crane_core::chat::Role::User => {
                 result.push_str(USER);
                 result.push_str(&msg.content);
-            }
+            },
             crane_core::chat::Role::Assistant => {
                 result.push_str(ASSISTANT);
                 result.push_str(&msg.content);
                 result.push_str(EOS);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 

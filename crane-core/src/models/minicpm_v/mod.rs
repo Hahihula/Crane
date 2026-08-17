@@ -12,6 +12,6 @@ pub mod preprocess;
 pub mod vision;
 pub mod vlm;
 
-pub use config::{load_config, Config, VisionConfig};
-pub use preprocess::{load_preprocessor_config, PreprocessorConfig};
+pub use config::{Config, VisionConfig, load_config};
+pub use preprocess::{PreprocessorConfig, load_preprocessor_config};
 pub use vlm::{MinicpmV46VLModel, VlGenerationConfig};

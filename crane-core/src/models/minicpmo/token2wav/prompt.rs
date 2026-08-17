@@ -21,13 +21,19 @@ impl SystemDefaultPrompt {
         let path = format!("{model_path}/assets/token2wav/system_default_prompt.safetensors");
         let tensors = candle_core::safetensors::load(path, device)?;
         let get = |name: &str| -> Result<&Tensor> {
-            tensors.get(name).ok_or_else(|| candle_core::Error::Msg(format!("system_default_prompt.safetensors missing {name}")))
+            tensors.get(name).ok_or_else(|| {
+                candle_core::Error::Msg(format!("system_default_prompt.safetensors missing {name}"))
+            })
         };
 
         let prompt_token = get("prompt_token")?.unsqueeze(0)?;
         let prompt_feat = get("prompt_feat")?.to_dtype(dtype)?.unsqueeze(0)?;
         let spk_emb = get("spk_emb")?.to_dtype(dtype)?.unsqueeze(0)?;
 
-        Ok(Self { prompt_token, prompt_feat, spk_emb })
+        Ok(Self {
+            prompt_token,
+            prompt_feat,
+            spk_emb,
+        })
     }
 }

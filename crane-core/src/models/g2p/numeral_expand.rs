@@ -130,7 +130,10 @@ mod tests {
     // Verifies a single standalone digit run expands correctly.
     #[test]
     fn single_digit_run_expands() {
-        assert_eq!(expand_numerals("I have 21 cats", &EchoNumerals), "I have <21> cats");
+        assert_eq!(
+            expand_numerals("I have 21 cats", &EchoNumerals),
+            "I have <21> cats"
+        );
     }
 
     // Verifies multiple digit runs in one string all expand.

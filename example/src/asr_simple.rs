@@ -1,5 +1,5 @@
 //! Simple ASR (Automatic Speech Recognition) Example
-//! 
+//!
 //! This example shows how to transcribe audio to text using the Crane SDK.
 //! Note: This requires the 'onnx' feature to be enabled.
 
@@ -22,14 +22,14 @@ fn main() -> CraneResult<()> {
         dtype: DataType::F16,
         max_memory: None,
     };
-    
+
     // Create a new ASR client
     let asr_client = AsrClient::new(config)?;
-    
+
     // Transcribe an audio file
     let transcription = asr_client.transcribe_from_file("data/audio_sample.wav")?;
     println!("Transcription: {}", transcription);
-    
+
     Ok(())
 }
 

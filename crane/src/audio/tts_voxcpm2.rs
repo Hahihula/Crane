@@ -22,12 +22,16 @@ use candle_core::Tensor;
 use crane_core::generation::SpeechOptions;
 use crane_core::models::voxcpm2::{VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model};
 
-use super::pcm::{load_wav_f32, AudioInfo};
+use super::pcm::{AudioInfo, load_wav_f32};
 use super::tts::{Tts, VoiceInfo};
 
 impl Tts for VoxCpm2Model {
     fn audio_info(&self) -> AudioInfo {
-        AudioInfo { sample_rate: self.sample_rate, channels: 1, bits_per_sample: 16 }
+        AudioInfo {
+            sample_rate: self.sample_rate,
+            channels: 1,
+            bits_per_sample: 16,
+        }
     }
 
     /// No discrete presets — VoxCPM2 is zero-shot per-utterance, or cloned
@@ -54,7 +58,10 @@ impl Tts for VoxCpm2Model {
         // latent patch) — pass through directly as an upper bound rather
         // than inventing an unjustified conversion factor. The model's own
         // stop head almost always ends generation well before this cap.
-        let cfg = VoxCpm2GenerationConfig { max_len: opts.max_new_tokens.max(1), ..Default::default() };
+        let cfg = VoxCpm2GenerationConfig {
+            max_len: opts.max_new_tokens.max(1),
+            ..Default::default()
+        };
         VoxCpm2Model::generate_speech(self, text, &cfg)
     }
 
@@ -74,9 +81,14 @@ impl Tts for VoxCpm2Model {
         let sr = self.encoder_sample_rate();
         let samples = load_wav_f32(ref_audio, sr)?;
         let prompt_feat = self.encode_reference_audio(&samples, true)?;
-        let conditioning =
-            VoxCpm2Conditioning::Continuation { prompt_text: ref_text.to_string(), prompt_feat };
-        let cfg = VoxCpm2GenerationConfig { max_len: opts.max_new_tokens.max(1), ..Default::default() };
+        let conditioning = VoxCpm2Conditioning::Continuation {
+            prompt_text: ref_text.to_string(),
+            prompt_feat,
+        };
+        let cfg = VoxCpm2GenerationConfig {
+            max_len: opts.max_new_tokens.max(1),
+            ..Default::default()
+        };
         self.generate_speech_conditioned(text, &conditioning, &cfg)
     }
 }

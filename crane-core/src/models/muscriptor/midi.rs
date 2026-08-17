@@ -127,16 +127,12 @@ impl MidiWriter {
         let tracks = self.prepare_tracks(notes);
         let num_tracks = tracks.len() + 1; // +1 for the conductor
         let header = build_header(num_tracks as u16, self.ticks_per_beat);
-        out.write_all(&header).expect("writing to Vec/BytesMut never fails");
+        out.write_all(&header)
+            .expect("writing to Vec/BytesMut never fails");
 
         // Conductor: tempo (+ optional time signature) then `EndOfTrack`.
         let mut conductor = Vec::with_capacity(64);
-        write_meta(
-            &mut conductor,
-            0,
-            0x51,
-            &encode_tempo(self.tempo),
-        );
+        write_meta(&mut conductor, 0, 0x51, &encode_tempo(self.tempo));
         if let Some((num, den)) = self.time_signature {
             write_meta(&mut conductor, 0, 0x58, &encode_time_signature(num, den));
         }
@@ -179,16 +175,18 @@ impl MidiWriter {
                 let delta = (ev.tick_u32()).saturating_sub(last_tick);
                 push_varlen(&mut buf, delta);
                 match ev {
-                    TrackEvent::NoteOn { pitch, velocity, .. } => {
+                    TrackEvent::NoteOn {
+                        pitch, velocity, ..
+                    } => {
                         buf.push(0x90 | (t.channel & 0x0F));
                         buf.push(*pitch & 0x7F);
                         buf.push(*velocity & 0x7F);
-                    }
+                    },
                     TrackEvent::NoteOff { pitch, .. } => {
                         buf.push(0x80 | (t.channel & 0x0F));
                         buf.push(*pitch & 0x7F);
                         buf.push(0);
-                    }
+                    },
                 }
                 last_tick = ev.tick_u32();
             }
@@ -204,19 +202,20 @@ impl MidiWriter {
     /// events. Doesn't write anything — pure data-shaping pass.
     fn prepare_tracks(&self, notes: &[MidiNote]) -> Vec<TrackBuf> {
         const DRUM: u8 = crate::models::muscriptor::DRUM_PROGRAM;
-        let mut tracks: std::collections::BTreeMap<u8, TrackBuf> = std::collections::BTreeMap::new();
+        let mut tracks: std::collections::BTreeMap<u8, TrackBuf> =
+            std::collections::BTreeMap::new();
 
         for n in notes {
-            let track_name: String = n
-                .instrument
-                .map(|s| s.replace('_', " "))
-                .unwrap_or_else(|| {
-                    if n.program == DRUM {
-                        "drums".to_string()
-                    } else {
-                        format!("program {}", n.program)
-                    }
-                });
+            let track_name: String =
+                n.instrument
+                    .map(|s| s.replace('_', " "))
+                    .unwrap_or_else(|| {
+                        if n.program == DRUM {
+                            "drums".to_string()
+                        } else {
+                            format!("program {}", n.program)
+                        }
+                    });
             let entry = tracks.entry(n.program).or_insert_with(|| TrackBuf {
                 program: n.program,
                 name: track_name,
@@ -225,7 +224,11 @@ impl MidiWriter {
                 channel: 0, // assigned below
             });
             let onset_tick = secs_to_tick(n.onset as f64, self.ticks_per_beat, self.tempo);
-            let offset_tick = secs_to_tick(n.offset.max(n.onset) as f64, self.ticks_per_beat, self.tempo);
+            let offset_tick = secs_to_tick(
+                n.offset.max(n.onset) as f64,
+                self.ticks_per_beat,
+                self.tempo,
+            );
             entry.events.push(TrackEvent::NoteOn {
                 tick: onset_tick,
                 pitch: n.pitch,
@@ -268,8 +271,12 @@ impl MidiWriter {
                 let ta = a.tick_u32();
                 let tb = b.tick_u32();
                 ta.cmp(&tb).then_with(|| match (a, b) {
-                    (TrackEvent::NoteOn { .. }, TrackEvent::NoteOff { .. }) => std::cmp::Ordering::Less,
-                    (TrackEvent::NoteOff { .. }, TrackEvent::NoteOn { .. }) => std::cmp::Ordering::Greater,
+                    (TrackEvent::NoteOn { .. }, TrackEvent::NoteOff { .. }) => {
+                        std::cmp::Ordering::Less
+                    },
+                    (TrackEvent::NoteOff { .. }, TrackEvent::NoteOn { .. }) => {
+                        std::cmp::Ordering::Greater
+                    },
                     _ => std::cmp::Ordering::Equal,
                 })
             });

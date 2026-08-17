@@ -12,7 +12,7 @@ use tekken::Tekkenizer;
 
 use super::codec::CodecDecoder;
 use super::modeling::{
-    rename_voxtral_transformer_keys, AcousticTransformer, AudioCodebookEmbedding, VoxtralLlm,
+    AcousticTransformer, AudioCodebookEmbedding, VoxtralLlm, rename_voxtral_transformer_keys,
 };
 use crate::generation::SpeechOptions;
 
@@ -438,10 +438,10 @@ impl Model {
                         .map_err(|e| anyhow::anyhow!("embed_tokens failed: {e}"))?
                         .to_dtype(self.dtype)?;
                     parts.push(emb);
-                }
+                },
                 PromptSegment::VoiceEmbeddings => {
                     parts.push(voice_embed.clone());
-                }
+                },
             }
         }
         Ok(Tensor::cat(&parts, 0)?.unsqueeze(0)?) // [1, seq, dim]
@@ -734,8 +734,7 @@ impl SpeechStream<'_> {
 
         let frame_idx = self.frame_idx;
         if frame_idx + 1 < self.max_frames {
-            let codes_tensor =
-                Tensor::new(frame_codes.as_slice(), &self.model.device)?;
+            let codes_tensor = Tensor::new(frame_codes.as_slice(), &self.model.device)?;
             let summed_embed = self
                 .model
                 .codebook_embed
@@ -794,8 +793,11 @@ impl SpeechStream<'_> {
             .iter()
             .flat_map(|f| f.iter().copied().map(|c| c as f32))
             .collect();
-        let chunk_codes = Tensor::new(flat.as_slice(), &self.model.device)?
-            .reshape((1, n_chunk_frames, self.n_codebooks))?;
+        let chunk_codes = Tensor::new(flat.as_slice(), &self.model.device)?.reshape((
+            1,
+            n_chunk_frames,
+            self.n_codebooks,
+        ))?;
 
         let audio = self
             .model
@@ -830,7 +832,7 @@ impl Iterator for SpeechStream<'_> {
             Err(e) => {
                 self.done = true;
                 Some(Err(e))
-            }
+            },
         }
     }
 }

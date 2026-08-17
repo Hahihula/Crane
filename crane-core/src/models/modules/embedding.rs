@@ -74,7 +74,7 @@ impl EmbeddingLayer {
                     let weight = Arc::try_unwrap(weight)
                         .map_err(|_| candle_core::Error::Msg("embedding probe leaked".into()))?;
                     return Self::dense(&weight, hidden_size, dtype, &device);
-                }
+                },
             }
         }
         Self::dense(&weight, hidden_size, dtype, &device)
@@ -117,7 +117,7 @@ impl EmbeddingLayer {
             ))),
             Self::Quantized { weight, .. } => {
                 Ok(LinearLayer::Quantized(QMatMul::from_arc(weight.clone())?))
-            }
+            },
         }
     }
 
@@ -132,9 +132,7 @@ impl EmbeddingLayer {
     /// Resident size of the table in bytes.
     pub fn size_in_bytes(&self) -> usize {
         match self {
-            Self::Dense(e) => {
-                e.embeddings().elem_count() * e.embeddings().dtype().size_in_bytes()
-            }
+            Self::Dense(e) => e.embeddings().elem_count() * e.embeddings().dtype().size_in_bytes(),
             Self::Quantized { weight, .. } => weight.storage_size_in_bytes(),
         }
     }
@@ -155,7 +153,9 @@ mod tests {
     fn quantized_lookup_matches_dense_lookup() -> Result<()> {
         let dev = Device::Cpu;
         let (vocab, hidden) = (64usize, 256usize);
-        let data: Vec<f32> = (0..vocab * hidden).map(|i| (i % 97) as f32 * 0.01).collect();
+        let data: Vec<f32> = (0..vocab * hidden)
+            .map(|i| (i % 97) as f32 * 0.01)
+            .collect();
         let dense_w = Tensor::from_vec(data, (vocab, hidden), &dev)?;
 
         let q = QTensor::quantize(&dense_w, GgmlDType::Q8_0)?;
@@ -225,9 +225,16 @@ mod tests {
         let dev = Device::Cpu;
         let (vocab, hidden) = (64usize, 256usize);
         let w = Tensor::zeros((vocab, hidden), DType::F32, &dev)?;
-        let layer = EmbeddingLayer::from_qtensor(QTensor::quantize(&w, GgmlDType::Q4K)?, hidden, DType::F32)?;
+        let layer = EmbeddingLayer::from_qtensor(
+            QTensor::quantize(&w, GgmlDType::Q4K)?,
+            hidden,
+            DType::F32,
+        )?;
 
-        assert!(matches!(layer.tied_output()?, LinearLayer::Quantized(QMatMul::QTensor(_))));
+        assert!(matches!(
+            layer.tied_output()?,
+            LinearLayer::Quantized(QMatMul::QTensor(_))
+        ));
 
         // …and it projects to vocab logits, i.e. it is the transposed matmul
         // a tied lm_head needs.

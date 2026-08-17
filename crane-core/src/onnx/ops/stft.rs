@@ -29,14 +29,20 @@ pub(crate) fn stft(
 ) -> Result<Tensor> {
     let frame_step = scalar_i64(frame_step)?;
     if frame_step <= 0 {
-        bail!("STFT node '{}': frame_step must be > 0, got {frame_step}", node.name);
+        bail!(
+            "STFT node '{}': frame_step must be > 0, got {frame_step}",
+            node.name
+        );
     }
     // Validated positive above, so this cast never wraps or loses sign.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let frame_step = frame_step as usize;
 
     let Some(window) = window else {
-        bail!("STFT node '{}' has no window input; a windowless STFT isn't supported", node.name);
+        bail!(
+            "STFT node '{}' has no window input; a windowless STFT isn't supported",
+            node.name
+        );
     };
     let window = window.to_vec1::<f32>()?;
 
@@ -44,7 +50,10 @@ pub(crate) fn stft(
         Some(t) => {
             let v = scalar_i64(t)?;
             if v < 0 {
-                bail!("STFT node '{}': frame_length must be non-negative, got {v}", node.name);
+                bail!(
+                    "STFT node '{}': frame_length must be non-negative, got {v}",
+                    node.name
+                );
             }
             // Validated non-negative above.
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -69,7 +78,10 @@ pub(crate) fn stft(
     let signal = match signal.dims() {
         [_, _] => signal.clone(),
         [b, l, 1] => signal.reshape((*b, *l))?,
-        dims => bail!("STFT node '{}': input has unsupported shape {dims:?}", node.name),
+        dims => bail!(
+            "STFT node '{}': input has unsupported shape {dims:?}",
+            node.name
+        ),
     };
     let (batch, signal_length) = signal.dims2()?;
     if signal_length < frame_length {
@@ -79,7 +91,11 @@ pub(crate) fn stft(
         );
     }
     let num_frames = 1 + (signal_length - frame_length) / frame_step;
-    let n_bins = if onesided { frame_length / 2 + 1 } else { frame_length };
+    let n_bins = if onesided {
+        frame_length / 2 + 1
+    } else {
+        frame_length
+    };
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(frame_length);
@@ -140,7 +156,10 @@ mod tests {
     use super::stft;
 
     fn node() -> NodeProto {
-        NodeProto { name: "STFT.0".to_string(), ..Default::default() }
+        NodeProto {
+            name: "STFT.0".to_string(),
+            ..Default::default()
+        }
     }
 
     fn node_with_onesided(value: i64) -> NodeProto {
@@ -176,8 +195,14 @@ mod tests {
             assert!(data[base + 1].abs() < 1e-4, "bin 0 imag: {data:?}");
             for bin in 1..3 {
                 let idx = base + bin * 2;
-                assert!(data[idx].abs() < 1e-4, "bin {bin} real should be ~0: {data:?}");
-                assert!(data[idx + 1].abs() < 1e-4, "bin {bin} imag should be ~0: {data:?}");
+                assert!(
+                    data[idx].abs() < 1e-4,
+                    "bin {bin} real should be ~0: {data:?}"
+                );
+                assert!(
+                    data[idx + 1].abs() < 1e-4,
+                    "bin {bin} imag should be ~0: {data:?}"
+                );
             }
         }
         Ok(())
@@ -189,7 +214,13 @@ mod tests {
         let frame_step = Tensor::new(2i64, &Device::Cpu)?;
         let window = Tensor::new(&[1f32, 1., 1., 1.], &Device::Cpu)?;
 
-        let y = stft(&node_with_onesided(0), &signal, &frame_step, Some(&window), None)?;
+        let y = stft(
+            &node_with_onesided(0),
+            &signal,
+            &frame_step,
+            Some(&window),
+            None,
+        )?;
 
         assert_eq!(y.dims(), &[1, 3, 4, 2]);
         Ok(())
@@ -213,15 +244,24 @@ mod tests {
         let window = Tensor::new(&[1f32, 1., 1., 1.], &Device::Cpu).unwrap();
         let frame_length = Tensor::new(8i64, &Device::Cpu).unwrap();
 
-        let err =
-            stft(&node(), &signal, &frame_step, Some(&window), Some(&frame_length)).unwrap_err();
+        let err = stft(
+            &node(),
+            &signal,
+            &frame_step,
+            Some(&window),
+            Some(&frame_length),
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("does not match window length"));
     }
 
     #[test]
     fn stft_3d_input_squeezes_trailing_one() -> Result<()> {
-        let signal = Tensor::new(&[[[1f32], [1.], [1.], [1.], [1.], [1.], [1.], [1.]]], &Device::Cpu)?;
+        let signal = Tensor::new(
+            &[[[1f32], [1.], [1.], [1.], [1.], [1.], [1.], [1.]]],
+            &Device::Cpu,
+        )?;
         let frame_step = Tensor::new(2i64, &Device::Cpu)?;
         let window = Tensor::new(&[1f32, 1., 1., 1.], &Device::Cpu)?;
 

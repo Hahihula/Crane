@@ -1,10 +1,10 @@
 //! Streaming Chat Example
-//! 
+//!
 //! This example shows how to create a chat application with real-time streaming responses.
 
-use crane::prelude::*;
 use crane::common::config::{CommonConfig, DataType, DeviceConfig};
 use crane::llm::{GenerationConfig, LlmModelType};
+use crane::prelude::*;
 
 fn main() -> CraneResult<()> {
     // Create a chat configuration
@@ -24,19 +24,19 @@ fn main() -> CraneResult<()> {
         max_history_turns: 4,
         enable_streaming: true,
     };
-    
+
     // Create a new chat client
     let mut chat_client = ChatClient::new(config)?;
-    
+
     println!("Asking: Tell me about Rust programming in 2 sentences.");
-    
+
     // Send a message with streaming - you'll see the response appear token by token
     let response = chat_client.send_message_streaming(
-        "Tell me about Rust programming in 2 sentences.", 
-        |token| print!("{}", token)  // This callback prints each token as it arrives
+        "Tell me about Rust programming in 2 sentences.",
+        |token| print!("{}", token), // This callback prints each token as it arrives
     )?;
-    
+
     println!("\n\nComplete response: {}", response);
-    
+
     Ok(())
 }

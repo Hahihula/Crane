@@ -11,10 +11,10 @@
 //! `rocm` — the fused op has a separate kernel per backend, so CPU agreement
 //! does not imply device agreement.
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use crane_core::models::qwen3_5::Qwen35RmsNorm;
 use crane_core::ops::gdn::{
-    compute_beta_g, l2_alpha, l2_norm, l2_norm_fused, GdnGateConsts, RmsNormGated,
+    GdnGateConsts, RmsNormGated, compute_beta_g, l2_alpha, l2_norm, l2_norm_fused,
 };
 
 /// Whether this build has a GPU backend compiled in at all.
@@ -76,7 +76,11 @@ fn rms_norm_reference(x: &Tensor, weight: &Tensor, eps: f64, unit_offset: bool) 
     let var = x.sqr()?.mean_keepdim(D::Minus1)?;
     let x_normed = x.broadcast_div(&(var + eps)?.sqrt()?)?;
     let scale = weight.to_dtype(DType::F32)?;
-    let scale = if unit_offset { scale.affine(1.0, 1.0)? } else { scale };
+    let scale = if unit_offset {
+        scale.affine(1.0, 1.0)?
+    } else {
+        scale
+    };
     x_normed.broadcast_mul(&scale)?.to_dtype(dtype)
 }
 
@@ -216,7 +220,10 @@ fn precomputed_gate_consts_match_the_inline_formula() -> Result<()> {
             .unsqueeze(0)?
             .broadcast_mul(&softplus)?;
 
-        assert!(max_abs_diff(&beta, &want_beta)? < 1e-6, "{dev:?}: beta drifted");
+        assert!(
+            max_abs_diff(&beta, &want_beta)? < 1e-6,
+            "{dev:?}: beta drifted"
+        );
         let diff = max_abs_diff(&g, &want_g)?;
         assert!(diff < 1e-5, "{dev:?}: g differs by {diff}");
     }

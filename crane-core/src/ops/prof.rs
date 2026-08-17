@@ -183,12 +183,7 @@ impl PassTimer {
         t.tokens += self.seq_len as u64;
         t.enqueue_ns += enqueue.as_nanos() as u64;
         t.wall_ns += wall.as_nanos() as u64;
-        for ((total, span), start) in t
-            .spans
-            .iter_mut()
-            .zip(&SPAN_NS)
-            .zip(&self.spans_at_start)
-        {
+        for ((total, span), start) in t.spans.iter_mut().zip(&SPAN_NS).zip(&self.spans_at_start) {
             *total += span.load(Ordering::Relaxed) - *start;
         }
 
@@ -207,7 +202,11 @@ fn report(kind: usize, t: &Totals) {
     #[allow(clippy::cast_precision_loss)]
     let per = |ns: u64| ns as f64 / t.passes as f64 / 1e6;
     let (enqueue, wall) = (per(t.enqueue_ns), per(t.wall_ns));
-    let ratio = if wall > 0.0 { enqueue / wall * 100.0 } else { 0.0 };
+    let ratio = if wall > 0.0 {
+        enqueue / wall * 100.0
+    } else {
+        0.0
+    };
 
     let line = |range: std::ops::Range<usize>| {
         range
@@ -226,9 +225,21 @@ fn report(kind: usize, t: &Totals) {
          enqueue/wall {ratio:.0}%",
         t.passes, t.tokens,
     );
-    eprintln!("[crane-prof]   pass:  {} | sum {:.2} ms", line(TIER1), sum(TIER1));
-    eprintln!("[crane-prof]   gdn:   {} | sum {:.2} ms", line(TIER2), sum(TIER2));
-    eprintln!("[crane-prof]   recur: {} | sum {:.2} ms", line(TIER3), sum(TIER3));
+    eprintln!(
+        "[crane-prof]   pass:  {} | sum {:.2} ms",
+        line(TIER1),
+        sum(TIER1)
+    );
+    eprintln!(
+        "[crane-prof]   gdn:   {} | sum {:.2} ms",
+        line(TIER2),
+        sum(TIER2)
+    );
+    eprintln!(
+        "[crane-prof]   recur: {} | sum {:.2} ms",
+        line(TIER3),
+        sum(TIER3)
+    );
 }
 
 #[cfg(test)]
@@ -239,7 +250,10 @@ mod tests {
     /// and `pass` must hand back nothing to time.
     #[test]
     fn disabled_is_transparent() {
-        assert!(!enabled(), "CRANE_PROF must be unset in the test environment");
+        assert!(
+            !enabled(),
+            "CRANE_PROF must be unset in the test environment"
+        );
         assert_eq!(timed(Span::Embed, || 7), 7);
         assert!(pass(1).is_none());
         assert_eq!(SPAN_NS[Span::Embed as usize].load(Ordering::Relaxed), 0);

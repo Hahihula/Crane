@@ -85,7 +85,9 @@ mod tests {
     }
 
     fn test_english_language() -> LanguageG2p {
-        LanguageG2p::English(Box::new(EnglishG2p::new("hello\thəlˈoʊ\n", None, false).unwrap()))
+        LanguageG2p::English(Box::new(
+            EnglishG2p::new("hello\thəlˈoʊ\n", None, false).unwrap(),
+        ))
     }
 
     fn test_german_language() -> LanguageG2p {
@@ -99,7 +101,10 @@ mod tests {
 
     #[test]
     fn english_text_to_ipa_delegates_to_engine() {
-        assert_eq!(test_english_language().text_to_ipa("hello").unwrap(), "həlˈoʊ");
+        assert_eq!(
+            test_english_language().text_to_ipa("hello").unwrap(),
+            "həlˈoʊ"
+        );
     }
 
     #[test]

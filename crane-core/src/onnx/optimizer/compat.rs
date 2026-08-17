@@ -186,7 +186,11 @@ fn tensor_proto_to_i64_vec(tensor_proto: &TensorProto, name: &str) -> Option<Vec
 /// (matching `eval.rs`'s own float-only defaults elsewhere, e.g.
 /// `ConstantOfShape`'s default `value`). See [`scalar_value_attribute`] for
 /// which dtypes are natively represented.
-fn expand_trilu(node: &NodeProto, graph: &GraphProto, new_nodes: &mut Vec<NodeProto>) -> Result<()> {
+fn expand_trilu(
+    node: &NodeProto,
+    graph: &GraphProto,
+    new_nodes: &mut Vec<NodeProto>,
+) -> Result<()> {
     let data = node
         .input
         .first()
@@ -359,7 +363,12 @@ fn push_dynamic_axis_normalization(
     new_nodes.push(unary_node("Size", &shape_name, &rank_name));
 
     let is_negative_name = format!("{output}__onnx_compat_{label}_negative");
-    new_nodes.push(binary_node("Less", axis_name, &zero_name, &is_negative_name));
+    new_nodes.push(binary_node(
+        "Less",
+        axis_name,
+        &zero_name,
+        &is_negative_name,
+    ));
 
     let adjusted_name = format!("{output}__onnx_compat_{label}_adjusted");
     new_nodes.push(binary_node("Add", axis_name, &rank_name, &adjusted_name));
@@ -517,12 +526,16 @@ fn is_bidirectional(node: &NodeProto) -> bool {
 /// `activations` is present with a length other than 6 — a malformed
 /// bidirectional `LSTM` this rewrite can't meaningfully split.
 fn expand_bidirectional_lstm(node: &NodeProto, new_nodes: &mut Vec<NodeProto>) -> Rewritten {
-    let activations = node.attribute.iter().find(|attr| attr.name == "activations");
+    let activations = node
+        .attribute
+        .iter()
+        .find(|attr| attr.name == "activations");
     let (fwd_activations, bwd_activations) = match activations {
         None => (None, None),
-        Some(attr) if attr.strings.len() == 6 => {
-            (Some(attr.strings[0..3].to_vec()), Some(attr.strings[3..6].to_vec()))
-        },
+        Some(attr) if attr.strings.len() == 6 => (
+            Some(attr.strings[0..3].to_vec()),
+            Some(attr.strings[3..6].to_vec()),
+        ),
         Some(_) => return Rewritten::No,
     };
 
@@ -1232,7 +1245,10 @@ mod tests {
         rewrite_unsupported_ops(&mut graph).unwrap();
 
         assert_eq!(graph.node.len(), 1);
-        assert_eq!(graph.node[0].input, vec!["data".to_string(), "axes".to_string()]);
+        assert_eq!(
+            graph.node[0].input,
+            vec!["data".to_string(), "axes".to_string()]
+        );
     }
 
     fn cumsum_node(
@@ -1287,12 +1303,18 @@ mod tests {
         let data = Tensor::from_vec(vec![1i64, 2, 3, 4, 5, 6], (2, 3), &Device::Cpu).unwrap();
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
-        inputs.insert("axis".to_string(), Tensor::new(-1i64, &Device::Cpu).unwrap());
+        inputs.insert(
+            "axis".to_string(),
+            Tensor::new(-1i64, &Device::Cpu).unwrap(),
+        );
 
         let values = run_graph(graph, inputs);
         let out = values.get("out").unwrap();
         assert_eq!(out.dtype(), candle_core::DType::I64);
-        assert_eq!(out.to_vec2::<i64>().unwrap(), vec![vec![1, 3, 6], vec![4, 9, 15]]);
+        assert_eq!(
+            out.to_vec2::<i64>().unwrap(),
+            vec![vec![1, 3, 6], vec![4, 9, 15]]
+        );
     }
 
     // Float data with a positive axis must round-trip through the Double
@@ -1319,9 +1341,10 @@ mod tests {
         let values = run_graph(graph, inputs);
         let out = values.get("out").unwrap();
         assert_eq!(out.dtype(), candle_core::DType::F32);
-        assert_eq!(out.to_vec2::<f32>().unwrap(), vec![vec![1.0, 3.0, 6.0], vec![
-            4.0, 9.0, 15.0
-        ]]);
+        assert_eq!(
+            out.to_vec2::<f32>().unwrap(),
+            vec![vec![1.0, 3.0, 6.0], vec![4.0, 9.0, 15.0]]
+        );
     }
 
     // Real-world exports (e.g. `torch.onnx.export(dynamo=False)`) can leave
@@ -1351,9 +1374,10 @@ mod tests {
         let values = run_graph(graph, inputs);
         let out = values.get("out").unwrap();
         assert_eq!(out.dtype(), candle_core::DType::F32);
-        assert_eq!(out.to_vec2::<f32>().unwrap(), vec![vec![1.0, 3.0, 6.0], vec![
-            4.0, 9.0, 15.0
-        ]]);
+        assert_eq!(
+            out.to_vec2::<f32>().unwrap(),
+            vec![vec![1.0, 3.0, 6.0], vec![4.0, 9.0, 15.0]]
+        );
     }
 
     // An `exclusive`/`reverse` attribute must survive the rewrite verbatim
@@ -1426,7 +1450,9 @@ mod tests {
     // `seed`) that forward and backward weights can never accidentally
     // produce identical results.
     fn deterministic_values(n: usize, seed: f32) -> Vec<f32> {
-        (0..n).map(|i| ((i as f32) * 0.7 + seed).sin() * 0.3).collect()
+        (0..n)
+            .map(|i| ((i as f32) * 0.7 + seed).sin() * 0.3)
+            .collect()
     }
 
     fn reverse_time_major(values: &[f32], step: usize) -> Vec<f32> {
@@ -1452,14 +1478,19 @@ mod tests {
         let b_bwd = deterministic_values(8 * LSTM_HIDDEN, 5.0);
 
         let x_data = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let x = Tensor::from_vec(x_data.clone(), (LSTM_SEQ_LEN, 1, LSTM_INPUT), &Device::Cpu).unwrap();
+        let x =
+            Tensor::from_vec(x_data.clone(), (LSTM_SEQ_LEN, 1, LSTM_INPUT), &Device::Cpu).unwrap();
         let x_rev_data = reverse_time_major(&x_data, LSTM_INPUT);
         let x_rev =
             Tensor::from_vec(x_rev_data, (LSTM_SEQ_LEN, 1, LSTM_INPUT), &Device::Cpu).unwrap();
 
         // Reference pass 1: plain forward LSTM over the original sequence.
         let mut fwd_graph = GraphProto {
-            node: vec![lstm_node(&["x", "w", "r", "b"], &["y", "y_h", "y_c"], false)],
+            node: vec![lstm_node(
+                &["x", "w", "r", "b"],
+                &["y", "y_h", "y_c"],
+                false,
+            )],
             output: vec![out("y"), out("y_h"), out("y_c")],
             ..Default::default()
         };
@@ -1468,13 +1499,21 @@ mod tests {
         fwd_inputs.insert("x".to_string(), x.clone());
         fwd_inputs.insert(
             "w".to_string(),
-            Tensor::from_vec(w_fwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_INPUT), &Device::Cpu)
-                .unwrap(),
+            Tensor::from_vec(
+                w_fwd.clone(),
+                (1, 4 * LSTM_HIDDEN, LSTM_INPUT),
+                &Device::Cpu,
+            )
+            .unwrap(),
         );
         fwd_inputs.insert(
             "r".to_string(),
-            Tensor::from_vec(r_fwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_HIDDEN), &Device::Cpu)
-                .unwrap(),
+            Tensor::from_vec(
+                r_fwd.clone(),
+                (1, 4 * LSTM_HIDDEN, LSTM_HIDDEN),
+                &Device::Cpu,
+            )
+            .unwrap(),
         );
         fwd_inputs.insert(
             "b".to_string(),
@@ -1484,7 +1523,11 @@ mod tests {
 
         // Reference pass 2: plain forward LSTM over the reversed sequence.
         let mut bwd_graph = GraphProto {
-            node: vec![lstm_node(&["x", "w", "r", "b"], &["y", "y_h", "y_c"], false)],
+            node: vec![lstm_node(
+                &["x", "w", "r", "b"],
+                &["y", "y_h", "y_c"],
+                false,
+            )],
             output: vec![out("y"), out("y_h"), out("y_c")],
             ..Default::default()
         };
@@ -1493,13 +1536,21 @@ mod tests {
         bwd_inputs.insert("x".to_string(), x_rev);
         bwd_inputs.insert(
             "w".to_string(),
-            Tensor::from_vec(w_bwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_INPUT), &Device::Cpu)
-                .unwrap(),
+            Tensor::from_vec(
+                w_bwd.clone(),
+                (1, 4 * LSTM_HIDDEN, LSTM_INPUT),
+                &Device::Cpu,
+            )
+            .unwrap(),
         );
         bwd_inputs.insert(
             "r".to_string(),
-            Tensor::from_vec(r_bwd.clone(), (1, 4 * LSTM_HIDDEN, LSTM_HIDDEN), &Device::Cpu)
-                .unwrap(),
+            Tensor::from_vec(
+                r_bwd.clone(),
+                (1, 4 * LSTM_HIDDEN, LSTM_HIDDEN),
+                &Device::Cpu,
+            )
+            .unwrap(),
         );
         bwd_inputs.insert(
             "b".to_string(),
@@ -1507,8 +1558,20 @@ mod tests {
         );
         let bwd_ref = run_graph(bwd_graph, bwd_inputs);
 
-        let fwd_y = fwd_ref.get("y").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let bwd_y = bwd_ref.get("y").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let fwd_y = fwd_ref
+            .get("y")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let bwd_y = bwd_ref
+            .get("y")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         let bwd_y_reversed = reverse_time_major(&bwd_y, LSTM_HIDDEN);
         let mut expected_y = Vec::new();
         for t in 0..LSTM_SEQ_LEN {
@@ -1516,14 +1579,38 @@ mod tests {
             expected_y.extend_from_slice(&bwd_y_reversed[t * LSTM_HIDDEN..(t + 1) * LSTM_HIDDEN]);
         }
 
-        let mut expected_y_h =
-            fwd_ref.get("y_h").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        expected_y_h
-            .extend(bwd_ref.get("y_h").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap());
-        let mut expected_y_c =
-            fwd_ref.get("y_c").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        expected_y_c
-            .extend(bwd_ref.get("y_c").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        let mut expected_y_h = fwd_ref
+            .get("y_h")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        expected_y_h.extend(
+            bwd_ref
+                .get("y_h")
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+        );
+        let mut expected_y_c = fwd_ref
+            .get("y_c")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        expected_y_c.extend(
+            bwd_ref
+                .get("y_c")
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+        );
 
         // The bidirectional node under test: W/R/B concatenate the two
         // directions' weights along axis 0, exactly as the ONNX LSTM spec
@@ -1562,11 +1649,27 @@ mod tests {
         );
         let values = run_graph(graph, inputs);
 
-        let actual_y = values.get("y").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let actual_y_h =
-            values.get("y_h").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let actual_y_c =
-            values.get("y_c").unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let actual_y = values
+            .get("y")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let actual_y_h = values
+            .get("y_h")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let actual_y_c = values
+            .get("y_c")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
 
         assert_eq!(actual_y, expected_y);
         assert_eq!(actual_y_h, expected_y_h);
@@ -1763,7 +1866,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for node in &graph.node {
             for output in node.output.iter().filter(|o| !o.is_empty()) {
-                assert!(seen.insert(output.clone()), "duplicate node output name {output:?}");
+                assert!(
+                    seen.insert(output.clone()),
+                    "duplicate node output name {output:?}"
+                );
             }
         }
 
@@ -1775,8 +1881,13 @@ mod tests {
         // Mirrors `Model::run_segment`, which requests every node's output
         // in the segment as a graph output -- this is what originally
         // surfaced the bug.
-        graph.output =
-            graph.node.iter().flat_map(|n| n.output.iter()).filter(|o| !o.is_empty()).map(|o| out(o)).collect();
+        graph.output = graph
+            .node
+            .iter()
+            .flat_map(|n| n.output.iter())
+            .filter(|o| !o.is_empty())
+            .map(|o| out(o))
+            .collect();
         let model = ModelProto {
             graph: Some(graph),
             ..Default::default()
@@ -1802,7 +1913,8 @@ mod tests {
     #[test]
     fn bidirectional_lstm_with_default_activations_is_accepted() {
         let mut node = lstm_node(&["x", "w", "r"], &["y"], true);
-        node.attribute.push(strings_attribute("activations", default_activations_x6()));
+        node.attribute
+            .push(strings_attribute("activations", default_activations_x6()));
         let mut graph = GraphProto {
             node: vec![node],
             output: vec![out("y")],
@@ -1831,7 +1943,8 @@ mod tests {
             b"Tanh".to_vec(),
             b"Tanh".to_vec(),
         ];
-        node.attribute.push(strings_attribute("activations", activations));
+        node.attribute
+            .push(strings_attribute("activations", activations));
         let mut graph = GraphProto {
             node: vec![node],
             output: vec![out("y")],
@@ -1854,7 +1967,8 @@ mod tests {
     #[test]
     fn bidirectional_lstm_with_malformed_activations_is_left_untouched() {
         let mut node = lstm_node(&["x", "w", "r"], &["y"], true);
-        node.attribute.push(strings_attribute("activations", vec![b"Sigmoid".to_vec()]));
+        node.attribute
+            .push(strings_attribute("activations", vec![b"Sigmoid".to_vec()]));
         let mut graph = GraphProto {
             node: vec![node],
             output: vec![out("y")],

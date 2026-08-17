@@ -29,13 +29,13 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{make_error, AppState};
+use crate::{AppState, make_error};
 
 /// One request to the duplex engine thread — mirrors the
 /// request-struct-with-a-reply-channel pattern used by every other model
@@ -82,7 +82,10 @@ struct WsErrorMessage {
 }
 
 fn error_message(msg: &str) -> Message {
-    let json = serde_json::to_string(&WsErrorMessage { error: msg.to_string() }).unwrap_or_else(|_| "{\"error\":\"internal error\"}".to_string());
+    let json = serde_json::to_string(&WsErrorMessage {
+        error: msg.to_string(),
+    })
+    .unwrap_or_else(|_| "{\"error\":\"internal error\"}".to_string());
     Message::Text(json.into())
 }
 
@@ -122,65 +125,96 @@ async fn handle_duplex_socket(
     // the default system prompt instead of erroring — keeps trivial
     // clients (that only ever send audio) working with no boilerplate.
     let system_prompt = match socket.recv().await {
-        Some(Ok(Message::Text(text))) => serde_json::from_str::<PrepareMessage>(&text).unwrap_or_default().system_prompt,
+        Some(Ok(Message::Text(text))) => {
+            serde_json::from_str::<PrepareMessage>(&text)
+                .unwrap_or_default()
+                .system_prompt
+        },
         Some(Ok(Message::Close(_))) | None => return,
         _ => None,
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if duplex_tx.send(DuplexRequest::Prepare { system_prompt, tx }).is_err() {
-        let _ = socket.send(error_message("duplex engine thread has stopped")).await;
+    if duplex_tx
+        .send(DuplexRequest::Prepare { system_prompt, tx })
+        .is_err()
+    {
+        let _ = socket
+            .send(error_message("duplex engine thread has stopped"))
+            .await;
         return;
     }
     match rx.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {},
         Ok(Err(e)) => {
-            let _ = socket.send(error_message(&format!("failed to prepare duplex session: {e}"))).await;
+            let _ = socket
+                .send(error_message(&format!(
+                    "failed to prepare duplex session: {e}"
+                )))
+                .await;
             return;
-        }
+        },
         Err(_) => {
-            let _ = socket.send(error_message("duplex engine did not respond to Prepare")).await;
+            let _ = socket
+                .send(error_message("duplex engine did not respond to Prepare"))
+                .await;
             return;
-        }
+        },
     }
-    if socket.send(Message::Text("{\"ready\":true}".into())).await.is_err() {
+    if socket
+        .send(Message::Text("{\"ready\":true}".into()))
+        .await
+        .is_err()
+    {
         return;
     }
 
     while let Some(msg) = socket.recv().await {
-        let Ok(msg) = msg else { break };
+        let Ok(msg) = msg else {
+            break;
+        };
         match msg {
             Message::Binary(bytes) => {
                 // 16-bit little-endian PCM -> f32 [-1, 1], matching this
                 // codebase's established normalization convention
                 // (2^(bits-1), not a raw i16 cast) elsewhere for audio input.
-                let samples: Vec<f32> = bytes.chunks_exact(2).map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0).collect();
+                let samples: Vec<f32> = bytes
+                    .chunks_exact(2)
+                    .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
+                    .collect();
 
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                if duplex_tx.send(DuplexRequest::Chunk { samples, tx }).is_err() {
-                    let _ = socket.send(error_message("duplex engine thread has stopped")).await;
+                if duplex_tx
+                    .send(DuplexRequest::Chunk { samples, tx })
+                    .is_err()
+                {
+                    let _ = socket
+                        .send(error_message("duplex engine thread has stopped"))
+                        .await;
                     break;
                 }
                 match rx.await {
                     Ok(Ok(event)) => {
-                        let json = serde_json::to_string(&event).unwrap_or_else(|_| "{\"error\":\"failed to encode event\"}".to_string());
+                        let json = serde_json::to_string(&event).unwrap_or_else(|_| {
+                            "{\"error\":\"failed to encode event\"}".to_string()
+                        });
                         if socket.send(Message::Text(json.into())).await.is_err() {
                             break;
                         }
-                    }
+                    },
                     Ok(Err(e)) => {
                         if socket.send(error_message(&e)).await.is_err() {
                             break;
                         }
-                    }
+                    },
                     Err(_) => break,
                 }
-            }
+            },
             Message::Close(_) => break,
             // Ping/Pong are handled by axum's WebSocket implementation
             // automatically; Text messages after the initial Prepare are
             // ignored (no other client->server control messages defined yet).
-            _ => {}
+            _ => {},
         }
     }
 }

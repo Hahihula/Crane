@@ -1,6 +1,6 @@
 use crate::common::{
-    config::{CommonConfig, DeviceConfig},
     CraneError, CraneResult,
+    config::{CommonConfig, DeviceConfig},
 };
 use std::path::Path;
 
@@ -25,7 +25,7 @@ impl TtsClient {
             DeviceConfig::Cuda(gpu_id) => {
                 crane_core::models::Device::cuda_if_available(*gpu_id as usize)
                     .map_err(|e| CraneError::ModelError(e.to_string()))?
-            }
+            },
             DeviceConfig::Rocm(_gpu_id) => {
                 #[cfg(feature = "rocm")]
                 {
@@ -39,7 +39,7 @@ impl TtsClient {
                             .to_string(),
                     ));
                 }
-            }
+            },
             DeviceConfig::Metal => {
                 #[cfg(target_os = "macos")]
                 {
@@ -52,7 +52,7 @@ impl TtsClient {
                         "Metal device not available on this platform".to_string(),
                     ));
                 }
-            }
+            },
         };
 
         // Placeholder implementation - in reality, we would use the appropriate TTS model

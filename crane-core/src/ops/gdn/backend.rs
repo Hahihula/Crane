@@ -7,7 +7,7 @@
 //! is used by default; set `CRANE_GDN_PORTABLE=1` to force the portable
 //! op-by-op path for cross-checking numerics.
 
-use candle_core::{DType, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, IndexOp, Result, Tensor};
 
 use super::cache::GdnLayerCache;
 use super::config::GdnDims;
@@ -105,7 +105,10 @@ pub fn gated_delta_rule_recurrence(
     // washed out downstream because the gated RMSNorm's eps and the silu gate
     // make it observable. mistral.rs applies the same scale.
     let scale = 1.0 / (q.dim(D::Minus1)? as f64).sqrt();
-    let q = (q.affine(scale, 0.0)?).transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+    let q = (q.affine(scale, 0.0)?)
+        .transpose(1, 2)?
+        .contiguous()?
+        .to_dtype(DType::F32)?;
     let k = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
     let v = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
     let g = g.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
@@ -174,7 +177,12 @@ impl GdnGateConsts {
     /// Derive from the raw `A_log` and `dt_bias` weights (both `[H]`).
     pub fn new(a_log: &Tensor, dt_bias: &Tensor) -> Result<Self> {
         Ok(Self {
-            neg_exp_a_log: a_log.to_dtype(DType::F32)?.exp()?.neg()?.unsqueeze(0)?.unsqueeze(0)?,
+            neg_exp_a_log: a_log
+                .to_dtype(DType::F32)?
+                .exp()?
+                .neg()?
+                .unsqueeze(0)?
+                .unsqueeze(0)?,
             dt_bias: dt_bias.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?,
         })
     }
@@ -260,7 +268,7 @@ fn fused_recurrence(
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
-    use crate::ops::prof::{timed, Span};
+    use crate::ops::prof::{Span, timed};
 
     let (hv, kd, vd) = (dims.num_v_heads, dims.head_k_dim, dims.head_v_dim);
     let bh = batch_size * hv;
@@ -342,32 +350,17 @@ mod tests {
     fn recurrence_runs_and_returns_correct_shape() {
         let dev = Device::Cpu;
         let q = Tensor::new(
-            &[[
-                [[1.0f32, 0.0]],
-                [[0.0, 1.0]],
-                [[1.0, 1.0]],
-                [[0.5, 0.5]],
-            ]],
+            &[[[[1.0f32, 0.0]], [[0.0, 1.0]], [[1.0, 1.0]], [[0.5, 0.5]]]],
             &dev,
         )
         .unwrap();
         let k = Tensor::new(
-            &[[
-                [[1.0f32, 0.0]],
-                [[0.0, 1.0]],
-                [[1.0, 0.0]],
-                [[0.0, 1.0]],
-            ]],
+            &[[[[1.0f32, 0.0]], [[0.0, 1.0]], [[1.0, 0.0]], [[0.0, 1.0]]]],
             &dev,
         )
         .unwrap();
         let v = Tensor::new(
-            &[[
-                [[1.0f32, 0.0]],
-                [[0.0, 1.0]],
-                [[1.0, 1.0]],
-                [[0.5, 0.5]],
-            ]],
+            &[[[[1.0f32, 0.0]], [[0.0, 1.0]], [[1.0, 1.0]], [[0.5, 0.5]]]],
             &dev,
         )
         .unwrap();

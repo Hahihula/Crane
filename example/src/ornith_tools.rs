@@ -20,11 +20,11 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use crane_core::autotokenizer::AutoTokenizer;
-use crane_core::generation::based::ModelForCausalLM;
 use crane_core::generation::GenerationConfig;
+use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::Model;
 use crane_core::models::{DType, Device};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn model_path() -> String {
     arg("--model-path")
@@ -54,7 +54,7 @@ fn run_tool(name: &str, args: &BTreeMap<String, String>) -> String {
                 _ => (18, "partly cloudy"),
             };
             json!({ "city": city, "temperature_c": temp, "conditions": cond }).to_string()
-        }
+        },
         "list_directory" => {
             let path = args.get("path").cloned().unwrap_or_else(|| ".".to_string());
             match std::fs::read_dir(&path) {
@@ -65,10 +65,10 @@ fn run_tool(name: &str, args: &BTreeMap<String, String>) -> String {
                         .collect();
                     names.sort();
                     json!({ "path": path, "entries": names }).to_string()
-                }
+                },
                 Err(e) => json!({ "path": path, "error": e.to_string() }).to_string(),
             }
-        }
+        },
         other => json!({ "error": format!("unknown tool '{other}'") }).to_string(),
     }
 }
@@ -86,7 +86,9 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
     let mut rest = text;
     while let Some(s) = rest.find("<tool_call>") {
         let after = &rest[s + "<tool_call>".len()..];
-        let Some(end) = after.find("</tool_call>") else { break };
+        let Some(end) = after.find("</tool_call>") else {
+            break;
+        };
         if let Some(call) = parse_one(&after[..end]) {
             calls.push(call);
         }
@@ -105,10 +107,14 @@ fn parse_one(block: &str) -> Option<ToolCall> {
     let mut rest = &block[fe..];
     while let Some(ps) = rest.find("<parameter=") {
         let a = &rest[ps + "<parameter=".len()..];
-        let Some(pe) = a.find('>') else { break };
+        let Some(pe) = a.find('>') else {
+            break;
+        };
         let pname = a[..pe].trim().to_string();
         let val_region = &a[pe + 1..];
-        let Some(ve) = val_region.find("</parameter>") else { break };
+        let Some(ve) = val_region.find("</parameter>") else {
+            break;
+        };
         // The template wraps the value in newlines: `>\nVALUE\n</parameter>`.
         args.insert(pname, val_region[..ve].trim().to_string());
         rest = &val_region[ve + "</parameter>".len()..];
@@ -165,7 +171,9 @@ fn generate(model: &mut Model, prompt: &str) -> Result<String> {
 fn main() -> Result<()> {
     let (device, dtype) = pick_device()?;
     let path = model_path();
-    let isq = std::env::var("CRANE_ISQ").ok().filter(|s| !s.trim().is_empty());
+    let isq = std::env::var("CRANE_ISQ")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     match &isq {
         Some(q) => eprintln!(
             "Loading Ornith-1.0-9B ({dtype:?}, ISQ={q}) from {path} … ~6 GB on GPU after q4k."

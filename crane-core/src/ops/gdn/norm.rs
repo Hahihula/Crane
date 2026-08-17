@@ -29,7 +29,10 @@ impl RmsNormGated {
     /// Construct from an already-loaded weight (e.g. dequantized from GGUF).
     #[allow(clippy::cast_possible_truncation)]
     pub fn from_weight(weight: Tensor, eps: f64) -> Self {
-        Self { weight, eps: eps as f32 }
+        Self {
+            weight,
+            eps: eps as f32,
+        }
     }
 
     /// Forward pass. `x` and `gate` must share shape `[..., size]`.

@@ -74,9 +74,17 @@ impl Token2Wav {
         // `total_len = h.dim(1)` computation).
         let prompt_token_len = self.prompt.prompt_token.dim(1)?;
         let total_len = (prompt_token_len + token_ids.len()) * 2;
-        let noise = Tensor::randn(0f32, 1f32, (1, 80, total_len), &self.device)?.to_dtype(self.dtype)?;
+        let noise =
+            Tensor::randn(0f32, 1f32, (1, 80, total_len), &self.device)?.to_dtype(self.dtype)?;
 
-        let feat = self.flow.inference(&token, &self.prompt.prompt_token, &self.prompt.prompt_feat, &self.prompt.spk_emb, &noise, n_timesteps)?;
+        let feat = self.flow.inference(
+            &token,
+            &self.prompt.prompt_token,
+            &self.prompt.prompt_feat,
+            &self.prompt.spk_emb,
+            &noise,
+            n_timesteps,
+        )?;
         self.hift.forward(&feat)
     }
 

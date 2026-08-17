@@ -7,14 +7,14 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
     Json,
+    extract::State,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 
 use crate::openai_api::*;
-use crate::{make_error, AppState};
+use crate::{AppState, make_error};
 
 // ─────────────────────────────────────────────────────────────
 //  TTS Request Channel Structure
@@ -62,7 +62,7 @@ pub async fn speech(
                 "TTS model not loaded. Start the server with a TTS model to enable /v1/audio/speech.",
             );
             return (status, json).into_response();
-        }
+        },
     };
 
     if req.input.trim().is_empty() {
@@ -71,14 +71,14 @@ pub async fn speech(
     }
 
     match req.response_format {
-        AudioResponseFormat::Wav | AudioResponseFormat::Pcm => {}
+        AudioResponseFormat::Wav | AudioResponseFormat::Pcm => {},
         _ => {
             let (status, json) = make_error(
                 StatusCode::BAD_REQUEST,
                 "Unsupported response_format. Currently supported: wav, pcm.",
             );
             return (status, json).into_response();
-        }
+        },
     }
 
     let temperature = req.temperature.unwrap_or(0.9);
@@ -112,34 +112,34 @@ pub async fn speech(
 
     // Wait for TTS result
     match rx.await {
-        Ok(Ok(result)) => {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, result.content_type)
-                .header(
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", result.file_name),
+        Ok(Ok(result)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, result.content_type)
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", result.file_name),
+            )
+            .body(axum::body::Body::from(result.audio_bytes))
+            .unwrap_or_else(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build response",
                 )
-                .body(axum::body::Body::from(result.audio_bytes))
-                .unwrap_or_else(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to build response",
-                    )
-                        .into_response()
-                })
-        }
+                    .into_response()
+            }),
         Ok(Err(err)) => {
-            let (status, json) =
-                make_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("TTS generation failed: {err}"));
+            let (status, json) = make_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("TTS generation failed: {err}"),
+            );
             (status, json).into_response()
-        }
+        },
         Err(_) => {
             let (status, json) = make_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "TTS engine did not respond.",
             );
             (status, json).into_response()
-        }
+        },
     }
 }

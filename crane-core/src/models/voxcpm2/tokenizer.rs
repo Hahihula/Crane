@@ -42,7 +42,9 @@ fn is_cjk(c: char) -> bool {
 
 fn is_multichar_cjk(s: &str) -> bool {
     let mut chars = s.chars();
-    let Some(first) = chars.next() else { return false };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !is_cjk(first) {
         return false;
     }
@@ -69,7 +71,9 @@ impl VoxCpm2Tokenizer {
     }
 
     pub fn from_file(path: &str) -> Result<Self> {
-        let inner = Tokenizer::from_file(path).map_err(anyhow::Error::msg).with_context(|| format!("load tokenizer from {path}"))?;
+        let inner = Tokenizer::from_file(path)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("load tokenizer from {path}"))?;
         Ok(Self::new(inner))
     }
 
@@ -77,8 +81,11 @@ impl VoxCpm2Tokenizer {
         let vocab = tok.get_vocab(true);
 
         // Step 1: raw (unstripped) vocab strings that already qualify.
-        let multichar_tokens: HashSet<&str> =
-            vocab.keys().filter(|t| is_multichar_cjk(t)).map(String::as_str).collect();
+        let multichar_tokens: HashSet<&str> = vocab
+            .keys()
+            .filter(|t| is_multichar_cjk(t))
+            .map(String::as_str)
+            .collect();
 
         // Step 2: every vocab entry, stripped, checked against that set.
         let mut split_map = HashMap::new();
@@ -92,7 +99,9 @@ impl VoxCpm2Tokenizer {
                 .map(|c| {
                     let mut buf = [0u8; 4];
                     let s = c.encode_utf8(&mut buf);
-                    tok.token_to_id(s).or_else(|| tok.token_to_id("<unk>")).unwrap_or(id)
+                    tok.token_to_id(s)
+                        .or_else(|| tok.token_to_id("<unk>"))
+                        .unwrap_or(id)
                 })
                 .collect();
             split_map.insert(id, expansion);
@@ -118,7 +127,9 @@ impl VoxCpm2Tokenizer {
     }
 
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
-        self.inner.decode(ids, skip_special_tokens).map_err(anyhow::Error::msg)
+        self.inner
+            .decode(ids, skip_special_tokens)
+            .map_err(anyhow::Error::msg)
     }
 
     pub fn token_to_id(&self, token: &str) -> Option<u32> {

@@ -25,21 +25,31 @@ use crate::models::g2p::numeral_expand::NumeralWords;
 /// Bound forms of the digits 1-9, used everywhere except when `1` stands
 /// entirely alone (see [`GermanNumerals`]'s module docs). Index 0 is unused
 /// (never indexed with a zero digit by callers).
-const ONES_BOUND: [&str; 10] =
-    ["", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun"];
+const ONES_BOUND: [&str; 10] = [
+    "", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun",
+];
 
 /// Words for 10-19, including the irregular contractions `sechzehn` (not
 /// `sechszehn`) and `siebzehn` (not `siebenzehn`).
 const TEENS: [&str; 10] = [
-    "zehn", "elf", "zwölf", "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn",
-    "achtzehn", "neunzehn",
+    "zehn",
+    "elf",
+    "zwölf",
+    "dreizehn",
+    "vierzehn",
+    "fünfzehn",
+    "sechzehn",
+    "siebzehn",
+    "achtzehn",
+    "neunzehn",
 ];
 
 /// Words for the tens digit (index 2-9), including the irregular contractions
 /// `dreißig`, `sechzig`, `siebzig`; indices 0-1 are unused since values under
 /// 20 are handled directly by [`ONES_BOUND`]/[`TEENS`].
-const TENS: [&str; 10] =
-    ["", "", "zwanzig", "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig", "neunzig"];
+const TENS: [&str; 10] = [
+    "", "", "zwanzig", "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig", "neunzig",
+];
 
 /// Singular/plural noun forms for each group of three digits from the
 /// million upward, least significant first. `tausend` (the first scale
@@ -93,7 +103,7 @@ impl NumeralWords for GermanNumerals {
                     } else {
                         format!("{} {plural}", three_digit_words(group, false))
                     }
-                }
+                },
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -137,7 +147,11 @@ fn two_digit_words(n: u32, standalone_one: bool) -> String {
     }
     let tens = TENS[(n / 10) as usize];
     let ones = n % 10;
-    if ones == 0 { tens.to_string() } else { format!("{}und{tens}", ONES_BOUND[ones as usize]) }
+    if ones == 0 {
+        tens.to_string()
+    } else {
+        format!("{}und{tens}", ONES_BOUND[ones as usize])
+    }
 }
 
 #[cfg(test)]
@@ -227,7 +241,10 @@ mod tests {
     // Verifies a year-style four-digit number spells out every group.
     #[test]
     fn year_style_number() {
-        assert_eq!(GermanNumerals.cardinal(1891), "ein tausend achthundert einundneunzig");
+        assert_eq!(
+            GermanNumerals.cardinal(1891),
+            "ein tausend achthundert einundneunzig"
+        );
     }
 
     // Verifies a middle thousands group is fully spelled out, not skipped,
@@ -254,7 +271,10 @@ mod tests {
     // groups are zero, by spanning millions, thousands, and ones.
     #[test]
     fn multi_group_with_gaps() {
-        assert_eq!(GermanNumerals.cardinal(1_002_003), "eine Million zwei tausend drei");
+        assert_eq!(
+            GermanNumerals.cardinal(1_002_003),
+            "eine Million zwei tausend drei"
+        );
     }
 
     // Verifies a bare-1 remainder before "tausend" uses the bound "ein" form,
@@ -270,7 +290,10 @@ mod tests {
     // "eine" article (which only applies when the whole group is exactly 1).
     #[test]
     fn hundred_plus_one_before_million_scale_uses_bound_form() {
-        assert_eq!(GermanNumerals.cardinal(101_000_000), "einhundert ein Millionen");
+        assert_eq!(
+            GermanNumerals.cardinal(101_000_000),
+            "einhundert ein Millionen"
+        );
     }
 
     // Verifies the largest u64 value resolves without panicking and uses the

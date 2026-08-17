@@ -15,13 +15,13 @@
 //!   - `talker.code_predictor.*`  — code predictor sub-model
 
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{linear, linear_no_bias, Embedding, Linear, RmsNorm, VarBuilder};
+use candle_nn::{Embedding, Linear, RmsNorm, VarBuilder, linear, linear_no_bias};
 // TODO(candle-transformers-removal): Generation helpers only; see CANDLE_TRANSFORMERS.md.
-use candle_transformers::generation::LogitsProcessor;
 use crate::generation::SpeechOptions;
 use crate::models::modules::attention::{AttentionConfig, RopeMode};
 use crate::models::modules::rotary::RotaryEmbedding;
 use crate::models::modules::transformer::TransformerBlock;
+use candle_transformers::generation::LogitsProcessor;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -168,15 +168,33 @@ pub struct SpeakerEncoderConfig {
     #[serde(default = "default_speaker_sample_rate")]
     pub sample_rate: u32,
 }
-fn default_mel_dim() -> usize { 128 }
-fn default_enc_dim() -> usize { 1024 }
-fn default_enc_channels() -> Vec<usize> { vec![512, 512, 512, 512, 1536] }
-fn default_enc_kernel_sizes() -> Vec<usize> { vec![5, 3, 3, 3, 1] }
-fn default_enc_dilations() -> Vec<usize> { vec![1, 2, 3, 4, 1] }
-fn default_enc_attention_channels() -> usize { 128 }
-fn default_enc_res2net_scale() -> usize { 8 }
-fn default_enc_se_channels() -> usize { 128 }
-fn default_speaker_sample_rate() -> u32 { 24000 }
+fn default_mel_dim() -> usize {
+    128
+}
+fn default_enc_dim() -> usize {
+    1024
+}
+fn default_enc_channels() -> Vec<usize> {
+    vec![512, 512, 512, 512, 1536]
+}
+fn default_enc_kernel_sizes() -> Vec<usize> {
+    vec![5, 3, 3, 3, 1]
+}
+fn default_enc_dilations() -> Vec<usize> {
+    vec![1, 2, 3, 4, 1]
+}
+fn default_enc_attention_channels() -> usize {
+    128
+}
+fn default_enc_res2net_scale() -> usize {
+    8
+}
+fn default_enc_se_channels() -> usize {
+    128
+}
+fn default_speaker_sample_rate() -> u32 {
+    24000
+}
 
 impl Default for SpeakerEncoderConfig {
     fn default() -> Self {
@@ -309,7 +327,8 @@ impl CodePredictor {
                 model_vb.pp("layers").pp(i),
             )?);
         }
-        let norm = candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
+        let norm =
+            candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
 
         let mut lm_heads = Vec::with_capacity(n);
         for i in 0..n {
@@ -365,7 +384,10 @@ impl CodePredictor {
                 1 => x.unsqueeze(0)?.unsqueeze(0),
                 2 => x.unsqueeze(1),
                 3 => Ok(x.clone()),
-                n => candle_core::bail!("Unexpected hidden rank in code predictor: {n} ({:?})", x.dims()),
+                n => candle_core::bail!(
+                    "Unexpected hidden rank in code predictor: {n} ({:?})",
+                    x.dims()
+                ),
             }
         }
 
@@ -376,15 +398,14 @@ impl CodePredictor {
         // Sampling for code predictor (subtalker) — matches Python defaults:
         //   subtalker_dosample=True, subtalker_temperature=0.9,
         //   subtalker_top_k=50, subtalker_top_p=1.0
-        let mut logits_processor =
-            candle_transformers::generation::LogitsProcessor::from_sampling(
-                42,
-                candle_transformers::generation::Sampling::TopKThenTopP {
-                    k: 50,
-                    p: top_p.unwrap_or(1.0),
-                    temperature,
-                },
-            );
+        let mut logits_processor = candle_transformers::generation::LogitsProcessor::from_sampling(
+            42,
+            candle_transformers::generation::Sampling::TopKThenTopP {
+                k: 50,
+                p: top_p.unwrap_or(1.0),
+                temperature,
+            },
+        );
 
         // Build initial input: [talker_hidden, embed(first_code)]
         let first_embed = as_btd(&codec_embedding.forward(&Tensor::new(&[first_code], device)?)?)?;
@@ -419,23 +440,22 @@ impl CodePredictor {
         // Forward through layers
         let mut hidden_states = inputs_embeds;
         for layer in &mut self.layers {
-            hidden_states = layer.forward(&hidden_states, Some((&cos, &sin)), causal_mask.as_ref())?;
+            hidden_states =
+                layer.forward(&hidden_states, Some((&cos, &sin)), causal_mask.as_ref())?;
         }
         hidden_states = self.norm.forward(&hidden_states)?;
 
         // First head prediction (sampling)
-        let logits = self.lm_heads[0].forward(
-            &hidden_states.narrow(1, seq_len - 1, 1)?,
-        )?;
+        let logits = self.lm_heads[0].forward(&hidden_states.narrow(1, seq_len - 1, 1)?)?;
         let logits_f32 = logits.flatten_all()?.to_dtype(candle_core::DType::F32)?;
         let next_token = logits_processor.sample(&logits_f32)?;
         codes.push(next_token);
 
         // Remaining groups (sampling)
         for g in 1..n_groups {
-            let embed = as_btd(&self.codec_embeddings[g - 1].forward(
-                &Tensor::new(&[codes[g - 1]], device)?,
-            )?)?;
+            let embed = as_btd(
+                &self.codec_embeddings[g - 1].forward(&Tensor::new(&[codes[g - 1]], device)?)?,
+            )?;
             let embed = match &self.small_to_mtp_projection {
                 Some(proj) => proj.forward(&embed)?,
                 None => embed,
@@ -528,13 +548,11 @@ impl TalkerModel {
                 model_vb.pp("layers").pp(i),
             )?);
         }
-        let norm = candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
+        let norm =
+            candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
 
-        let codec_head = linear_no_bias(
-            config.hidden_size,
-            config.vocab_size,
-            vb.pp("codec_head"),
-        )?;
+        let codec_head =
+            linear_no_bias(config.hidden_size, config.vocab_size, vb.pp("codec_head"))?;
 
         let code_predictor = CodePredictor::new(
             &config.code_predictor_config,
@@ -685,10 +703,8 @@ impl TalkerModel {
         };
 
         // ── 7. Assemble prefill ────────────────────────────────────────
-        let talker_input_embed = Tensor::cat(
-            &[&role_embed, &codec_hidden, &first_text_and_bos],
-            1,
-        )?;
+        let talker_input_embed =
+            Tensor::cat(&[&role_embed, &codec_hidden, &first_text_and_bos], 1)?;
 
         // ── 8. Trailing text: text_proj(remaining) + tts_eos ───────────
         // In streaming mode, remaining text tokens are fed step-by-step
@@ -745,7 +761,7 @@ impl TalkerModel {
     /// Returns `(prefill_embeds, tts_pad_embed)`.
     pub fn build_voice_clone_prefill(
         &self,
-        spk_embed: &Tensor,           // [enc_dim] speaker x-vector
+        spk_embed: &Tensor, // [enc_dim] speaker x-vector
         language: &str,
         tts_bos_token_id: u32,
         tts_pad_token_id: u32,
@@ -791,13 +807,21 @@ impl TalkerModel {
         }
 
         let codec_prefix_tensor = Tensor::new(codec_prefix_ids.as_slice(), device)?;
-        let codec_prefix_embed = self.codec_embedding.forward(&codec_prefix_tensor)?.unsqueeze(0)?;
+        let codec_prefix_embed = self
+            .codec_embedding
+            .forward(&codec_prefix_tensor)?
+            .unsqueeze(0)?;
 
-        let speaker = spk_embed.reshape((1, 1, spk_embed.elem_count()))?
+        let speaker = spk_embed
+            .reshape((1, 1, spk_embed.elem_count()))?
             .to_dtype(codec_prefix_embed.dtype())?;
 
-        let codec_suffix_ids = Tensor::new(&[cfg.codec_pad_id as u32, cfg.codec_bos_id as u32], device)?;
-        let codec_suffix_embed = self.codec_embedding.forward(&codec_suffix_ids)?.unsqueeze(0)?;
+        let codec_suffix_ids =
+            Tensor::new(&[cfg.codec_pad_id as u32, cfg.codec_bos_id as u32], device)?;
+        let codec_suffix_embed = self
+            .codec_embedding
+            .forward(&codec_suffix_ids)?
+            .unsqueeze(0)?;
 
         // Full codec: [prefix, speaker, pad, bos]
         let codec_full = Tensor::cat(&[&codec_prefix_embed, &speaker, &codec_suffix_embed], 1)?;
@@ -957,13 +981,27 @@ struct ReflectConv1d {
 }
 
 impl ReflectConv1d {
-    fn new(in_c: usize, out_c: usize, kernel: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        in_c: usize,
+        out_c: usize,
+        kernel: usize,
+        dilation: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let total_pad = dilation * (kernel - 1);
         let pad_left = total_pad / 2;
         let pad_right = total_pad - pad_left;
-        let cfg = Conv1dConfig { padding: 0, dilation, ..Default::default() };
+        let cfg = Conv1dConfig {
+            padding: 0,
+            dilation,
+            ..Default::default()
+        };
         let conv = candle_nn::conv1d(in_c, out_c, kernel, cfg, vb)?;
-        Ok(Self { conv, pad_left, pad_right })
+        Ok(Self {
+            conv,
+            pad_left,
+            pad_right,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -978,8 +1016,16 @@ struct TdnnBlock {
 }
 
 impl TdnnBlock {
-    fn new(in_c: usize, out_c: usize, kernel: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self { conv: ReflectConv1d::new(in_c, out_c, kernel, dilation, vb.pp("conv"))? })
+    fn new(
+        in_c: usize,
+        out_c: usize,
+        kernel: usize,
+        dilation: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        Ok(Self {
+            conv: ReflectConv1d::new(in_c, out_c, kernel, dilation, vb.pp("conv"))?,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -994,12 +1040,25 @@ struct Res2NetBlock {
 }
 
 impl Res2NetBlock {
-    fn new(in_c: usize, out_c: usize, scale: usize, kernel: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        in_c: usize,
+        out_c: usize,
+        scale: usize,
+        kernel: usize,
+        dilation: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let ch = in_c / scale;
         let och = out_c / scale;
         let mut blocks = Vec::with_capacity(scale - 1);
         for i in 0..(scale - 1) {
-            blocks.push(TdnnBlock::new(ch, och, kernel, dilation, vb.pp("blocks").pp(i))?);
+            blocks.push(TdnnBlock::new(
+                ch,
+                och,
+                kernel,
+                dilation,
+                vb.pp("blocks").pp(i),
+            )?);
         }
         Ok(Self { blocks, scale })
     }
@@ -1020,7 +1079,9 @@ impl Res2NetBlock {
                 prev = Some(out.clone());
                 out
             };
-            if i > 0 { prev = Some(out.clone()); }
+            if i > 0 {
+                prev = Some(out.clone());
+            }
             outputs.push(out);
         }
         Tensor::cat(&outputs, 1)
@@ -1059,10 +1120,25 @@ struct SeRes2NetBlock {
 }
 
 impl SeRes2NetBlock {
-    fn new(in_c: usize, out_c: usize, scale: usize, se_c: usize, kernel: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        in_c: usize,
+        out_c: usize,
+        scale: usize,
+        se_c: usize,
+        kernel: usize,
+        dilation: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
             tdnn1: TdnnBlock::new(in_c, out_c, 1, 1, vb.pp("tdnn1"))?,
-            res2net: Res2NetBlock::new(out_c, out_c, scale, kernel, dilation, vb.pp("res2net_block"))?,
+            res2net: Res2NetBlock::new(
+                out_c,
+                out_c,
+                scale,
+                kernel,
+                dilation,
+                vb.pp("res2net_block"),
+            )?,
             tdnn2: TdnnBlock::new(out_c, out_c, 1, 1, vb.pp("tdnn2"))?,
             se: SeBlock::new(out_c, se_c, out_c, vb.pp("se_block"))?,
         })
@@ -1087,14 +1163,20 @@ impl AttentiveStatisticsPooling {
     fn new(channels: usize, attn_channels: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             tdnn: TdnnBlock::new(channels * 3, attn_channels, 1, 1, vb.pp("tdnn"))?,
-            conv: candle_nn::conv1d(attn_channels, channels, 1, Conv1dConfig::default(), vb.pp("conv"))?,
+            conv: candle_nn::conv1d(
+                attn_channels,
+                channels,
+                1,
+                Conv1dConfig::default(),
+                vb.pp("conv"),
+            )?,
         })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (b, c, t) = x.dims3()?;
         // Global statistics
-        let mean = x.mean(2)?.unsqueeze(2)?;        // [B, C, 1]
+        let mean = x.mean(2)?.unsqueeze(2)?; // [B, C, 1]
         let diff = x.broadcast_sub(&mean)?;
         let var = diff.sqr()?.mean(2)?.unsqueeze(2)?; // [B, C, 1]
         let std = (var + 1e-5)?.sqrt()?;
@@ -1182,10 +1264,25 @@ impl SpeakerEncoder {
             vb.pp("mfa"),
         )?;
 
-        let asp = AttentiveStatisticsPooling::new(cfg.enc_channels[n - 1], cfg.enc_attention_channels, vb.pp("asp"))?;
-        let fc = candle_nn::conv1d(cfg.enc_channels[n - 1] * 2, cfg.enc_dim, 1, Conv1dConfig::default(), vb.pp("fc"))?;
+        let asp = AttentiveStatisticsPooling::new(
+            cfg.enc_channels[n - 1],
+            cfg.enc_attention_channels,
+            vb.pp("asp"),
+        )?;
+        let fc = candle_nn::conv1d(
+            cfg.enc_channels[n - 1] * 2,
+            cfg.enc_dim,
+            1,
+            Conv1dConfig::default(),
+            vb.pp("fc"),
+        )?;
 
-        Ok(Self { blocks, mfa, asp, fc })
+        Ok(Self {
+            blocks,
+            mfa,
+            asp,
+            fc,
+        })
     }
 
     /// Forward: input mel `[B, n_mels, T]` → speaker embedding `[B, enc_dim]`.
@@ -1270,7 +1367,7 @@ impl Qwen3TTSModel {
                 Err(e) => {
                     eprintln!("Warning: failed to load speaker_encoder weights: {e}");
                     None
-                }
+                },
             }
         } else {
             None
@@ -1307,7 +1404,12 @@ impl Qwen3TTSModel {
     /// Shape: `[1, 1, seq_len, offset + seq_len]`.
     /// New token i can attend to all positions 0..(offset + i), but not future positions.
     #[allow(dead_code)]
-    fn build_causal_mask_with_offset(seq_len: usize, offset: usize, device: &Device, dtype: DType) -> Result<Tensor> {
+    fn build_causal_mask_with_offset(
+        seq_len: usize,
+        offset: usize,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Tensor> {
         let full_len = offset + seq_len;
         let mut mask_data = vec![0f32; seq_len * full_len];
         for i in 0..seq_len {
@@ -1350,21 +1452,20 @@ impl Qwen3TTSModel {
         let causal_mask = Self::build_causal_mask(prefill_len, &self.device, self.dtype)?;
 
         // Prefill with causal mask, positions start at 0
-        let hidden_states =
-            self.talker
-                .forward_embeds(&prefill_embeds, Some(&causal_mask), 0)?;
+        let hidden_states = self
+            .talker
+            .forward_embeds(&prefill_embeds, Some(&causal_mask), 0)?;
 
         let eos_token_id = self.config.talker_config.codec_eos_token_id as u32;
         let mut all_codes = Vec::new();
-        let mut logits_processor =
-            candle_transformers::generation::LogitsProcessor::from_sampling(
-                42,
-                candle_transformers::generation::Sampling::TopKThenTopP {
-                    k: 50,
-                    p: opts.top_p.unwrap_or(1.0),
-                    temperature: opts.temperature,
-                },
-            );
+        let mut logits_processor = candle_transformers::generation::LogitsProcessor::from_sampling(
+            42,
+            candle_transformers::generation::Sampling::TopKThenTopP {
+                k: 50,
+                p: opts.top_p.unwrap_or(1.0),
+                temperature: opts.temperature,
+            },
+        );
 
         // Build suppress_tokens mask as a GPU tensor: suppress [vocab_size-1024, vocab_size) except EOS.
         // 0.0 for allowed, -inf for suppressed.
@@ -1390,8 +1491,11 @@ impl Qwen3TTSModel {
 
         for step in 0..opts.max_new_tokens {
             // Predict first codebook token
-            let logits = self.talker.predict_first_code(&past_hidden)?
-                .squeeze(0)?.squeeze(0)?
+            let logits = self
+                .talker
+                .predict_first_code(&past_hidden)?
+                .squeeze(0)?
+                .squeeze(0)?
                 .to_dtype(DType::F32)?;
 
             // Apply repetition penalty
@@ -1436,13 +1540,13 @@ impl Qwen3TTSModel {
 
             // Build next step input embedding
             // Sum all codebook embeddings for this frame
-            let mut sum_embed = self.talker.codec_embedding.forward(
-                &Tensor::new(&[first_code], &self.device)?,
-            )?;
+            let mut sum_embed = self
+                .talker
+                .codec_embedding
+                .forward(&Tensor::new(&[first_code], &self.device)?)?;
             for (i, &code) in frame_codes[1..].iter().enumerate() {
-                let embed = self.talker.code_predictor.codec_embeddings[i].forward(
-                    &Tensor::new(&[code], &self.device)?,
-                )?;
+                let embed = self.talker.code_predictor.codec_embeddings[i]
+                    .forward(&Tensor::new(&[code], &self.device)?)?;
                 sum_embed = (sum_embed + embed)?;
             }
 
@@ -1460,7 +1564,10 @@ impl Qwen3TTSModel {
             past_hidden = hs.narrow(1, hs.dim(1)? - 1, 1)?;
         }
 
-        if std::env::var("CRANE_TTS_DEBUG").map(|v| v == "1" || v == "true").unwrap_or(false) {
+        if std::env::var("CRANE_TTS_DEBUG")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
+        {
             eprintln!(
                 "[CRANE_TTS_DEBUG] generate_speech_codes: generated {} frames, max_new_tokens={}, \
                  trailing_text_len={}, top_p={}, temperature={}, repetition_penalty={}",
@@ -1472,16 +1579,10 @@ impl Qwen3TTSModel {
                 opts.repetition_penalty,
             );
             if let Some(first_frame) = all_codes.first() {
-                eprintln!(
-                    "[CRANE_TTS_DEBUG]   first frame codes: {:?}",
-                    first_frame
-                );
+                eprintln!("[CRANE_TTS_DEBUG]   first frame codes: {:?}", first_frame);
             }
             if let Some(last_frame) = all_codes.last() {
-                eprintln!(
-                    "[CRANE_TTS_DEBUG]   last frame codes: {:?}",
-                    last_frame
-                );
+                eprintln!("[CRANE_TTS_DEBUG]   last frame codes: {:?}", last_frame);
             }
         }
 
@@ -1517,8 +1618,9 @@ impl Qwen3TTSModel {
 
         let prefill_len = prefill_embeds.dim(1)?;
         let causal_mask = Self::build_causal_mask(prefill_len, &self.device, self.dtype)?;
-        let hidden_states =
-            self.talker.forward_embeds(&prefill_embeds, Some(&causal_mask), 0)?;
+        let hidden_states = self
+            .talker
+            .forward_embeds(&prefill_embeds, Some(&causal_mask), 0)?;
 
         let eos_token_id = self.config.talker_config.codec_eos_token_id as u32;
         let logits_processor = LogitsProcessor::from_sampling(
@@ -1579,8 +1681,11 @@ impl Qwen3TTSModel {
     ) -> Result<Option<Vec<u32>>> {
         let step = state.step;
 
-        let logits = self.talker.predict_first_code(&state.past_hidden)?
-            .squeeze(0)?.squeeze(0)?
+        let logits = self
+            .talker
+            .predict_first_code(&state.past_hidden)?
+            .squeeze(0)?
+            .squeeze(0)?
             .to_dtype(DType::F32)?;
 
         let logits = if state.repetition_penalty != 1.0 && !all_codes.is_empty() {
@@ -1618,13 +1723,13 @@ impl Qwen3TTSModel {
         let mut frame_codes = vec![first_code];
         frame_codes.extend(remaining_codes);
 
-        let mut sum_embed = self.talker.codec_embedding.forward(
-            &Tensor::new(&[first_code], &self.device)?,
-        )?;
+        let mut sum_embed = self
+            .talker
+            .codec_embedding
+            .forward(&Tensor::new(&[first_code], &self.device)?)?;
         for (i, &code) in frame_codes[1..].iter().enumerate() {
-            let embed = self.talker.code_predictor.codec_embeddings[i].forward(
-                &Tensor::new(&[code], &self.device)?,
-            )?;
+            let embed = self.talker.code_predictor.codec_embeddings[i]
+                .forward(&Tensor::new(&[code], &self.device)?)?;
             sum_embed = (sum_embed + embed)?;
         }
 
@@ -1676,27 +1781,29 @@ impl Qwen3TTSModel {
         const ICL_MIN_FRAMES: usize = 75;
         const ICL_FRAMES_PER_TOKEN: usize = 6;
         let repetition_penalty = opts.repetition_penalty.max(ICL_MIN_REP_PENALTY);
-        let max_new_tokens = opts.max_new_tokens
+        let max_new_tokens = opts
+            .max_new_tokens
             .min(ICL_MIN_FRAMES.max(text_token_ids.len() * ICL_FRAMES_PER_TOKEN));
 
         // ── Phase 1: Build prefill (9 positions) ───────────────────────
-        let (prefill_embeds, tts_pad_embed) =
-            self.talker.build_voice_clone_prefill(
-                spk_embed,
-                language,
-                self.config.tts_bos_token_id,
-                self.config.tts_pad_token_id,
-                &self.device,
-                self.dtype,
-            )?;
+        let (prefill_embeds, tts_pad_embed) = self.talker.build_voice_clone_prefill(
+            spk_embed,
+            language,
+            self.config.tts_bos_token_id,
+            self.config.tts_pad_token_id,
+            &self.device,
+            self.dtype,
+        )?;
 
         // ── Phase 2: Build ICL prompt ──────────────────────────────────
         // Sum reference codec embeddings across all codebook groups
         let ref_codes_u32 = ref_codes.to_dtype(DType::U32)?;
         let num_groups = ref_codes.dim(1)?;
-        let mut ref_codec_sum = self.talker.codec_embedding.forward(
-            &ref_codes_u32.narrow(1, 0, 1)?.squeeze(1)?.contiguous()?
-        )?.unsqueeze(0)?; // [1, T_ref, D]
+        let mut ref_codec_sum = self
+            .talker
+            .codec_embedding
+            .forward(&ref_codes_u32.narrow(1, 0, 1)?.squeeze(1)?.contiguous()?)?
+            .unsqueeze(0)?; // [1, T_ref, D]
         for g in 1..num_groups {
             let g_codes = ref_codes_u32.narrow(1, g, 1)?.squeeze(1)?.contiguous()?;
             let g_embed = if g - 1 < self.talker.code_predictor.codec_embeddings.len() {
@@ -1732,12 +1839,22 @@ impl Qwen3TTSModel {
         let combined_embeds = Tensor::cat(&[&prefill_embeds, &icl_embed], 1)?;
         let combined_len = combined_embeds.dim(1)?;
         let causal_mask = Self::build_causal_mask(combined_len, &self.device, self.dtype)?;
-        let hidden_states = self.talker.forward_embeds(&combined_embeds, Some(&causal_mask), 0)?;
+        let hidden_states = self
+            .talker
+            .forward_embeds(&combined_embeds, Some(&causal_mask), 0)?;
         let offset = combined_len;
         let mut past_hidden = hidden_states.narrow(1, hidden_states.dim(1)? - 1, 1)?;
 
-        if std::env::var("CRANE_TTS_DEBUG").map(|v| v == "1" || v == "true").unwrap_or(false) {
-            let h_norm: f32 = past_hidden.to_dtype(DType::F32)?.sqr()?.sum_all()?.sqrt()?.to_scalar()?;
+        if std::env::var("CRANE_TTS_DEBUG")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
+        {
+            let h_norm: f32 = past_hidden
+                .to_dtype(DType::F32)?
+                .sqr()?
+                .sum_all()?
+                .sqrt()?
+                .to_scalar()?;
             eprintln!(
                 "[CRANE_TTS_DEBUG] combined prefill: len={}, last_hidden_norm={:.4}",
                 combined_len, h_norm,
@@ -1747,15 +1864,14 @@ impl Qwen3TTSModel {
         // ── Phase 3: Autoregressive generation ─────────────────────────
         let eos_token_id = self.config.talker_config.codec_eos_token_id as u32;
         let mut all_codes = Vec::new();
-        let mut logits_processor =
-            candle_transformers::generation::LogitsProcessor::from_sampling(
-                42,
-                candle_transformers::generation::Sampling::TopKThenTopP {
-                    k: 50,
-                    p: opts.top_p.unwrap_or(1.0),
-                    temperature: opts.temperature,
-                },
-            );
+        let mut logits_processor = candle_transformers::generation::LogitsProcessor::from_sampling(
+            42,
+            candle_transformers::generation::Sampling::TopKThenTopP {
+                k: 50,
+                p: opts.top_p.unwrap_or(1.0),
+                temperature: opts.temperature,
+            },
+        );
 
         let vocab_size = self.config.talker_config.vocab_size;
         let suppress_start = vocab_size.saturating_sub(1024);
@@ -1775,20 +1891,35 @@ impl Qwen3TTSModel {
         let mut penalty_seen = vec![false; vocab_size];
 
         let trailing_len = trailing_text_hidden.dim(1)?;
-        let tts_debug = std::env::var("CRANE_TTS_DEBUG").map(|v| v == "1" || v == "true").unwrap_or(false);
+        let tts_debug = std::env::var("CRANE_TTS_DEBUG")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
 
         if tts_debug {
             eprintln!(
                 "[CRANE_TTS_DEBUG] voice_clone gen starting: eos_token_id={}, vocab_size={}, \
                  suppress_start={}, offset={}, trailing_len={}, max_new_tokens={}, rep_penalty={:.2}, icl_mode={}",
-                eos_token_id, vocab_size, suppress_start, offset, trailing_len, max_new_tokens, repetition_penalty,
-                if use_non_streaming_icl { "non_streaming" } else { "streaming" },
+                eos_token_id,
+                vocab_size,
+                suppress_start,
+                offset,
+                trailing_len,
+                max_new_tokens,
+                repetition_penalty,
+                if use_non_streaming_icl {
+                    "non_streaming"
+                } else {
+                    "streaming"
+                },
             );
         }
 
         for step in 0..max_new_tokens {
-            let logits = self.talker.predict_first_code(&past_hidden)?
-                .squeeze(0)?.squeeze(0)?
+            let logits = self
+                .talker
+                .predict_first_code(&past_hidden)?
+                .squeeze(0)?
+                .squeeze(0)?
                 .to_dtype(DType::F32)?;
 
             // Apply repetition penalty (GPU-side, matching HuggingFace/vendor semantics):
@@ -1820,14 +1951,22 @@ impl Qwen3TTSModel {
             // Diagnostic: log EOS logit and top-5 values for select steps
             if tts_debug && (step < 5 || step % 500 == 0 || step == max_new_tokens - 1) {
                 let logits_vec: Vec<f32> = logits.to_vec1()?;
-                let eos_logit = logits_vec.get(eos_token_id as usize).copied().unwrap_or(f32::NAN);
-                let mut indexed: Vec<(usize, f32)> = logits_vec.iter().copied().enumerate().collect();
+                let eos_logit = logits_vec
+                    .get(eos_token_id as usize)
+                    .copied()
+                    .unwrap_or(f32::NAN);
+                let mut indexed: Vec<(usize, f32)> =
+                    logits_vec.iter().copied().enumerate().collect();
                 indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 let top5: Vec<(usize, f32)> = indexed.iter().take(5).copied().collect();
-                let eos_rank = indexed.iter().position(|(i, _)| *i == eos_token_id as usize).unwrap_or(9999);
+                let eos_rank = indexed
+                    .iter()
+                    .position(|(i, _)| *i == eos_token_id as usize)
+                    .unwrap_or(9999);
                 eprintln!(
                     "[CRANE_TTS_DEBUG] step={step}: eos_logit={eos_logit:.3} eos_rank={eos_rank} \
-                     top5={:?} trailing={}", top5,
+                     top5={:?} trailing={}",
+                    top5,
                     if step < trailing_len { "text" } else { "pad" },
                 );
             }
@@ -1856,13 +1995,13 @@ impl Qwen3TTSModel {
             frame_codes.extend(remaining_codes);
             all_codes.push(frame_codes.clone());
 
-            let mut sum_embed = self.talker.codec_embedding.forward(
-                &Tensor::new(&[first_code], &self.device)?,
-            )?;
+            let mut sum_embed = self
+                .talker
+                .codec_embedding
+                .forward(&Tensor::new(&[first_code], &self.device)?)?;
             for (i, &code) in frame_codes[1..].iter().enumerate() {
-                let embed = self.talker.code_predictor.codec_embeddings[i].forward(
-                    &Tensor::new(&[code], &self.device)?,
-                )?;
+                let embed = self.talker.code_predictor.codec_embeddings[i]
+                    .forward(&Tensor::new(&[code], &self.device)?)?;
                 sum_embed = (sum_embed + embed)?;
             }
 
@@ -1879,8 +2018,18 @@ impl Qwen3TTSModel {
 
             // Diagnostic: hidden state norm at select steps
             if tts_debug && (step < 5 || step % 100 == 0 || step == max_new_tokens - 1) {
-                let h_norm: f32 = past_hidden.to_dtype(DType::F32)?.sqr()?.sum_all()?.sqrt()?.to_scalar()?;
-                let inp_norm: f32 = next_input.to_dtype(DType::F32)?.sqr()?.sum_all()?.sqrt()?.to_scalar()?;
+                let h_norm: f32 = past_hidden
+                    .to_dtype(DType::F32)?
+                    .sqr()?
+                    .sum_all()?
+                    .sqrt()?
+                    .to_scalar()?;
+                let inp_norm: f32 = next_input
+                    .to_dtype(DType::F32)?
+                    .sqr()?
+                    .sum_all()?
+                    .sqrt()?
+                    .to_scalar()?;
                 eprintln!(
                     "[CRANE_TTS_DEBUG] step={step}: hidden_norm={h_norm:.4} input_norm={inp_norm:.4} code={first_code}",
                 );

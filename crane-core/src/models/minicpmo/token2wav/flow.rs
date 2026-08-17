@@ -11,7 +11,7 @@
 //! elsewhere in this module).
 
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{embedding, linear, Embedding, Linear, VarBuilder};
+use candle_nn::{Embedding, Linear, VarBuilder, embedding, linear};
 
 use super::cfm::solve_euler;
 use super::conformer::UpsampleConformerEncoderV2;
@@ -54,7 +54,8 @@ impl Flow {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], dtype, device) }?;
 
         let input_embedding = embedding(VOCAB_SIZE, INPUT_SIZE, vb.pp("input_embedding"))?;
-        let spk_embed_affine_layer = linear(SPK_EMBED_DIM, OUTPUT_SIZE, vb.pp("spk_embed_affine_layer"))?;
+        let spk_embed_affine_layer =
+            linear(SPK_EMBED_DIM, OUTPUT_SIZE, vb.pp("spk_embed_affine_layer"))?;
         let encoder = UpsampleConformerEncoderV2::new(
             INPUT_SIZE,
             INPUT_SIZE,
@@ -79,7 +80,15 @@ impl Flow {
             vb.pp("decoder").pp("estimator"),
         )?;
 
-        Ok(Self { input_embedding, spk_embed_affine_layer, encoder, encoder_proj, estimator, device: device.clone(), dtype })
+        Ok(Self {
+            input_embedding,
+            spk_embed_affine_layer,
+            encoder,
+            encoder_proj,
+            estimator,
+            device: device.clone(),
+            dtype,
+        })
     }
 
     /// `token`: `[1, gen_len]` generated speech-token ids (i64). `prompt_token`:
@@ -110,7 +119,10 @@ impl Flow {
         let embedding = self.spk_embed_affine_layer.forward(&embedding)?; // [1, 80]
 
         let combined = Tensor::cat(&[prompt_token, token], 1)?; // [1, prompt_len+gen_len]
-        let combined_embeds = self.input_embedding.forward(&combined)?.to_dtype(self.dtype)?; // [1, T, 512]
+        let combined_embeds = self
+            .input_embedding
+            .forward(&combined)?
+            .to_dtype(self.dtype)?; // [1, T, 512]
 
         let h = self.encoder.forward(&combined_embeds)?; // [1, T*2, 512]
         let h = self.encoder_proj.forward(&h)?; // [1, T*2, 80]
@@ -120,14 +132,24 @@ impl Flow {
         let mel_len2 = total_len - mel_len1;
 
         let mut conds = vec![0f32; total_len * OUTPUT_SIZE];
-        let prompt_feat_flat: Vec<f32> = prompt_feat.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let prompt_feat_flat: Vec<f32> =
+            prompt_feat.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
         conds[..mel_len1 * OUTPUT_SIZE].copy_from_slice(&prompt_feat_flat);
-        let conds = Tensor::from_vec(conds, (1, total_len, OUTPUT_SIZE), &self.device)?.to_dtype(self.dtype)?;
+        let conds = Tensor::from_vec(conds, (1, total_len, OUTPUT_SIZE), &self.device)?
+            .to_dtype(self.dtype)?;
         let conds = conds.transpose(1, 2)?.contiguous()?; // [1, 80, T]
 
         let mu = h.transpose(1, 2)?.contiguous()?; // [1, 80, T]
 
-        let feat = solve_euler(&self.estimator, noise, &mu, &embedding, &conds, n_timesteps, INFERENCE_CFG_RATE)?;
+        let feat = solve_euler(
+            &self.estimator,
+            noise,
+            &mu,
+            &embedding,
+            &conds,
+            n_timesteps,
+            INFERENCE_CFG_RATE,
+        )?;
         let feat = feat.narrow(2, mel_len1, mel_len2)?;
         Ok(feat)
     }
@@ -165,36 +187,83 @@ mod hf_diff {
         let dtype = DType::F32;
 
         let flow = Flow::new(model_path, &device, dtype).expect("load flow");
-        let prompt = SystemDefaultPrompt::load(model_path, &device, dtype).expect("load system default prompt");
+        let prompt = SystemDefaultPrompt::load(model_path, &device, dtype)
+            .expect("load system default prompt");
 
-        let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{diff_dir}/flow_meta.json")).unwrap()).unwrap();
-        let gen_tokens: Vec<i64> = meta["gen_tokens"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{diff_dir}/flow_meta.json")).unwrap(),
+        )
+        .unwrap();
+        let gen_tokens: Vec<i64> = meta["gen_tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
         let token = Tensor::from_vec(gen_tokens.clone(), (1, gen_tokens.len()), &device).unwrap();
 
-        let noise_shape: Vec<usize> = meta["noise_shape"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let noise_shape: Vec<usize> = meta["noise_shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         let noise_bytes = std::fs::read(format!("{diff_dir}/flow_noise.bin")).unwrap();
-        let noise_flat: Vec<f32> = noise_bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let noise_flat: Vec<f32> = noise_bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
         let noise = Tensor::from_vec(noise_flat, noise_shape.as_slice(), &device).unwrap();
 
         let n_timesteps = meta["n_timesteps"].as_u64().unwrap() as usize;
         let feat = flow
-            .inference(&token, &prompt.prompt_token, &prompt.prompt_feat, &prompt.spk_emb, &noise, n_timesteps)
+            .inference(
+                &token,
+                &prompt.prompt_token,
+                &prompt.prompt_feat,
+                &prompt.spk_emb,
+                &noise,
+                n_timesteps,
+            )
             .expect("flow inference");
 
-        let expected_shape: Vec<usize> = meta["feat_shape"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let expected_shape: Vec<usize> = meta["feat_shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         assert_eq!(feat.dims(), expected_shape.as_slice());
 
         let rust_flat: Vec<f32> = feat.flatten_all().unwrap().to_vec1().unwrap();
         let py_bytes = std::fs::read(format!("{diff_dir}/flow_feat.bin")).unwrap();
-        let py_flat: Vec<f32> = py_bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let py_flat: Vec<f32> = py_bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
         assert_eq!(rust_flat.len(), py_flat.len());
 
-        let dot: f64 = rust_flat.iter().zip(&py_flat).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-        let norm_a: f64 = rust_flat.iter().map(|a| f64::from(*a) * f64::from(*a)).sum::<f64>().sqrt();
-        let norm_b: f64 = py_flat.iter().map(|b| f64::from(*b) * f64::from(*b)).sum::<f64>().sqrt();
+        let dot: f64 = rust_flat
+            .iter()
+            .zip(&py_flat)
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum();
+        let norm_a: f64 = rust_flat
+            .iter()
+            .map(|a| f64::from(*a) * f64::from(*a))
+            .sum::<f64>()
+            .sqrt();
+        let norm_b: f64 = py_flat
+            .iter()
+            .map(|b| f64::from(*b) * f64::from(*b))
+            .sum::<f64>()
+            .sqrt();
         let cosine = dot / (norm_a * norm_b);
-        let max_abs_diff = rust_flat.iter().zip(&py_flat).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let max_abs_diff = rust_flat
+            .iter()
+            .zip(&py_flat)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
 
         println!("cosine similarity: {cosine}, max abs diff: {max_abs_diff}");
         assert!(cosine > 0.99, "cosine similarity too low: {cosine}");

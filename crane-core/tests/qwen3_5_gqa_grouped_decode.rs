@@ -16,13 +16,12 @@
 //!     --test qwen3_5_gqa_grouped_decode -- --ignored --nocapture --test-threads=1
 //! ```
 
-use candle_core::{DType, Device, Tensor, D};
-use crane_core::generation::based::ModelForCausalLM;
+use candle_core::{D, DType, Device, Tensor};
 use crane_core::generation::GenerationConfig;
+use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::{Model, ModelFormat};
 
-const PROMPT: &str =
-    "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
+const PROMPT: &str = "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
 const MAX_NEW_TOKENS: usize = 48;
 
 fn device() -> Device {
@@ -76,7 +75,10 @@ fn grouped_decode_matches_expansion_math() -> candle_core::Result<()> {
     println!("grouped vs expansion, max|Δ| = {max_abs:.3e}");
     // Same operations in a different association order; only float reassociation
     // should separate them.
-    assert!(max_abs < 1e-4, "grouped decode diverged from expansion: {max_abs:e}");
+    assert!(
+        max_abs < 1e-4,
+        "grouped decode diverged from expansion: {max_abs:e}"
+    );
     Ok(())
 }
 
@@ -96,7 +98,9 @@ fn regroup_preserves_head_order() -> candle_core::Result<()> {
         .collect();
     let x = Tensor::from_vec(per_head.clone(), (b, heads, 1, d), &dev)?;
 
-    let regrouped = x.reshape((b, kv_heads, n_rep, d))?.reshape((b, 1, heads * d))?;
+    let regrouped = x
+        .reshape((b, kv_heads, n_rep, d))?
+        .reshape((b, 1, heads * d))?;
     let flat = regrouped.flatten_all()?.to_vec1::<f32>()?;
     assert_eq!(flat, per_head, "head order changed across the regroup");
     Ok(())

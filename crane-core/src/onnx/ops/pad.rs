@@ -98,7 +98,10 @@ pub(crate) fn pad(node: &NodeProto, data: &Tensor, pads: &Tensor, mode: &str) ->
 
             Ok(out)
         },
-        _ => bail!("unsupported 'mode' value {mode:?} for Pad node {:?}", node.name),
+        _ => bail!(
+            "unsupported 'mode' value {mode:?} for Pad node {:?}",
+            node.name
+        ),
     }
 }
 
@@ -144,11 +147,14 @@ mod tests {
 
         let y = pad(&node, &x, &pads, "edge")?;
 
-        assert_eq!(y.to_vec2::<f32>()?, vec![
-            vec![1.0, 2.0, 2.0],
-            vec![1.0, 2.0, 2.0],
-            vec![3.0, 4.0, 4.0],
-        ]);
+        assert_eq!(
+            y.to_vec2::<f32>()?,
+            vec![
+                vec![1.0, 2.0, 2.0],
+                vec![1.0, 2.0, 2.0],
+                vec![3.0, 4.0, 4.0],
+            ]
+        );
         Ok(())
     }
 

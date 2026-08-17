@@ -16,7 +16,11 @@ use crate::onnx::proto::NodeProto;
 /// ever runs on small shape-derived tensors, never a hot path. `axes` may
 /// come from the opset 18+ second input tensor or fall back to the legacy
 /// (opset <= 13) `axes` attribute.
-pub(crate) fn reduce_prod(node: &NodeProto, input: &Tensor, axes: Option<&Tensor>) -> Result<Tensor> {
+pub(crate) fn reduce_prod(
+    node: &NodeProto,
+    input: &Tensor,
+    axes: Option<&Tensor>,
+) -> Result<Tensor> {
     // TODO: Handle empty set
     // Definition: the identity for product is 1, so "reduction over an
     // empty set of values yields 1". For now, bail for consistency with
@@ -25,8 +29,9 @@ pub(crate) fn reduce_prod(node: &NodeProto, input: &Tensor, axes: Option<&Tensor
         bail!("reduction over zero-size tensor not supported");
     }
     let keepdims = get_attr_opt::<i64>(node, "keepdims")?.copied().unwrap_or(1);
-    let noop_with_empty_axes =
-        get_attr_opt::<i64>(node, "noop_with_empty_axes")?.copied().unwrap_or(0);
+    let noop_with_empty_axes = get_attr_opt::<i64>(node, "noop_with_empty_axes")?
+        .copied()
+        .unwrap_or(0);
 
     let raw_axes: Option<Vec<i64>> = match axes {
         Some(axes) => Some(axes.to_vec1::<i64>()?),
@@ -40,9 +45,10 @@ pub(crate) fn reduce_prod(node: &NodeProto, input: &Tensor, axes: Option<&Tensor
     // axes given at all, so `noop_with_empty_axes` still applies instead of
     // silently becoming a no-op.
     let mut axes = match raw_axes {
-        Some(ref axes) if !axes.is_empty() => {
-            axes.iter().map(|&a| input.normalize_axis(a)).collect::<Result<Vec<_>>>()?
-        },
+        Some(ref axes) if !axes.is_empty() => axes
+            .iter()
+            .map(|&a| input.normalize_axis(a))
+            .collect::<Result<Vec<_>>>()?,
         _ if noop_with_empty_axes == 1 => vec![],
         _ => (0..input.rank()).collect(),
     };
@@ -60,7 +66,11 @@ pub(crate) fn reduce_prod(node: &NodeProto, input: &Tensor, axes: Option<&Tensor
         for i in 1..n {
             acc = acc.broadcast_mul(&output.narrow(axis, i, 1)?)?;
         }
-        output = if keepdims == 1 { acc } else { acc.squeeze(axis)? };
+        output = if keepdims == 1 {
+            acc
+        } else {
+            acc.squeeze(axis)?
+        };
     }
 
     Ok(output)

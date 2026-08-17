@@ -10,7 +10,7 @@
 //! total token compression (`downsample_mode: "16x"`).
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{layer_norm, linear, Activation, LayerNorm, Linear, VarBuilder};
+use candle_nn::{Activation, LayerNorm, Linear, VarBuilder, layer_norm, linear};
 
 use super::config::Config;
 
@@ -24,7 +24,13 @@ impl DownsampleMlp {
     /// `in_hidden`: the (single-token, pre-concat) hidden size entering this
     /// round; the module concatenates a `merge_h*merge_w` neighborhood, so
     /// its actual input width is `in_hidden * merge_h * merge_w`.
-    fn new(in_hidden: usize, merge_h: usize, merge_w: usize, out_hidden: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        in_hidden: usize,
+        merge_h: usize,
+        merge_w: usize,
+        out_hidden: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let merged = in_hidden * merge_h * merge_w;
         Ok(Self {
             pre_norm: layer_norm(merged, 1e-6, vb.pp("pre_norm"))?,
@@ -61,7 +67,13 @@ impl Merger {
         let vb_mlp = vb.pp("mlp");
         let mut mlp = Vec::with_capacity(merger_times);
         for i in 0..merger_times - 1 {
-            mlp.push(DownsampleMlp::new(vision_hidden, merge_h, merge_w, vision_hidden, vb_mlp.pp(i))?);
+            mlp.push(DownsampleMlp::new(
+                vision_hidden,
+                merge_h,
+                merge_w,
+                vision_hidden,
+                vb_mlp.pp(i),
+            )?);
         }
         mlp.push(DownsampleMlp::new(
             vision_hidden,
@@ -71,7 +83,12 @@ impl Merger {
             vb_mlp.pp(merger_times - 1),
         )?);
 
-        Ok(Self { mlp, merge_h, merge_w, merger_times })
+        Ok(Self {
+            mlp,
+            merge_h,
+            merge_w,
+            merger_times,
+        })
     }
 
     /// `xs`: `[total_patches, vision_hidden]` (vision tower output, no batch

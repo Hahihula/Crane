@@ -236,7 +236,8 @@ fn greedy_argmax(logits: &[f32]) -> Result<i64> {
             best = Some((idx, score));
         }
     }
-    let (idx, _) = best.ok_or_else(|| anyhow::anyhow!("logits are empty or entirely non-finite"))?;
+    let (idx, _) =
+        best.ok_or_else(|| anyhow::anyhow!("logits are empty or entirely non-finite"))?;
     // `idx` is bounded by the phoneme vocab size (131 for the shipped
     // English model, always far under i64::MAX), so this cast never
     // truncates.
@@ -442,7 +443,10 @@ impl Model {
             // underlying data.
             let inputs = HashMap::from([
                 ("encoder_input_ids".to_string(), enc_ids_tensor.clone()),
-                ("encoder_attention_mask".to_string(), enc_mask_tensor.clone()),
+                (
+                    "encoder_attention_mask".to_string(),
+                    enc_mask_tensor.clone(),
+                ),
                 ("decoder_input_ids".to_string(), dec_ids_tensor),
                 ("decoder_attention_mask".to_string(), dec_mask_tensor),
             ]);
@@ -576,12 +580,20 @@ impl Model {
         // candidate generation, since that iterates over `beams[w]` itself
         // (length 1 at step 1), not over the fixed `beam_width` row slots.
         let mut beams: Vec<Vec<Beam>> = (0..num_words)
-            .map(|_| vec![Beam { tokens: Vec::new(), score: 0.0, finished: false }])
+            .map(|_| {
+                vec![Beam {
+                    tokens: Vec::new(),
+                    score: 0.0,
+                    finished: false,
+                }]
+            })
             .collect();
 
         let mut step = 1usize;
         while step < max_phoneme_len
-            && beams.iter().any(|word_beams| word_beams.iter().any(|b| !b.finished))
+            && beams
+                .iter()
+                .any(|word_beams| word_beams.iter().any(|b| !b.finished))
         {
             Self::refill_decoder_buffers(
                 &beams,
@@ -602,7 +614,10 @@ impl Model {
             // underlying data.
             let inputs = HashMap::from([
                 ("encoder_input_ids".to_string(), enc_ids_tensor.clone()),
-                ("encoder_attention_mask".to_string(), enc_mask_tensor.clone()),
+                (
+                    "encoder_attention_mask".to_string(),
+                    enc_mask_tensor.clone(),
+                ),
                 ("decoder_input_ids".to_string(), dec_ids_tensor),
                 ("decoder_attention_mask".to_string(), dec_mask_tensor),
             ]);
@@ -615,7 +630,10 @@ impl Model {
             // One slice + one bulk copy for the whole effective batch
             // instead of one per row — `step_logits[row]` is that row's
             // slice over the vocab dimension at this step.
-            let step_logits = logits.narrow(1, step - 1, 1)?.squeeze(1)?.to_vec2::<f32>()?;
+            let step_logits = logits
+                .narrow(1, step - 1, 1)?
+                .squeeze(1)?
+                .to_vec2::<f32>()?;
 
             for (w, beams_w) in beams.iter_mut().enumerate() {
                 Self::expand_word_beams(&self.config, beams_w, w, beam_width, &step_logits);
@@ -744,7 +762,11 @@ impl Model {
             // magnitude, so cloning here isn't worth the complexity of
             // avoiding it (e.g. `Rc`-sharing tokens across beams).
             match token {
-                None => new_beams.push(Beam { tokens: parent_tokens.clone(), score, finished: true }),
+                None => new_beams.push(Beam {
+                    tokens: parent_tokens.clone(),
+                    score,
+                    finished: true,
+                }),
                 Some(token_id) => {
                     let is_end =
                         token_id == config.phoneme_eos_id || token_id == config.phoneme_pad_id;
@@ -752,8 +774,12 @@ impl Model {
                     if !is_end {
                         tokens.push(token_id);
                     }
-                    new_beams.push(Beam { tokens, score, finished: is_end });
-                }
+                    new_beams.push(Beam {
+                        tokens,
+                        score,
+                        finished: is_end,
+                    });
+                },
             }
         }
         *beams_w = new_beams;
@@ -806,15 +832,18 @@ mod tests {
 
     #[test]
     fn rejects_wrong_schema_version() {
-        let json = valid_config_json()
-            .replace("\"config_schema_version\": 1", "\"config_schema_version\": 2");
+        let json = valid_config_json().replace(
+            "\"config_schema_version\": 1",
+            "\"config_schema_version\": 2",
+        );
         let err = Config::from_json(&json).unwrap_err();
         assert!(err.to_string().contains("schema version"));
     }
 
     #[test]
     fn rejects_wrong_model_kind() {
-        let json = valid_config_json().replace("\"model_kind\": \"oov\"", "\"model_kind\": \"other\"");
+        let json =
+            valid_config_json().replace("\"model_kind\": \"oov\"", "\"model_kind\": \"other\"");
         let err = Config::from_json(&json).unwrap_err();
         assert!(format!("{err:?}").contains("unknown variant"));
     }
@@ -854,8 +883,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_max_phoneme_len() {
-        let json =
-            valid_config_json().replace("\"max_phoneme_len\": 64", "\"max_phoneme_len\": 0");
+        let json = valid_config_json().replace("\"max_phoneme_len\": 64", "\"max_phoneme_len\": 0");
         let err = Config::from_json(&json).unwrap_err();
         assert!(err.to_string().contains("max_phoneme_len"));
     }
@@ -1340,8 +1368,10 @@ mod tests {
         let model = Model::load(&model_dir.join("oov")).expect("load OOV model");
 
         let words = ["zoinks", "archaeopteryx", "wibbly"];
-        let per_word: Vec<Option<String>> =
-            words.iter().flat_map(|&word| model.predict_phonemes_batch(&[word])).collect();
+        let per_word: Vec<Option<String>> = words
+            .iter()
+            .flat_map(|&word| model.predict_phonemes_batch(&[word]))
+            .collect();
         let batched = model.predict_phonemes_batch(&words);
 
         assert_eq!(batched, per_word);

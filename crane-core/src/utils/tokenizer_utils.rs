@@ -255,13 +255,9 @@ pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
         .iter()
         .map(|v| {
             let s = v.to_string().map_err(anyhow::Error::msg)?;
-            let (l, r) = s
-                .split_once(' ')
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "GGUF merge entry {s:?} is not in `<left> <right>` form"
-                    )
-                })?;
+            let (l, r) = s.split_once(' ').ok_or_else(|| {
+                anyhow::anyhow!("GGUF merge entry {s:?} is not in `<left> <right>` form")
+            })?;
             Ok((l.to_string(), r.to_string()))
         })
         .collect::<Result<_>>()?;
@@ -328,8 +324,8 @@ pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
 /// `tokenizer.json`); errors out on real I/O / parse problems.
 pub fn build_tokenizer_from_gguf_path<P: AsRef<Path>>(path: P) -> Result<Option<Tokenizer>> {
     let path = path.as_ref();
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("open GGUF file {}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("open GGUF file {}", path.display()))?;
     let ct = Content::read(&mut file)
         .with_context(|| format!("parse GGUF header of {}", path.display()))?;
     if !gguf_has_embedded_tokenizer(&ct) {
@@ -364,7 +360,10 @@ mod tests {
     #[test]
     fn gguf_normal_and_unused_types_are_not_added() {
         for t in [0, 1, 2, 5, 6] {
-            assert!(!is_gguf_added_token(t), "type {t} should not be an added token");
+            assert!(
+                !is_gguf_added_token(t),
+                "type {t} should not be an added token"
+            );
             assert!(!is_gguf_special_token(t), "type {t} should not be special");
         }
     }

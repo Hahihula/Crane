@@ -161,7 +161,7 @@ impl candle_core::CustomOp1 for TopKIndicesOp {
                         },
                     );
                     Ok(keys)
-                }
+                },
             }
         })?;
 

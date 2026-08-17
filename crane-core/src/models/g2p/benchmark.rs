@@ -75,7 +75,11 @@ pub fn levenshtein_codepoints(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
 
     // Iterate over the shorter string in the inner loop to keep the buffer small.
-    let (short, long) = if a.len() <= b.len() { (&a, &b) } else { (&b, &a) };
+    let (short, long) = if a.len() <= b.len() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
 
     let mut prev_row: Vec<usize> = (0..=short.len()).collect();
     let mut curr_row = vec![0usize; short.len() + 1];
