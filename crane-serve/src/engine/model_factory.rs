@@ -693,10 +693,11 @@ pub fn create_tts(
 /// `tokenizer.json`, `onnx/`, `voices/`); G2P assets are located at
 /// `{model_path}/g2p/`, following Moonshine's per-language directory layout
 /// (see [`crane_core::models::g2p::MoonshineG2p::from_g2p_dir`]). A real
-/// deployment symlinks or copies its G2P data there, e.g.:
+/// deployment symlinks or copies its G2P data there, e.g. after running
+/// `crane-model-download`'s `g2p-lexicons` and `g2p-oov-en-us` targets:
 ///
 /// ```text
-/// ln -s /path/to/moonshine-g2p <model_path>/g2p
+/// ln -s /path/to/g2p/g2p-lexicons <model_path>/g2p
 /// ```
 ///
 /// # Errors

@@ -12,7 +12,7 @@ Examples:
     ./crane-model-download --model qwen3-asr-0.6b --path ~/models
     ./crane-model-download --model silero-vad --path ~/models
     ./crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0
-    ./crane-model-download --model moonshine-g2p-en-us --path ~/models
+    ./crane-model-download --model g2p-lexicons --path ~/models
     ./crane-model-download --model kokoro --path ~/models
 
 Run directly (uv picks up the inline metadata above and manages the
@@ -108,30 +108,37 @@ MODELS = {
         "quant_template": "Qwen3.8-27B-{quant}.gguf",
         "description": "Qwen 3.8 27B, same arch as Qwen 3.5 scaled up, GGUF quant (Apache-2.0)",
     },
-    "moonshine-g2p-en-us": {
+    "g2p-lexicons": {
+        "repo_id": "crane-local-ai/g2p-lexicons",
+        "dirname": "g2p-lexicons",
+        "kind": "g2p",
+        "repo_type": "dataset",
+        # Local names match what MoonshineG2p::from_g2p_dir hardcodes
+        # (en_us/dict_filtered_heteronyms.tsv, de/dict.tsv), replacing the
+        # lexicons moonshine-g2p-en-us/de used to fetch from Moonshine's CDN.
+        "files": {
+            "de/de.tsv": "de/dict.tsv",
+            "de/PROVENANCE.md": "de/PROVENANCE.md",
+            "en_US/en_US.tsv": "en_us/dict_filtered_heteronyms.tsv",
+            "en_US/PROVENANCE.md": "en_us/PROVENANCE.md",
+        },
+        "description": "Crane G2P word-to-IPA lexicons: German (Wiktionary, CC BY-SA 4.0) + English/US (ipa-dict, MIT)",
+    },
+    "g2p-oov-en-us": {
         "repo_id": "moonshine-ai/moonshine",
-        "dirname": "moonshine-g2p/en_us",
+        "dirname": "g2p-lexicons",
         "kind": "g2p",
         "source": "url",
         "base_url": "https://download.moonshine.ai/tts/en_us",
+        # Lands in the same g2p-lexicons/en_us/ directory as the g2p-lexicons
+        # entry above -- our own dataset has no OOV model, so English still
+        # needs this neural fallback from Moonshine.
         "files": {
-            "dict_filtered_heteronyms.tsv": "dict_filtered_heteronyms.tsv",
-            "g2p-config.json": "g2p-config.json",
-            "oov/model.onnx": "oov/model.onnx",
-            "oov/onnx-config.json": "oov/onnx-config.json",
+            "g2p-config.json": "en_us/g2p-config.json",
+            "oov/model.onnx": "en_us/oov/model.onnx",
+            "oov/onnx-config.json": "en_us/oov/onnx-config.json",
         },
-        "description": "Moonshine G2P English lexicon + OOV ONNX model (MIT)",
-    },
-    "moonshine-g2p-de": {
-        "repo_id": "moonshine-ai/moonshine",
-        "dirname": "moonshine-g2p/de",
-        "kind": "g2p",
-        "source": "url",
-        "base_url": "https://download.moonshine.ai/tts/de",
-        "files": {
-            "dict.tsv": "dict.tsv",
-        },
-        "description": "Moonshine G2P German lexicon, no OOV model (MIT)",
+        "description": "Moonshine English G2P OOV fallback model only, no lexicon -- use with g2p-lexicons (MIT)",
     },
     "kokoro": {
         "repo_id": "onnx-community/Kokoro-82M-v1.0-ONNX",
@@ -264,6 +271,24 @@ def download_url_files(info, local_dir):
             sys.exit(1)
 
 
+def print_done(info, target):
+    if info["kind"] == "amt":
+        # MuScriptor isn't served through crane-serve — it's a standalone
+        # CLI, so the generic crane-serve hint below would be actively
+        # wrong here rather than just imprecise.
+        print(
+            f"\nDone. Use with: cargo run -p crane-examples --release --features cuda "
+            f"--bin muscriptor_transcribe -- --model-dir {target} --transcribe audio.wav"
+        )
+    elif info["kind"] == "g2p":
+        # g2p assets aren't a --model-path themselves; Kokoro expects them
+        # symlinked in at {model_path}/g2p (see
+        # crane_core::models::g2p::MoonshineG2p::from_g2p_dir).
+        print(f"\nDone. Use with: ln -s {target} <model_path>/g2p")
+    else:
+        print(f"\nDone. Use with: crane-serve --model-path {target}")
+
+
 def download_model(model_key, path, token, quant):
     info = MODELS[model_key]
     local_dir = os.path.join(os.path.expanduser(path), info["kind"], info["dirname"])
@@ -272,7 +297,7 @@ def download_model(model_key, path, token, quant):
         print(f"Downloading {info['repo_id']} ({info['base_url']}) to {local_dir} ...")
         os.makedirs(local_dir, exist_ok=True)
         download_url_files(info, local_dir)
-        print(f"\nDone. Use with: crane-serve --model-path {local_dir}")
+        print_done(info, local_dir)
         return
 
     try:
@@ -287,6 +312,7 @@ def download_model(model_key, path, token, quant):
         sys.exit(1)
 
     quant_template = info.get("quant_template")
+    repo_type = info.get("repo_type", "model")
 
     if quant_template:
         filename = quant_template.format(quant=quant)
@@ -309,12 +335,20 @@ def download_model(model_key, path, token, quant):
                 os.makedirs(local_dir, exist_ok=True)
                 for repo_path, local_name in files.items():
                     cached = hf_hub_download(
-                        repo_id=info["repo_id"], filename=repo_path, token=token
+                        repo_id=info["repo_id"],
+                        filename=repo_path,
+                        repo_type=repo_type,
+                        token=token,
                     )
-                    shutil.copy2(cached, os.path.join(local_dir, local_name))
+                    local_target = os.path.join(local_dir, local_name)
+                    os.makedirs(os.path.dirname(local_target), exist_ok=True)
+                    shutil.copy2(cached, local_target)
             else:
                 snapshot_download(
-                    repo_id=info["repo_id"], local_dir=local_dir, token=token
+                    repo_id=info["repo_id"],
+                    local_dir=local_dir,
+                    repo_type=repo_type,
+                    token=token,
                 )
 
         # Additional files pulled from a *different* repo into the same
@@ -350,17 +384,7 @@ def download_model(model_key, path, token, quant):
             )
         sys.exit(1)
 
-    if info["kind"] == "amt":
-        # MuScriptor isn't served through crane-serve — it's a standalone
-        # CLI, so the generic crane-serve hint below would be actively
-        # wrong here rather than just imprecise (unlike e.g. g2p/vad, which
-        # are auxiliary assets crane-serve's own pipelines do load).
-        print(
-            f"\nDone. Use with: cargo run -p crane-examples --release --features cuda "
-            f"--bin muscriptor_transcribe -- --model-dir {target} --transcribe audio.wav"
-        )
-    else:
-        print(f"\nDone. Use with: crane-serve --model-path {target}")
+    print_done(info, target)
 
 
 def main():
@@ -373,7 +397,8 @@ def main():
         "  crane-model-download --model qwen3-asr-0.6b --path ~/models\n"
         "  crane-model-download --model silero-vad --path ~/models\n"
         "  crane-model-download --model qwen3.5-9b-gguf --path ~/models --quant Q8_0\n"
-        "  crane-model-download --model moonshine-g2p-en-us --path ~/models\n"
+        "  crane-model-download --model g2p-lexicons --path ~/models\n"
+        "  crane-model-download --model g2p-oov-en-us --path ~/models\n"
         "  crane-model-download --model kokoro --path ~/models\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
