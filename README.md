@@ -104,6 +104,16 @@ We include:
 ![](data/images/image.webp)
 
 
+**2. ASR with Qwen3-ASR**
+
+Multi-language support, extremly fast speed compare with pytorch and other framework:
+
+![](data/assets/image.png)
+
+Runs almost real-time on my old mac, just try it! serve any app.
+
+
+
 **2. more to come**
 
 
