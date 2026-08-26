@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_PATH="$ROOT_DIR/target/release/crane"
+SERVER_BIN_PATH="$ROOT_DIR/target/release/crane-serve"
 CHAT_SIMPLE_BIN_PATH="$ROOT_DIR/target/release/chat_simple"
 CHAT_CLI_BIN_PATH="$ROOT_DIR/target/release/chat_cli"
 BUILD_FEATURES=()
@@ -44,29 +44,41 @@ else
   exit 1
 fi
 
-BUILD_CMD=(cargo build --release -p crane -p crane-examples --bin chat_simple --bin chat_cli)
+BUILD_CMD=(cargo build --release -p crane-serve -p crane-examples --bin chat_simple --bin chat_cli)
 if [[ ${#BUILD_FEATURES[@]} -gt 0 ]]; then
   FEATURES_CSV=$(IFS=,; printf '%s' "${BUILD_FEATURES[*]}")
   BUILD_CMD+=(--features "$FEATURES_CSV")
 fi
 
-say "${BLUE}${BOLD}Building crane, chat_simple, and chat_cli...${NC}"
+say "${BLUE}${BOLD}Building crane-serve, chat_simple, and chat_cli...${NC}"
 (
   cd "$ROOT_DIR"
   "${BUILD_CMD[@]}"
 )
 
 say "${GREEN}${BOLD}Build complete.${NC}"
-say "${GREEN}Binary:${NC} $BIN_PATH"
+say "${GREEN}Server:${NC} $SERVER_BIN_PATH"
 say "${GREEN}Example:${NC} $CHAT_SIMPLE_BIN_PATH"
 say "${GREEN}CLI:${NC} $CHAT_CLI_BIN_PATH"
 say ""
-say "${BLUE}${BOLD}Serve a model:${NC}"
-say "  $BIN_PATH -m /path/to/model -p 8080"
+say "${BLUE}${BOLD}Start a server (one model per process):${NC}"
+say "  $SERVER_BIN_PATH -m /path/to/model -p 8080"
 say ""
-say "${BLUE}${BOLD}OpenAI API:${NC}"
-say "  GET  http://127.0.0.1:8080/health"
-say "  POST http://127.0.0.1:8080/v1/chat/completions"
+say "${BLUE}${BOLD}Model examples (model type is auto-detected when possible):${NC}"
+say "  # LLM"
+say "  $SERVER_BIN_PATH -m /path/to/Qwen3-0.6B -p 8080"
+say "  # VLM (chat and image requests share the OpenAI chat endpoint)"
+say "  $SERVER_BIN_PATH -m /path/to/Qwen3.5-VL --model-type qwen3_5_vl -p 8080"
+say "  # ASR (Qwen3-ASR-0.6B)"
+say "  $SERVER_BIN_PATH -m /path/to/Qwen3-ASR-0.6B --model-type qwen3_asr -p 8080"
+say "  # TTS (Qwen3-TTS)"
+say "  $SERVER_BIN_PATH -m /path/to/Qwen3-TTS-12Hz-0.6B-Base --model-type qwen3_tts -p 8080"
 say ""
-say "${BLUE}${BOLD}Example:${NC}"
+say "${BLUE}${BOLD}API endpoints:${NC}"
+say "  LLM / VLM: POST http://127.0.0.1:8080/v1/chat/completions"
+say "  ASR:       POST http://127.0.0.1:8080/v1/audio/transcriptions"
+say "  TTS:       POST http://127.0.0.1:8080/v1/audio/speech"
+say "  Health:    GET  http://127.0.0.1:8080/health"
+say ""
+say "${BLUE}${BOLD}LLM request example:${NC}"
 say "  curl http://127.0.0.1:8080/v1/chat/completions \\\n    -H 'Content-Type: application/json' \\\n    -d '{\n      \"model\": \"your-model\",\n      \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}],\n      \"stream\": false\n    }'"

@@ -41,6 +41,10 @@ name = "asr_simple"
 path = "src/asr_simple.rs"
 
 [[bin]]
+name = "asr_qwen3_simple"
+path = "src/asr_qwen3_simple.rs"
+
+[[bin]]
 name = "vision_simple"
 path = "src/vision_simple.rs"
 

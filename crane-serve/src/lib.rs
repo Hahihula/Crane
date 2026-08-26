@@ -55,8 +55,7 @@ pub struct Args {
     #[arg(long)]
     pub quant: Option<String>,
     /// Compute dtype: f16, bf16 or f32. Defaults per device: BF16 on CUDA,
-    /// F16 on ROCm, F32 on CPU; on Metal F32, except model families validated
-    /// in F16 (currently qwen3_5) which default to F16.
+    /// F16 on ROCm and Metal, and F32 on CPU.
     #[arg(long)]
     pub dtype: Option<String>,
     #[arg(long, default_value_t = 0)]
@@ -418,21 +417,12 @@ pub(crate) fn is_gpu_device(device: &crane_core::models::Device) -> bool {
 }
 
 /// Resolve the compute dtype. An explicit `--dtype` always wins; otherwise
-/// BF16 on CUDA and F32 elsewhere — except model families validated in F16 on
-/// Metal (currently qwen3_5, voxcpm2), which default to F16 there (halves
-/// weight, activation and fp-KV memory vs F32).
-///
-/// F16 stays opt-in for the other families: it has less range than the BF16
-/// most checkpoints are trained in, and models with large intermediate
-/// activations (e.g. Gemma) can overflow to inf/NaN — flip a family's default
-/// only after verifying its output quality in F16. VoxCPM2's DiT/CFM sampler
-/// in particular stressed an M3 Pro GPU into a watchdog kernel-panic reset
-/// when launched at F32; F16 is the verified-safe default until upstream
-/// HF-diff validation confirms otherwise.
+/// BF16 on CUDA, F16 on ROCm and Metal, and F32 on CPU. Metal's F16 path
+/// substantially reduces model and KV-cache memory use, including for
+/// Qwen3-ASR; pass `--dtype f32` to explicitly prefer full precision.
 fn resolve_dtype(
     flag: Option<&str>,
     device: &crane_core::models::Device,
-    model_type: ModelType,
 ) -> Result<crane_core::models::DType> {
     use crane_core::models::DType;
     if let Some(name) = flag {
@@ -451,7 +441,7 @@ fn resolve_dtype(
     if device.is_rocm() {
         return Ok(DType::F16);
     }
-    if device.is_metal() && matches!(model_type, ModelType::Qwen3_5 | ModelType::VoxCpm2) {
+    if device.is_metal() {
         return Ok(DType::F16);
     }
     Ok(DType::F32)
@@ -523,7 +513,7 @@ pub async fn run(args: Args) -> Result<()> {
     let (model_type, resolved_type) =
         apply_text_only_override(args.text_only, model_type, resolved_type);
 
-    let dtype = resolve_dtype(args.dtype.as_deref(), &device, resolved_type)?;
+    let dtype = resolve_dtype(args.dtype.as_deref(), &device)?;
 
     let device_name = format!("{:?}", device);
     let dtype_name = format!("{:?}", dtype);
@@ -1273,55 +1263,24 @@ mod dtype_tests {
     #[test]
     fn explicit_flag_wins() {
         let d = Device::Cpu;
-        assert_eq!(
-            resolve_dtype(Some("f16"), &d, ModelType::Qwen3).unwrap(),
-            DType::F16
-        );
-        assert_eq!(
-            resolve_dtype(Some("BF16"), &d, ModelType::Qwen3_5).unwrap(),
-            DType::BF16
-        );
-        assert_eq!(
-            resolve_dtype(Some("fp32"), &d, ModelType::Qwen3_5).unwrap(),
-            DType::F32
-        );
-        assert!(resolve_dtype(Some("int8"), &d, ModelType::Qwen3).is_err());
+        assert_eq!(resolve_dtype(Some("f16"), &d).unwrap(), DType::F16);
+        assert_eq!(resolve_dtype(Some("BF16"), &d).unwrap(), DType::BF16);
+        assert_eq!(resolve_dtype(Some("fp32"), &d).unwrap(), DType::F32);
+        assert!(resolve_dtype(Some("int8"), &d).is_err());
     }
 
     #[test]
     fn cpu_defaults_to_f32() {
         let d = Device::Cpu;
-        assert_eq!(
-            resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(),
-            DType::F32
-        );
-        assert_eq!(
-            resolve_dtype(None, &d, ModelType::Qwen3).unwrap(),
-            DType::F32
-        );
+        assert_eq!(resolve_dtype(None, &d).unwrap(), DType::F32);
     }
 
     #[test]
-    fn metal_defaults_f16_for_qwen3_5_and_voxcpm2() {
-        let Ok(d) = Device::new_metal(0) else {
-            return; // no Metal on this machine/CI
+    fn metal_defaults_to_f16() {
+        let Ok(Ok(d)) = std::panic::catch_unwind(|| Device::new_metal(0)) else {
+            return; // no usable Metal device in this process/CI
         };
-        assert_eq!(
-            resolve_dtype(None, &d, ModelType::Qwen3_5).unwrap(),
-            DType::F16
-        );
-        assert_eq!(
-            resolve_dtype(None, &d, ModelType::VoxCpm2).unwrap(),
-            DType::F16
-        );
-        assert_eq!(
-            resolve_dtype(None, &d, ModelType::Qwen3).unwrap(),
-            DType::F32
-        );
-        assert_eq!(
-            resolve_dtype(None, &d, ModelType::Gemma4).unwrap(),
-            DType::F32
-        );
+        assert_eq!(resolve_dtype(None, &d).unwrap(), DType::F16);
     }
 
     // ── --text-only override ──
