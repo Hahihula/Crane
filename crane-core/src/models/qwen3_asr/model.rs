@@ -68,7 +68,15 @@ impl Model {
 
         let config_data = std::fs::read(model_dir.join("config.json"))
             .context("reading qwen3_asr config.json")?;
-        let config: Config = serde_json::from_slice(&config_data)?;
+        let (config, defaults) = Config::from_json_slice(&config_data)?;
+        if let Some(defaults) = defaults {
+            log::info!("qwen3_asr config.json uses ModelScope compatibility defaults: {defaults}");
+            anyhow::bail!(
+                "unsupported ModelScope Qwen3-ASR checkpoint: its weight tensor names are not \
+                 compatible with Crane's HuggingFace Qwen3-ASR loader. Download and use the \
+                 HuggingFace `-hf` checkpoint (for example, Qwen/Qwen3-ASR-0.6B-hf) instead."
+            );
+        }
 
         let tokenizer = AutoTokenizer::from_pretrained(model_path, None)
             .map_err(|e| anyhow::anyhow!("failed to load qwen3_asr tokenizer: {e}"))?;
