@@ -161,9 +161,9 @@ impl MelSpectrogramConditioner {
             if t < max_t {
                 let pad = max_t - t;
                 let pad_mel = Tensor::zeros((pad, N_MELS), DType::F32, &Device::Cpu)?;
-                *mel = Tensor::cat(&[mel, &pad_mel], 0)?;
+                *mel = Tensor::cat(&[&*mel, &pad_mel], 0)?;
                 let pad_mask = Tensor::zeros((pad,), DType::F32, &Device::Cpu)?;
-                *mask = Tensor::cat(&[mask, &pad_mask], 0)?;
+                *mask = Tensor::cat(&[&*mask, &pad_mask], 0)?;
             }
         }
 

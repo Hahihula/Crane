@@ -143,9 +143,10 @@ impl AutoTokenizer {
             }
         }
 
-        // Load actual tokenizer model
+        // Prefer the consolidated HF tokenizer, but ModelScope checkpoints
+        // commonly provide the equivalent `vocab.json` + `merges.txt` pair.
         let d = file.parent();
-        let tokenizer = Tokenizer::from_file(d.unwrap().join("tokenizer.json"))?;
+        let tokenizer = crate::utils::tokenizer_utils::load_tokenizer_from_model_dir(d.unwrap())?;
         Ok(Self { config, tokenizer })
     }
 

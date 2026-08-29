@@ -1,5 +1,6 @@
-//! Config structs for Qwen3-ASR's `-hf` checkpoint layout (flat
-//! `audio_config`/`text_config` under a `qwen3_asr`-typed root config).
+//! Config structs for Qwen3-ASR checkpoint layouts. HuggingFace checkpoints
+//! keep `audio_config`/`text_config` at the root, while ModelScope wraps them
+//! in `thinker_config`.
 
 use candle_nn::Activation;
 use serde::Deserialize;
@@ -120,9 +121,7 @@ impl TextConfig {
     }
 }
 
-/// Top-level Qwen3-ASR config, matching the flat `-hf` checkpoint
-/// `config.json` layout (`audio_config`/`text_config` at the root, no
-/// `thinker_config` wrapper).
+/// Top-level Qwen3-ASR model config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Audio encoder (`AuT`) config.
@@ -139,6 +138,95 @@ pub struct Config {
     pub eos_token_id: Vec<u32>,
     /// Whether input/output embeddings are tied at the top level.
     pub tie_word_embeddings: bool,
+}
+
+impl Config {
+    /// Parses either the flat HuggingFace layout or ModelScope's
+    /// `thinker_config`-wrapped layout. ModelScope omits a few fields that are
+    /// fixed for released Qwen3-ASR checkpoints; those are restored from the
+    /// published HuggingFace defaults. When defaults are applied, the returned
+    /// string lists every substituted field and value for logging.
+    pub fn from_json_slice(data: &[u8]) -> Result<(Self, Option<String>), serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_slice(data)?;
+
+        if let Some(mut thinker_config) = value.get("thinker_config").cloned() {
+            let mut defaults: Vec<String> = Vec::new();
+            if let Some(thinker) = thinker_config.as_object_mut() {
+                // These values are present in the corresponding HF config,
+                // but omitted by ModelScope's exported thinker configuration.
+                if !thinker.contains_key("timestamp_token_id") {
+                    thinker.insert(
+                        "timestamp_token_id".to_owned(),
+                        serde_json::Value::from(151_705),
+                    );
+                    defaults.push("timestamp_token_id=151705".to_owned());
+                }
+                if !thinker.contains_key("pad_token_id") {
+                    thinker.insert("pad_token_id".to_owned(), serde_json::Value::from(151_645));
+                    defaults.push("pad_token_id=151645".to_owned());
+                }
+                if !thinker.contains_key("eos_token_id") {
+                    thinker.insert(
+                        "eos_token_id".to_owned(),
+                        serde_json::json!([151_643, 151_645]),
+                    );
+                    defaults.push("eos_token_id=[151643,151645]".to_owned());
+                }
+                if !thinker.contains_key("tie_word_embeddings") {
+                    thinker.insert(
+                        "tie_word_embeddings".to_owned(),
+                        serde_json::Value::Bool(true),
+                    );
+                    defaults.push("tie_word_embeddings=true".to_owned());
+                }
+
+                if let Some(audio_config) = thinker
+                    .get_mut("audio_config")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    if !audio_config.contains_key("num_key_value_heads")
+                        && let Some(attention_heads) =
+                            audio_config.get("encoder_attention_heads").cloned()
+                    {
+                        audio_config
+                            .insert("num_key_value_heads".to_owned(), attention_heads.clone());
+                        defaults.push(format!(
+                            "audio_config.num_key_value_heads={attention_heads}"
+                        ));
+                    }
+                    if !audio_config.contains_key("max_position_embeddings") {
+                        audio_config.insert(
+                            "max_position_embeddings".to_owned(),
+                            serde_json::Value::from(13),
+                        );
+                        defaults.push("audio_config.max_position_embeddings=13".to_owned());
+                    }
+                }
+
+                if let Some(text_config) = thinker
+                    .get_mut("text_config")
+                    .and_then(serde_json::Value::as_object_mut)
+                    && !text_config.contains_key("rope_parameters")
+                    && let Some(rope_theta) = text_config.get("rope_theta").cloned()
+                {
+                    text_config.insert(
+                        "rope_parameters".to_owned(),
+                        serde_json::json!({ "rope_theta": rope_theta.clone() }),
+                    );
+                    defaults.push(format!(
+                        "text_config.rope_parameters.rope_theta={rope_theta}"
+                    ));
+                }
+            }
+
+            Ok((
+                serde_json::from_value(thinker_config)?,
+                (!defaults.is_empty()).then(|| defaults.join(", ")),
+            ))
+        } else {
+            Ok((serde_json::from_value(value)?, None))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +425,58 @@ mod tests {
         // output_dim must match text hidden_size for the projector's output
         // to feed the decoder directly.
         assert_eq!(audio.output_dim, text.hidden_size);
+    }
+
+    #[test]
+    fn deserialize_modelscope_wrapped_config() {
+        let mut thinker_config: serde_json::Value = serde_json::from_str(CONFIG_0_6B).unwrap();
+        let thinker = thinker_config.as_object_mut().unwrap();
+        thinker.remove("timestamp_token_id");
+        thinker.remove("pad_token_id");
+        thinker.remove("eos_token_id");
+        thinker.remove("tie_word_embeddings");
+        let audio_config = thinker
+            .get_mut("audio_config")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        audio_config.remove("num_key_value_heads");
+        audio_config.remove("max_position_embeddings");
+        let text_config = thinker
+            .get_mut("text_config")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        let rope_theta = text_config.remove("rope_parameters").unwrap()["rope_theta"].clone();
+        text_config.insert("rope_theta".to_owned(), rope_theta);
+        let modelscope_config = serde_json::json!({
+            "architectures": ["Qwen3ASRForConditionalGeneration"],
+            "model_type": "qwen3_asr",
+            "support_languages": ["Chinese", "English"],
+            "thinker_config": thinker_config,
+        });
+
+        let (config, defaults) =
+            Config::from_json_slice(modelscope_config.to_string().as_bytes()).unwrap();
+
+        let defaults = defaults.unwrap();
+        assert!(defaults.contains("audio_config.max_position_embeddings=13"));
+        assert_eq!(config.audio_config.d_model, 896);
+        assert_eq!(config.audio_config.num_key_value_heads, 14);
+        assert_eq!(config.audio_config.max_position_embeddings, 13);
+        assert_eq!(config.text_config.hidden_size, 1024);
+        assert!((config.text_config.rope_parameters.rope_theta - 1_000_000.0).abs() < f64::EPSILON);
+        assert_eq!(config.timestamp_token_id, 151_705);
+        assert_eq!(config.pad_token_id, 151_645);
+        assert_eq!(config.eos_token_id, vec![151_643, 151_645]);
+    }
+
+    #[test]
+    fn deserialize_flat_config_without_fallback() {
+        let (config, defaults) = Config::from_json_slice(CONFIG_0_6B.as_bytes()).unwrap();
+
+        assert!(defaults.is_none());
+        assert_eq!(config.audio_config.d_model, 896);
     }
 
     #[test]

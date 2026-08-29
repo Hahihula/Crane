@@ -44,7 +44,7 @@ else
   exit 1
 fi
 
-BUILD_CMD=(cargo build --release -p crane-serve -p crane-examples --bin chat_simple --bin chat_cli)
+BUILD_CMD=(cargo build --release -p crane-serve -p crane-examples --bin crane-serve --bin chat_simple --bin chat_cli)
 if [[ ${#BUILD_FEATURES[@]} -gt 0 ]]; then
   FEATURES_CSV=$(IFS=,; printf '%s' "${BUILD_FEATURES[*]}")
   BUILD_CMD+=(--features "$FEATURES_CSV")
