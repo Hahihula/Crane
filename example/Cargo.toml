@@ -73,6 +73,10 @@ name = "gemma4_simple"
 path = "src/gemma4_simple.rs"
 
 [[bin]]
+name = "align_qwen35_vl"
+path = "src/align_qwen35_vl.rs"
+
+[[bin]]
 name = "qwen3_5_vl_simple"
 path = "src/qwen3_5_vl_simple.rs"
 
