@@ -4,6 +4,7 @@
 //! (Qwen3-TTS, Voxtral TTS) directly on a dedicated thread. The model generates
 //! speech from text input and returns audio bytes (WAV or raw PCM) to the client.
 
+use std::io::Write;
 use std::sync::Arc;
 
 use axum::{
@@ -85,6 +86,50 @@ pub async fn speech(
     let repetition_penalty = req.repetition_penalty.unwrap_or(1.05);
     let language = req.language.clone().unwrap_or_else(|| "auto".to_string());
 
+    // Browser clients cannot expose a server-local file path. Accept a
+    // base64 data URI for reference audio and keep the temporary WAV alive
+    // until the TTS worker has consumed it.
+    let (reference_audio, reference_audio_temp) = match req.reference_audio.as_deref() {
+        Some(data_uri) if data_uri.starts_with("data:") => {
+            let Some((_, payload)) = data_uri.split_once(',') else {
+                let (status, json) = make_error(
+                    StatusCode::BAD_REQUEST,
+                    "Malformed reference_audio data URI",
+                );
+                return (status, json).into_response();
+            };
+            use base64::Engine;
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(payload) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    let (status, json) =
+                        make_error(StatusCode::BAD_REQUEST, "Invalid base64 reference audio");
+                    return (status, json).into_response();
+                },
+            };
+            let mut file = match tempfile::NamedTempFile::with_suffix(".wav") {
+                Ok(file) => file,
+                Err(_) => {
+                    let (status, json) = make_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to create reference audio file",
+                    );
+                    return (status, json).into_response();
+                },
+            };
+            if file.write_all(&bytes).is_err() {
+                let (status, json) = make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to save reference audio",
+                );
+                return (status, json).into_response();
+            }
+            (Some(file.path().to_string_lossy().to_string()), Some(file))
+        },
+        Some(path) => (Some(path.to_string()), None),
+        None => (None, None),
+    };
+
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     let tts_req = TtsGenerateRequest {
@@ -97,7 +142,7 @@ pub async fn speech(
         top_p: req.top_p,
         repetition_penalty,
         max_tokens: req.max_tokens,
-        reference_audio: req.reference_audio,
+        reference_audio,
         reference_text: req.reference_text,
         tx,
     };
@@ -110,8 +155,10 @@ pub async fn speech(
         return (status, json).into_response();
     }
 
-    // Wait for TTS result
-    match rx.await {
+    // Wait for TTS result. Keep the temporary file in scope across this await.
+    let outcome = rx.await;
+    drop(reference_audio_temp);
+    match outcome {
         Ok(Ok(result)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, result.content_type)

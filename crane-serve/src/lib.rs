@@ -517,17 +517,25 @@ pub async fn run(args: Args) -> Result<()> {
     let (model_type, resolved_type) =
         apply_text_only_override(args.text_only, model_type, resolved_type);
 
-    let dtype = resolve_dtype(args.dtype.as_deref(), &device)?;
-
-    let device_name = format!("{:?}", device);
-    let dtype_name = format!("{:?}", dtype);
-
-    info!("Device: {}, dtype: {}", device_name, dtype_name);
+    let mut dtype = resolve_dtype(args.dtype.as_deref(), &device)?;
 
     let is_vlm = resolved_type.is_vlm();
     let is_tts = resolved_type.is_tts();
     let is_asr = resolved_type.is_asr();
     let is_duplex = resolved_type.is_duplex();
+
+    // Qwen3-TTS's autoregressive sampler is numerically unstable in F16 on
+    // Metal: a non-finite logit reaches WeightedIndex and surfaces as
+    // "A weight is negative, too large or not a valid number". Keep an
+    // explicit user choice intact, but make the safe precision the default.
+    if is_tts && args.dtype.is_none() && device.is_metal() {
+        dtype = candle_core::DType::F32;
+        info!("TTS on Metal: using F32 for numerically stable sampling");
+    }
+
+    let device_name = format!("{:?}", device);
+    let dtype_name = format!("{:?}", dtype);
+    info!("Device: {}, dtype: {}", device_name, dtype_name);
 
     // The memory gate lives in the LLM engine's scheduler; the one-shot
     // TTS/ASR/VLM/duplex paths have no admission point to enforce it at yet.

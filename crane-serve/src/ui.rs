@@ -54,6 +54,8 @@ pub async fn config(State(state): State<Arc<AppState>>) -> Json<UiConfig> {
     Json(UiConfig {
         mode: if state.asr_tx.is_some() {
             "asr"
+        } else if state.tts_tx.is_some() {
+            "tts"
         } else {
             "chat"
         },
