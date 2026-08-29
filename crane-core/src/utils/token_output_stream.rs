@@ -5,8 +5,10 @@ use candle_core::Result;
 pub struct TokenOutputStream {
     pub tokenizer: tokenizers::Tokenizer,
     tokens: Vec<u32>,
-    prev_index: usize,
-    current_index: usize,
+    /// Text that has already been safely sent to the client. Keeping this as
+    /// text (rather than token indices) lets us wait when a UTF-8 character is
+    /// split across byte-fallback tokens.
+    emitted: String,
 }
 
 impl TokenOutputStream {
@@ -14,8 +16,7 @@ impl TokenOutputStream {
         Self {
             tokenizer,
             tokens: Vec::new(),
-            prev_index: 0,
-            current_index: 0,
+            emitted: String::new(),
         }
     }
 
@@ -30,40 +31,34 @@ impl TokenOutputStream {
         }
     }
 
-    // https://github.com/huggingface/text-generation-inference/blob/5ba53d44a18983a4de32d122f4cb46f4a17d9ef6/server/text_generation_server/models/model.py#L68
-    pub fn next_token(&mut self, token: u32) -> Result<Option<String>> {
-        let prev_text = if self.tokens.is_empty() {
-            String::new()
-        } else {
-            let tokens = &self.tokens[self.prev_index..self.current_index];
-            self.decode(tokens)?
+    /// Return the decodable prefix and withhold an incomplete byte sequence.
+    /// Tokenizers use U+FFFD while decoding such a partial sequence, which
+    /// must never be forwarded to an SSE client — a later token completes it.
+    fn safe_delta(&mut self, decoded: String) -> Option<String> {
+        let safe = match decoded.find('\u{fffd}') {
+            Some(index) => &decoded[..index],
+            None => decoded.as_str(),
         };
-        self.tokens.push(token);
-        let text = self.decode(&self.tokens[self.prev_index..])?;
-        if text.len() > prev_text.len() && text.chars().last().unwrap().is_alphanumeric() {
-            let text = text.split_at(prev_text.len());
-            self.prev_index = self.current_index;
-            self.current_index = self.tokens.len();
-            Ok(Some(text.1.to_string()))
-        } else {
-            Ok(None)
+        if !safe.starts_with(&self.emitted) {
+            // A tokenizer should only extend a decoded prefix. If it does not,
+            // avoid emitting corrupt text and let the final decode recover it.
+            return None;
         }
+        let delta = &safe[self.emitted.len()..];
+        self.emitted = safe.to_string();
+        (!delta.is_empty()).then(|| delta.to_string())
     }
 
-    pub fn decode_rest(&self) -> Result<Option<String>> {
-        let prev_text = if self.tokens.is_empty() {
-            String::new()
-        } else {
-            let tokens = &self.tokens[self.prev_index..self.current_index];
-            self.decode(tokens)?
-        };
-        let text = self.decode(&self.tokens[self.prev_index..])?;
-        if text.len() > prev_text.len() {
-            let text = text.split_at(prev_text.len());
-            Ok(Some(text.1.to_string()))
-        } else {
-            Ok(None)
-        }
+    // https://github.com/huggingface/text-generation-inference/blob/5ba53d44a18983a4de32d122f4cb46f4a17d9ef6/server/text_generation_server/models/model.py#L68
+    pub fn next_token(&mut self, token: u32) -> Result<Option<String>> {
+        self.tokens.push(token);
+        let decoded = self.decode(&self.tokens)?;
+        Ok(self.safe_delta(decoded))
+    }
+
+    pub fn decode_rest(&mut self) -> Result<Option<String>> {
+        let decoded = self.decode(&self.tokens)?;
+        Ok(self.safe_delta(decoded))
     }
 
     pub fn decode_all(&self) -> Result<String> {
@@ -80,7 +75,6 @@ impl TokenOutputStream {
 
     pub fn clear(&mut self) {
         self.tokens.clear();
-        self.prev_index = 0;
-        self.current_index = 0;
+        self.emitted.clear();
     }
 }

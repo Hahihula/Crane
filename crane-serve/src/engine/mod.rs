@@ -1191,7 +1191,7 @@ impl InferenceEngine {
         // Load new sequence's KV cache into the model.
         let caches = self
             .sequences
-            .get(seq_id)
+            .get_mut(seq_id)
             .map_or_else(|| vec![None; self.num_layers], |s| s.kv_caches.clone());
         self.model.set_kv_caches(caches);
         self.active_seq_id = Some(seq_id.to_string());
@@ -1265,7 +1265,7 @@ impl InferenceEngine {
     fn finish_sequence(&mut self, seq_id: &str) {
         let remaining = self
             .token_streams
-            .get(seq_id)
+            .get_mut(seq_id)
             .and_then(|s| s.decode_rest().ok().flatten())
             .unwrap_or_default();
 

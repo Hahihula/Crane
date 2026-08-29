@@ -180,6 +180,25 @@ fn extract_image_and_text(
     Ok((image_urls.swap_remove(0), text_prompt))
 }
 
+/// Extract the latest user text and, when supplied, the latest image. Unlike
+/// OCR-only models, conversational VLMs can answer a text-only turn.
+fn extract_optional_image_and_text(
+    messages: &[crate::openai_api::ChatMessage],
+) -> (Option<String>, String) {
+    let mut image_url = None;
+    let mut text_prompt = String::new();
+    for msg in messages.iter().filter(|msg| msg.role == "user") {
+        if let Some(url) = msg.image_urls().into_iter().last() {
+            image_url = Some(url);
+        }
+        let text = msg.text_content();
+        if !text.is_empty() {
+            text_prompt = text;
+        }
+    }
+    (image_url, text_prompt)
+}
+
 /// VLM-aware chat completions handler.
 ///
 /// Extracts image URLs and text from multimodal messages, downloads
@@ -477,10 +496,37 @@ pub struct Gemma4VlmRequest {
 // ─────────────────────────────────────────────────────────────
 
 pub struct Qwen3_5VlmRequest {
-    pub img_path: std::path::PathBuf,
+    pub img_path: Option<std::path::PathBuf>,
     pub text_prompt: String,
     pub max_tokens: usize,
+    pub token_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pub tx: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
+fn vlm_token_sse(
+    request_id: String,
+    model_name: String,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    temp_dir: Option<tempfile::TempDir>,
+) -> Response {
+    let created = now_epoch();
+    let stream = async_stream::stream! {
+        // The downloaded image is deleted with TempDir, so retain it for the
+        // full lifetime of the engine request.
+        let _temp_dir = temp_dir;
+        let role = ChatCompletionChunk { id: request_id.clone(), object: "chat.completion.chunk".into(), created, model: model_name.clone(), choices: vec![ChunkChoice { index: 0, delta: ChunkDelta::role("assistant"), finish_reason: None }], usage: None };
+        yield Ok::<_, std::convert::Infallible>(Event::default().json_data(&role).unwrap());
+        while let Some(text) = rx.recv().await {
+            let chunk = ChatCompletionChunk { id: request_id.clone(), object: "chat.completion.chunk".into(), created, model: model_name.clone(), choices: vec![ChunkChoice { index: 0, delta: ChunkDelta::content(text), finish_reason: None }], usage: None };
+            yield Ok(Event::default().json_data(&chunk).unwrap());
+        }
+        let finish = ChatCompletionChunk { id: request_id, object: "chat.completion.chunk".into(), created, model: model_name, choices: vec![ChunkChoice { index: 0, delta: ChunkDelta::empty(), finish_reason: Some("stop".into()) }], usage: None };
+        yield Ok(Event::default().json_data(&finish).unwrap());
+        yield Ok(Event::default().data("[DONE]"));
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// Qwen 3.5 VL chat completions handler.
@@ -495,13 +541,44 @@ pub async fn qwen3_5_vlm_chat_completions(
         )
     })?;
 
-    let (image_url, text_prompt) = extract_image_and_text(&req.messages, "Qwen3_5-VL")?;
-    let (_temp_dir, img_path) = download_image(&image_url)
-        .await
-        .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+    let (image_url, text_prompt) = extract_optional_image_and_text(&req.messages);
+    let (_temp_dir, img_path) = match image_url {
+        Some(url) => {
+            let (dir, path) = download_image(&url)
+                .await
+                .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+            (Some(dir), Some(path))
+        },
+        None => (None, None),
+    };
 
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+
+    if req.stream {
+        let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _result_rx) = tokio::sync::oneshot::channel();
+        q35vlm_tx
+            .send(Qwen3_5VlmRequest {
+                img_path,
+                text_prompt,
+                max_tokens,
+                token_tx: Some(token_tx),
+                tx,
+            })
+            .map_err(|_| {
+                make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Qwen 3.5 VL engine thread crashed",
+                )
+            })?;
+        return Ok(vlm_token_sse(
+            request_id,
+            state.model_name.clone(),
+            token_rx,
+            _temp_dir,
+        ));
+    }
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     if q35vlm_tx
@@ -509,6 +586,7 @@ pub async fn qwen3_5_vlm_chat_completions(
             img_path,
             text_prompt,
             max_tokens,
+            token_tx: None,
             tx,
         })
         .is_err()
@@ -549,9 +627,10 @@ pub async fn qwen3_5_vlm_chat_completions(
 // ─────────────────────────────────────────────────────────────
 
 pub struct MinicpmVVlmRequest {
-    pub img_path: std::path::PathBuf,
+    pub img_path: Option<std::path::PathBuf>,
     pub text_prompt: String,
     pub max_tokens: usize,
+    pub token_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pub tx: tokio::sync::oneshot::Sender<Result<String, String>>,
 }
 
@@ -569,13 +648,44 @@ pub async fn minicpm_v_vlm_chat_completions(
         )
     })?;
 
-    let (image_url, text_prompt) = extract_image_and_text(&req.messages, "MiniCPM-V-4.6")?;
-    let (_temp_dir, img_path) = download_image(&image_url)
-        .await
-        .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+    let (image_url, text_prompt) = extract_optional_image_and_text(&req.messages);
+    let (_temp_dir, img_path) = match image_url {
+        Some(url) => {
+            let (dir, path) = download_image(&url)
+                .await
+                .map_err(|e| make_error(StatusCode::BAD_REQUEST, &e))?;
+            (Some(dir), Some(path))
+        },
+        None => (None, None),
+    };
 
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+
+    if req.stream {
+        let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _result_rx) = tokio::sync::oneshot::channel();
+        mcpv_tx
+            .send(MinicpmVVlmRequest {
+                img_path,
+                text_prompt,
+                max_tokens,
+                token_tx: Some(token_tx),
+                tx,
+            })
+            .map_err(|_| {
+                make_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "MiniCPM-V-4.6 engine thread crashed",
+                )
+            })?;
+        return Ok(vlm_token_sse(
+            request_id,
+            state.model_name.clone(),
+            token_rx,
+            _temp_dir,
+        ));
+    }
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     if mcpv_tx
@@ -583,6 +693,7 @@ pub async fn minicpm_v_vlm_chat_completions(
             img_path,
             text_prompt,
             max_tokens,
+            token_tx: None,
             tx,
         })
         .is_err()

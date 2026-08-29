@@ -311,6 +311,7 @@ impl MinicpmV46VLModel {
         )?;
 
         let mut generated: Vec<u32> = Vec::with_capacity(cfg.max_new_tokens);
+        let mut output_stream = TokenOutputStream::new(self.tokenizer.tokenizer.clone());
         let mut cur_pos = input_ids.len();
         for _ in 0..cfg.max_new_tokens {
             let next = logits
@@ -321,12 +322,15 @@ impl MinicpmV46VLModel {
             if self.eos_token_ids.contains(&next) {
                 break;
             }
-            if let Ok(text) = self.tokenizer.tokenizer.decode(&[next], true) {
+            if let Ok(Some(text)) = output_stream.next_token(next) {
                 on_token(&text);
             }
             generated.push(next);
             logits = self.decode_step(next, cur_pos)?;
             cur_pos += 1;
+        }
+        if let Ok(Some(text)) = output_stream.decode_rest() {
+            on_token(&text);
         }
 
         let text = self

@@ -5,6 +5,7 @@ pub mod openai_api;
 pub mod reasoning;
 pub mod sglang_api;
 pub mod tools;
+pub mod ui;
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,6 +43,9 @@ pub struct Args {
     pub host: String,
     #[arg(short = 'p', long, default_value_t = 8080)]
     pub port: u16,
+    /// Serve Crane's built-in browser UI at `/`. Disabled by default.
+    #[arg(long)]
+    pub ui: bool,
     #[arg(long)]
     pub cpu: bool,
     #[arg(short = 'c', long, default_value_t = 16)]
@@ -733,16 +737,21 @@ pub async fn run(args: Args) -> Result<()> {
                             img_path,
                             text_prompt,
                             max_tokens,
+                            token_tx,
                             tx,
                         } = req;
                         let res = (|| -> anyhow::Result<String> {
-                            let img = image::open(&img_path)?;
                             let cfg = VlGenerationConfig {
                                 max_new_tokens: max_tokens,
                                 ..Default::default()
                             };
                             let started = std::time::Instant::now();
-                            let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
+                            let img = img_path.as_ref().map(image::open).transpose()?;
+                            let out = vlm.generate(img.as_ref(), &text_prompt, &cfg, |token| {
+                                if let Some(tx) = &token_tx {
+                                    let _ = tx.send(token.to_string());
+                                }
+                            })?;
                             tracing::info!(
                                 "MiniCPM-V-4.6 request completed in {:?}",
                                 started.elapsed()
@@ -782,16 +791,21 @@ pub async fn run(args: Args) -> Result<()> {
                             img_path,
                             text_prompt,
                             max_tokens,
+                            token_tx,
                             tx,
                         } = req;
                         let res = (|| -> anyhow::Result<String> {
-                            let img = image::open(&img_path)?;
                             let cfg = VlGenerationConfig {
                                 max_new_tokens: max_tokens,
                                 ..Default::default()
                             };
                             let started = std::time::Instant::now();
-                            let out = vlm.generate(Some(&img), &text_prompt, &cfg, |_| {})?;
+                            let img = img_path.as_ref().map(image::open).transpose()?;
+                            let out = vlm.generate(img.as_ref(), &text_prompt, &cfg, |token| {
+                                if let Some(tx) = &token_tx {
+                                    let _ = tx.send(token.to_string());
+                                }
+                            })?;
                             tracing::info!(
                                 "Qwen 3.5 VL request completed in {:?}",
                                 started.elapsed()
@@ -1175,7 +1189,7 @@ pub async fn run(args: Args) -> Result<()> {
         max_seq_len: args.max_seq_len,
         gpu_memory_limit: gpu_memory_limit_display,
     });
-    let app = build_router(state.clone());
+    let app = build_router_with_ui(state.clone(), args.ui);
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
@@ -1206,6 +1220,9 @@ pub async fn run(args: Args) -> Result<()> {
         }
     }
     info!(chat_completions = %format!("http://{local_addr}/v1/chat/completions"), models = %format!("http://{local_addr}/v1/models"), health = %format!("http://{local_addr}/health"), "api endpoints");
+    if args.ui {
+        info!(ui = %format!("http://{local_addr}/"), "browser UI enabled");
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -1215,7 +1232,13 @@ pub async fn run(args: Args) -> Result<()> {
 /// too small for real audio files.
 const MAX_TRANSCRIPTION_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
+/// Build the API-only router, retaining the pre-UI behavior for library users.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with_ui(state, false)
+}
+
+/// Build the API router, optionally adding the browser UI routes.
+pub fn build_router_with_ui(state: Arc<AppState>, ui_enabled: bool) -> Router {
     let transcriptions_router = Router::new()
         .route(
             "/v1/audio/transcriptions",
@@ -1223,7 +1246,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_TRANSCRIPTION_UPLOAD_BYTES));
 
-    Router::new()
+    let app = Router::new()
         .route("/health", get(handlers::common::health))
         .route("/v1/stats", get(handlers::common::stats))
         .route(
@@ -1251,8 +1274,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/flush_cache",
             get(handlers::sglang::flush_cache).post(handlers::sglang::flush_cache),
         )
-        .route("/abort_request", post(handlers::sglang::abort_request))
-        .with_state(state)
+        .route("/abort_request", post(handlers::sglang::abort_request));
+
+    let app = if ui_enabled {
+        app.route("/", get(ui::index))
+            .route("/ui/config", get(ui::config))
+            .route("/ui/assets/{*path}", get(ui::asset))
+    } else {
+        app
+    };
+
+    app.with_state(state)
 }
 
 #[cfg(test)]

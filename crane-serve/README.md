@@ -46,6 +46,27 @@ crane --model-path /path/to/model.gguf \
 crane --model-path /path/to/model --cpu
 ```
 
+### Built-in browser UI
+
+The API server remains headless by default. Add `--ui` to serve the built-in
+React interface at the server root, without starting a separate frontend
+process:
+
+```bash
+crane-serve --model-path /path/to/model --ui
+```
+
+The UI selects its view from the loaded model: ASR models show an audio upload
+and transcription screen; language models show chat; vision-language models
+also expose an image attachment control. The frontend source lives in `ui/`.
+After changing it, rebuild its embedded production assets with
+`npm run build --prefix crane-serve/ui` before building `crane-serve`.
+
+Microphone transcription requires a secure browser origin: use
+`http://localhost:<port>` when opening the UI on the server machine, or HTTPS
+when accessing it through a LAN IP or hostname. Browsers intentionally block
+microphone access from plain HTTP remote origins.
+
 ### Qwen3-TTS Quick Start
 
 > Native speech-tokenizer decoding is enabled by default. ONNX export is optional as a compatibility fallback.
