@@ -534,6 +534,22 @@ pub struct SpeechRequest {
     /// Max codec tokens to generate (controls max duration).
     #[serde(default = "default_audio_max_tokens")]
     pub max_tokens: usize,
+    /// VoxCPM2 only: flow-matching (CFM) sampler steps per audio frame.
+    /// Omitted keeps the model default (10). Lower = faster generation for a
+    /// modest quality cost — the CFM decoder dominates VoxCPM2 latency.
+    #[serde(default)]
+    pub cfm_steps: Option<usize>,
+    /// VoxCPM2 only: classifier-free guidance strength for the CFM sampler.
+    /// Omitted keeps the model default (2.0).
+    #[serde(default)]
+    pub cfg_scale: Option<f64>,
+    /// Stream the audio as it is generated (chunked `audio/pcm`, 16-bit LE
+    /// mono at the model's sample rate — see the `X-Sample-Rate` response
+    /// header). Requires `response_format: "pcm"` and is not supported with
+    /// voice cloning. Only VoxCPM2 generates incrementally today; other TTS
+    /// models fall back to emitting the whole clip as one chunk.
+    #[serde(default)]
+    pub stream: bool,
 
     // ── Voice-clone fields (Base model only) ──────────────────
     /// URL or local path to reference audio for voice cloning.

@@ -17,7 +17,7 @@ This directory contains simple, user-friendly examples showing how to use the Cr
 - `tts_custom_voice.rs`: TTS with predefined speakers (CustomVoice model)
 - `tts_voice_clone.rs`: TTS voice cloning from reference audio (Base model)
 - `voxtral_tts_simple.rs`: Voxtral TTS inference
-- `voxcpm2_simple.rs`: VoxCPM2 zero-shot TTS (text in, audio out; no voice cloning yet — see `AGENTS.md`)
+- `voxcpm2_simple.rs`: VoxCPM2 tokenizer-free TTS — zero-shot, all three reference-audio conditioning modes (transcript-free "Controllable Cloning" via `--ref-wav`, "Ultimate Cloning" via `--prompt-wav`/`--prompt-text`, and the combined mode), and `--stream` for incremental generation with time-to-first-chunk reporting
 
 ### Vision Examples
 - `vision_simple.rs`: Vision capabilities — image analysis and OCR
@@ -64,6 +64,21 @@ cargo run --bin tts_voice_clone --release -- vendor/Qwen3-TTS-12Hz-0.6B-Base
 # TTS — Auto-detect model type
 cargo run --bin tts_simple --release -- vendor/Qwen3-TTS-12Hz-0.6B-CustomVoice
 
+# VoxCPM2 — zero-shot (checkpoint dir needs model.safetensors, config.json,
+# tokenizer.json; audiovae.safetensors is auto-downloaded from the Hub if not
+# already alongside the checkpoint). GPU strongly recommended
+cargo run --bin voxcpm2_simple --release -- checkpoints/VoxCPM2 "Text to synthesize"
+
+# VoxCPM2 — incremental streaming: prints per-chunk timing / time-to-first-chunk
+cargo run --bin voxcpm2_simple --release -- checkpoints/VoxCPM2 "Text to synthesize" --stream
+
+# VoxCPM2 — voice cloning
+#   "Controllable Cloning" (no transcript needed):
+cargo run --bin voxcpm2_simple --release -- checkpoints/VoxCPM2 "Text to speak" --ref-wav ref.wav
+#   "Ultimate Cloning" (continue a clip, given its transcript):
+cargo run --bin voxcpm2_simple --release -- checkpoints/VoxCPM2 "Text to speak" \
+    --prompt-wav ref.wav --prompt-text "What the reference clip says"
+
 # MiniCPM5-1B chat (interactive REPL) — safetensors dir or a bare .gguf file both work
 cargo run --bin chat_cli --release -- -m /path/to/MiniCPM5-1B --model-type minicpm5
 cargo run --bin chat_cli --release -- -m /path/to/MiniCPM5-1B-Q8_0.gguf --model-type minicpm5
@@ -76,7 +91,15 @@ cargo run --bin minicpmo_duplex_simple --release
 cargo run --bin minicpmo_duplex_simple --release -- --wav path/to/clip.wav --no-playback --output-wav /tmp/response.wav
 ```
 
-TTS examples write generated audio to `data/audio/output`.
+TTS examples write generated audio to `data/audio/output`. `voxcpm2_simple`
+writes to `--output-dir` (default `data/audio/output`) and, with `--stream`,
+still saves the full concatenated waveform once the stream completes.
+
+VoxCPM2 also streams over HTTP: `crane-serve --model-type voxcpm2` then
+`POST /v1/audio/speech` with `"stream": true` and `"response_format": "pcm"`
+returns a chunked `audio/pcm` body (16-bit LE mono; sample rate in the
+`X-Sample-Rate` header) as patches are generated. `"cfm_steps"` (default 10,
+lower = faster) and `"cfg_scale"` are also accepted there.
 
 ## Prerequisites
 
