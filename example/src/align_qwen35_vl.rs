@@ -140,7 +140,10 @@ fn main() -> Result<()> {
 
     // ===== 1. vision embedding alignment (identical pixel inputs) =====
     let emb_crane = model.encode_images(&pv_t, &grid_t)?;
-    let emb_crane_f = emb_crane.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+    let emb_crane_f = emb_crane
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
     let rows = emb_crane_f.len() / 2048;
     let mut row_cos = Vec::with_capacity(rows);
     for r in 0..rows {
@@ -241,7 +244,11 @@ fn main() -> Result<()> {
             matches += 1;
         }
     }
-    let acc = if n > 0 { matches as f64 / n as f64 } else { 0.0 };
+    let acc = if n > 0 {
+        matches as f64 / n as f64
+    } else {
+        0.0
+    };
 
     // also produce decoded text for eyeballing
     let text = model
@@ -264,8 +271,10 @@ fn main() -> Result<()> {
 
     // ===== print report =====
     println!("\n========== ALIGNMENT: Crane vs PyTorch (Qwen3.5-2B-VL) ==========");
-    println!("device={device:?} dtype={dtype:?}  prompt_len={s} gen_len(crane)={}",
-             generated.len());
+    println!(
+        "device={device:?} dtype={dtype:?}  prompt_len={s} gen_len(crane)={}",
+        generated.len()
+    );
     println!();
     println!("--- vision tower (identical pixel_values) ---");
     println!("  vision emb mean row cosine : {mean_row_cos:.6}");
@@ -275,8 +284,10 @@ fn main() -> Result<()> {
     println!();
     println!("--- prefill logits (last position) ---");
     println!("  logits cosine             : {logits_cos:.6}");
-    println!("  top-1 argmax match        : {} (crane={crane_argmax} ref={ref_argmax})",
-             crane_argmax == ref_argmax);
+    println!(
+        "  top-1 argmax match        : {} (crane={crane_argmax} ref={ref_argmax})",
+        crane_argmax == ref_argmax
+    );
     println!("  top-5 overlap             : {top5_overlap}/5");
     println!();
     println!("--- greedy decode (same prompt + pixels) ---");
@@ -285,9 +296,7 @@ fn main() -> Result<()> {
     println!("  crane decoded text        : {text}");
     println!();
     println!("--- speed (same machine) ---");
-    println!(
-        "  load model                : {load_ms} ms (crane)"
-    );
+    println!("  load model                : {load_ms} ms (crane)");
     println!(
         "  prefill (multimodal)     : {:.1} ms  -> {:.1} t/s (crane)   | pytorch {:.1} t/s",
         prefill_ms,

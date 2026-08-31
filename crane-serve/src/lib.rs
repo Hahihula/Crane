@@ -253,14 +253,14 @@ fn generate_audio(
         let started = std::time::Instant::now();
         let result = tts
             .generate_voice_clone(&req.input, &req.language, ref_audio_path, ref_text, &opts)
-            .map_err(|e| e.to_string());
+            .map_err(|e| format!("{e:#}"));
         log_generate_result(&result, started.elapsed());
         result
     } else {
         let started = std::time::Instant::now();
         let result = tts
             .generate_speech(&req.input, &req.language, req.voice.as_deref(), &opts)
-            .map_err(|e| e.to_string());
+            .map_err(|e| format!("{e:#}"));
         log_generate_result(&result, started.elapsed());
         result
     }
@@ -351,8 +351,8 @@ fn stream_tts(
         match tts.generate_speech_stream(&req.input, &req.language, req.voice.as_deref(), &opts) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("TTS stream setup failed: {e}");
-                let _ = meta.send(Err(e.to_string()));
+                tracing::error!("TTS stream setup failed: {e:#}");
+                let _ = meta.send(Err(format!("{e:#}")));
                 return;
             },
         };
@@ -381,8 +381,8 @@ fn stream_tts(
             },
             Ok(None) => break,
             Err(e) => {
-                tracing::error!("{model_name} TTS stream failed after {n_chunks} chunks: {e}");
-                let _ = chunks.send(Err(e.to_string()));
+                tracing::error!("{model_name} TTS stream failed after {n_chunks} chunks: {e:#}");
+                let _ = chunks.send(Err(format!("{e:#}")));
                 break;
             },
         }
