@@ -1,8 +1,10 @@
 //! VoxCPM2 orchestration: loads all five sub-networks and implements the
 //! generation loop for all four reference-audio-conditioning modes (see
 //! [`VoxCpm2Conditioning`]) plus prompt-cache reuse (see
-//! [`VoxCpm2PromptCache`]). **Streaming generation is not implemented** —
-//! see the crate-level scope note in `mod.rs`. Port of `voxcpm2.py`'s
+//! [`VoxCpm2PromptCache`]). Incremental streaming is supported via
+//! [`VoxCpm2Model::generate_speech_streaming`] / [`VoxCpm2SpeechStream`];
+//! the batch and streaming paths share one copy of the per-patch loop
+//! (`DecodeLoop`). Port of `voxcpm2.py`'s
 //! `VoxCPM2Model._generate`/`_generate_with_prompt_cache`/`_inference`.
 //!
 //! `enc_outputs = fsq_layer(enc_outputs) * audio_mask + enc_outputs *
@@ -44,15 +46,23 @@ const AUDIO_START_TOKEN: u32 = 101;
 const REF_AUDIO_START_TOKEN: u32 = 103;
 const REF_AUDIO_END_TOKEN: u32 = 104;
 
-/// `_inference`'s `streaming_prefix_len` default. Its only live effect in
-/// non-streaming generation (this pass's scope) is how many of a
-/// continuation prompt's trailing real audio patches get included in the
-/// AudioVAE decode call before being trimmed back off — see
-/// [`VoxCpm2Model::generate_conditioned_inner`]'s doc comment for why that
-/// matters. Hardcoded rather than exposed as a config knob since streaming
-/// itself (where the parameter's name suggests its real purpose) is out of
-/// scope for this pass.
+/// `_inference`'s `streaming_prefix_len` default. In non-streaming
+/// generation it controls how many of a continuation prompt's trailing real
+/// audio patches get included in the AudioVAE decode call before being
+/// trimmed back off — see [`VoxCpm2Model::generate_conditioned_inner`]'s doc
+/// comment. Incremental streaming has its own decode-overlap knob
+/// ([`VoxCpm2StreamConfig::decode_left_context_patches`]); this constant is
+/// only the continuation-seam default.
 const STREAMING_PREFIX_LEN: usize = 4;
+
+/// Patches between host reads of the stop head in the **non-streaming**
+/// decode loop. Each read forces a full device sync (command-buffer commit +
+/// wait) that drains the GPU pipeline; batching the reads keeps the stop
+/// decision bit-exact (an earlier fired step is recovered from the window and
+/// `generated` truncated to match) at the cost of at most `N - 1` extra
+/// sampler runs in the single window where generation ends. Streaming uses an
+/// interval of `1` instead — see [`VoxCpm2Model::generate_speech_streaming`].
+const STOP_CHECK_INTERVAL_BATCH: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct VoxCpm2GenerationConfig {
@@ -130,6 +140,39 @@ pub struct VoxCpm2Model {
     pub encoder_sample_rate: u32,
 }
 
+/// Hub repo holding the pre-converted AudioVAE weights (candle can't read the
+/// upstream `audiovae.pth` pickle — see [`super::audio_vae`]'s module docs).
+const AUDIOVAE_HF_REPO: &str = "hahihula/VoxCPM2-audiovae-safetensors";
+const AUDIOVAE_FILENAME: &str = "audiovae.safetensors";
+
+/// Return a path to `audiovae.safetensors`: the copy next to the checkpoint
+/// if present, otherwise the pre-converted file pulled from
+/// [`AUDIOVAE_HF_REPO`] (cached under `HF_HOME`). This spares every user from
+/// running the one-off `.pth` → safetensors conversion themselves.
+fn resolve_audiovae_safetensors(model_path: &str) -> Result<std::path::PathBuf> {
+    let local = std::path::Path::new(model_path).join(AUDIOVAE_FILENAME);
+    if local.is_file() {
+        return Ok(local);
+    }
+    eprintln!(
+        "[voxcpm2] {AUDIOVAE_FILENAME} not found in {model_path}; fetching the \
+         pre-converted file from https://huggingface.co/{AUDIOVAE_HF_REPO} \
+         (cached under HF_HOME; set it alongside the checkpoint to skip this)"
+    );
+    let api = hf_hub::api::sync::Api::new().context("initialise hf-hub API")?;
+    let repo = api.model(AUDIOVAE_HF_REPO.to_string());
+    // `audiovae.safetensors` is the canonical name; `model.safetensors` is
+    // the fallback in case the Hub repo used the default export filename.
+    repo.get(AUDIOVAE_FILENAME)
+        .or_else(|_| repo.get("model.safetensors"))
+        .with_context(|| {
+            format!(
+                "download {AUDIOVAE_FILENAME} from {AUDIOVAE_HF_REPO} \
+                 (or convert audiovae.pth yourself and place it in {model_path})"
+            )
+        })
+}
+
 impl VoxCpm2Model {
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let cfg = load_config(&format!("{model_path}/config.json"))
@@ -192,12 +235,11 @@ impl VoxCpm2Model {
 
         let avc: AudioVaeShapeConfig = serde_json::from_value(cfg.audio_vae_config.clone())
             .context("parse audio_vae_config")?;
-        let vae_weights_path = format!("{model_path}/audiovae.safetensors");
-        let vae_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[vae_weights_path], DType::F32, device) }
-                .context(
-                    "mmap audiovae.safetensors (run the .pth -> safetensors conversion first)",
-                )?;
+        let vae_weights_path = resolve_audiovae_safetensors(model_path)?;
+        let vae_vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[&vae_weights_path], DType::F32, device)
+        }
+        .with_context(|| format!("mmap AudioVAE weights ({})", vae_weights_path.display()))?;
         let audio_vae = AudioVaeDecoder::new(
             avc.latent_dim,
             avc.decoder_dim,
@@ -213,7 +255,7 @@ impl VoxCpm2Model {
             vae_vb.pp("encoder"),
         )?;
 
-        Ok(Self {
+        let mut model = Self {
             tokenizer,
             base_lm,
             residual_lm,
@@ -238,7 +280,36 @@ impl VoxCpm2Model {
             dtype: *dtype,
             sample_rate: avc.out_sample_rate as u32,
             encoder_sample_rate: avc.sample_rate as u32,
-        })
+        };
+        model.warmup();
+        Ok(model)
+    }
+
+    /// Run one tiny throwaway generation so every compute kernel the real
+    /// generation path uses is compiled/allocated now, at load, instead of
+    /// stalling the first request. On Metal in particular, first-time
+    /// pipeline-state compilation for the `base_lm`/`residual_lm` matmul
+    /// shapes can take **minutes** and is not cached across processes — far
+    /// better to pay it once at startup. Skip with `CRANE_VOXCPM2_NO_WARMUP=1`.
+    fn warmup(&mut self) {
+        if std::env::var_os("CRANE_VOXCPM2_NO_WARMUP").is_some() {
+            return;
+        }
+        let t = std::time::Instant::now();
+        eprintln!(
+            "[voxcpm2] warming up compute kernels (one-off; CRANE_VOXCPM2_NO_WARMUP=1 to skip)…"
+        );
+        let cfg = VoxCpm2GenerationConfig {
+            min_len: 0,
+            max_len: 2,
+            inference_timesteps: 4,
+            cfg_value: 2.0,
+        };
+        if let Err(e) = self.generate_conditioned_inner("a", &VoxCpm2Conditioning::ZeroShot, &cfg) {
+            eprintln!("[voxcpm2] warmup generation failed (non-fatal): {e}");
+        }
+        self.clear_kv_cache();
+        eprintln!("[voxcpm2] warmup done in {:?}", t.elapsed());
     }
 
     pub fn clear_kv_cache(&mut self) {
@@ -351,6 +422,20 @@ impl VoxCpm2Model {
         text_mask: &[u32],
         audio_mask: &[u32],
     ) -> Result<(Tensor, Tensor)> {
+        let timing = std::env::var_os("CRANE_VOXCPM2_TIMING").is_some();
+        macro_rules! phase {
+            ($label:expr, $e:expr) => {{
+                let __t = std::time::Instant::now();
+                let __v = $e;
+                if timing {
+                    if let Ok(ref __r) = __v {
+                        sync_tensor(__r);
+                    }
+                    eprintln!("[voxcpm2] prefill/{}: {:?}", $label, __t.elapsed());
+                }
+                __v
+            }};
+        }
         let total_len = ids.len();
         let ids_tensor = Tensor::new(ids, &self.device)?.unsqueeze(0)?; // [1, T]
         let embed_tokens = self
@@ -358,7 +443,8 @@ impl VoxCpm2Model {
             .embed_tokens
             .as_ref()
             .context("base_lm has no embed_tokens")?;
-        let text_embed = embed_tokens.forward(&ids_tensor)?.to_dtype(self.dtype)?; // [1, T, H]
+        let text_embed =
+            phase!("token_embed", embed_tokens.forward(&ids_tensor))?.to_dtype(self.dtype)?; // [1, T, H]
         let text_embed = if self.lm_use_mup {
             (text_embed * self.lm_scale_emb)?
         } else {
@@ -368,13 +454,26 @@ impl VoxCpm2Model {
         let text_mask_t = mask_to_tensor(text_mask, &self.device, self.dtype)?;
         let audio_mask_t = mask_to_tensor(audio_mask, &self.device, self.dtype)?;
 
-        let feat_embed = self
-            .enc_to_lm_proj
-            .forward(&self.feat_encoder.forward(audio_feat)?)?; // [1, T, H]
+        // `feat_embed` is only ever read through `broadcast_mul(&audio_mask_t)`
+        // (both in `combined_embed` and `masked_feat_embed`), so when every
+        // position is text-masked — zero-shot, i.e. the common path — its
+        // value is irrelevant and the `[1, T, ...]` feat-encoder pass (a
+        // batch-`T` transformer, ~the single most expensive op in prefill on
+        // GPUs with high per-kernel overhead) can be skipped entirely.
+        let hidden = text_embed.dim(2)?;
+        let feat_embed = if audio_mask.contains(&1) {
+            phase!(
+                "feat_encoder",
+                self.enc_to_lm_proj
+                    .forward(&self.feat_encoder.forward(audio_feat)?)
+            )? // [1, T, H]
+        } else {
+            Tensor::zeros((1, total_len, hidden), self.dtype, &self.device)?
+        };
         let combined_embed =
             (text_embed.broadcast_mul(&text_mask_t)? + feat_embed.broadcast_mul(&audio_mask_t)?)?;
 
-        let enc_outputs_raw = self.base_lm.forward(&combined_embed, true)?; // [1, T, H]
+        let enc_outputs_raw = phase!("base_lm", self.base_lm.forward(&combined_embed, true))?; // [1, T, H]
         let fsq_out = self.fsq_layer.forward(&enc_outputs_raw)?;
         let enc_outputs = (fsq_out.broadcast_mul(&audio_mask_t)?
             + enc_outputs_raw.broadcast_mul(&text_mask_t)?)?;
@@ -384,7 +483,7 @@ impl VoxCpm2Model {
         let residual_in = self
             .fusion_concat_proj
             .forward(&Tensor::cat(&[&enc_outputs, &masked_feat_embed], 2)?)?;
-        let residual_outputs = self.residual_lm.forward(&residual_in, true)?;
+        let residual_outputs = phase!("residual_lm", self.residual_lm.forward(&residual_in, true))?;
         let residual_hidden = residual_outputs.narrow(1, total_len - 1, 1)?.squeeze(1)?; // [1, H]
 
         Ok((lm_hidden, residual_hidden))
@@ -396,124 +495,116 @@ impl VoxCpm2Model {
         conditioning: &VoxCpm2Conditioning,
         cfg: &VoxCpm2GenerationConfig,
     ) -> Result<(Tensor, Tensor)> {
-        self.clear_kv_cache();
-
-        let (ids, audio_feat, text_mask, audio_mask, context_len) =
-            self.build_conditioning_tensors(target_text, conditioning)?;
-        let total_len = ids.len();
-        anyhow::ensure!(total_len > 0, "empty conditioning sequence");
-
-        let (mut lm_hidden, mut residual_hidden) =
-            self.prefill(&ids, &audio_feat, &text_mask, &audio_mask)?;
-
-        // `feat[:, -1, ...]`: the real last position of the full input —
-        // an all-zero patch for zero-shot/reference-only (text-terminated
-        // prefixes), a real prompt-audio patch for continuation modes. No
-        // special-casing needed: this is correct as-is for every mode.
-        let mut prefix_feat_cond = audio_feat.narrow(1, total_len - 1, 1)?.squeeze(1)?; // [1, P, D]
-
-        // Seed `generated` with the prompt's own trailing `context_len`
-        // patches (continuation modes only) — see this method's doc comment.
-        let mut generated: Vec<Tensor> = Vec::new();
-        if context_len > 0 {
-            let audio_positions: Vec<usize> = audio_mask
-                .iter()
-                .enumerate()
-                .filter(|&(_, &m)| m == 1)
-                .map(|(i, _)| i)
-                .collect();
-            let seed_positions = &audio_positions[audio_positions.len() - context_len..];
-            for &pos in seed_positions {
-                generated.push(audio_feat.narrow(1, pos, 1)?.squeeze(1)?);
-            }
-        }
-
-        for step in 0..cfg.max_len {
-            let dit_h1 = self.lm_to_dit_proj.forward(&lm_hidden)?;
-            let dit_h2 = self.res_to_dit_proj.forward(&residual_hidden)?;
-            let dit_hidden = Tensor::cat(&[&dit_h1, &dit_h2], 1)?; // [1, 2*dit_hidden]
-
-            let cond = prefix_feat_cond.transpose(1, 2)?.contiguous()?; // [1, D, P]
-            let pred_feat = self.feat_decoder.forward(
-                &dit_hidden,
-                cfg.inference_timesteps,
-                self.patch_size,
-                &cond,
-                cfg.cfg_value,
-                1.0,
-                1.0,
-                true,
-            )?; // [1, D, P]
-            let pred_feat = pred_feat.transpose(1, 2)?.contiguous()?; // [1, P, D]
-
-            let curr_embed = self.feat_encoder.forward(&pred_feat.unsqueeze(1)?)?; // [1, 1, H_enc]
-            let curr_embed = self.enc_to_lm_proj.forward(&curr_embed)?; // [1, 1, H]
-
-            generated.push(pred_feat.clone());
-            prefix_feat_cond = pred_feat;
-
-            let stop_hidden = Activation::Silu.forward(&self.stop_proj.forward(&lm_hidden)?)?;
-            let stop_logits = self.stop_head.forward(&stop_hidden)?; // [1, 2]
-            let stop_flag = stop_logits.argmax(1)?.reshape(())?.to_scalar::<u32>()?;
-            if step > cfg.min_len && stop_flag == 1 {
+        let mut dl = DecodeLoop::init(self, target_text, conditioning)?;
+        while dl.step < cfg.max_len {
+            if let StepOutcome::Finished = dl.advance(self, cfg, STOP_CHECK_INTERVAL_BATCH)? {
                 break;
             }
-
-            let step_embed = curr_embed.squeeze(1)?; // [1, H]
-            let position = total_len + step;
-            let next_lm_hidden = self.base_lm.forward_step(&step_embed, position)?; // [1, H]
-            lm_hidden = self.fsq_layer.forward(&next_lm_hidden)?; // FSQ applied for every generated step.
-            let residual_input = self
-                .fusion_concat_proj
-                .forward(&Tensor::cat(&[&lm_hidden, &step_embed], 1)?)?;
-            residual_hidden = self.residual_lm.forward_step(&residual_input, position)?;
         }
 
         anyhow::ensure!(
-            generated.len() > context_len,
+            dl.generated.len() > dl.context_len,
             "generated zero new audio patches"
         );
 
-        let stack = |patches: &[Tensor]| -> Result<Tensor> {
-            // "b t p d -> b d (t p)": stack the per-step patches into a time
-            // axis, then permute+flatten so channels lead and (step,
-            // within-patch) collapse into one axis, step outer / within-patch inner.
-            let terms: Vec<Tensor> = patches
-                .iter()
-                .map(|p| p.unsqueeze(1))
-                .collect::<candle_core::Result<_>>()?;
-            let stacked = Tensor::cat(&terms, 1)?; // [1, n, P, D]
-            let (_b, n, p, d) = stacked.dims4()?;
-            Ok(stacked
-                .permute((0, 3, 1, 2))?
-                .contiguous()?
-                .reshape((1, d, n * p))?)
-        };
-
-        let latent = stack(&generated)?;
-        let wav = self
-            .audio_vae
-            .decode(&latent.to_dtype(DType::F32)?)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let wav = if context_len > 0 {
-            let trim = self.patch_size * self.decoder_chunk_size * context_len;
-            let total = wav.dim(2)?;
-            wav.narrow(2, trim, total - trim)?
-        } else {
-            wav
-        };
+        // Full decode, trimming the leading `context_len` seed patches' worth
+        // of samples (continuation-mode seam — see this method's doc comment;
+        // `0` for zero-shot/reference-only).
+        let wav = self.decode_patches(&dl.generated, dl.context_len)?;
 
         // Patch format `[1, n_new, P, D]` — matches `encode_reference_audio`'s
         // output convention (NOT the flattened-latent `[1, D, n*P]` format
-        // `stack()`/`audio_vae.decode()` use), so `merge_prompt_cache` can
-        // `Tensor::cat` this directly with an existing `prompt_feat`/round-trip
-        // it back through `Continuation`/`RefContinuation` conditioning later.
-        let new_patches: Vec<Tensor> = generated[context_len..]
+        // `decode_patches` uses), so `merge_prompt_cache` can `Tensor::cat`
+        // this directly with an existing `prompt_feat`/round-trip it back
+        // through `Continuation`/`RefContinuation` conditioning later.
+        let new_patches: Vec<Tensor> = dl.generated[dl.context_len..]
             .iter()
             .map(|p| p.unsqueeze(1))
             .collect::<candle_core::Result<_>>()?;
         let generated_feat = Tensor::cat(&new_patches, 1)?;
         Ok((wav, generated_feat))
+    }
+
+    /// Stack per-step `[1, P, D]` latent patches into a `[1, D, n*P]` latent
+    /// sequence and run it through the AudioVAE decoder, returning a
+    /// `[1, 1, T]` f32 waveform. `trim_patches` leading patches' worth of
+    /// samples are dropped from the front — used both for the continuation
+    /// seam ([`Self::generate_conditioned_inner`]) and for streaming
+    /// left-context overlap ([`VoxCpm2SpeechStream`]).
+    fn decode_patches(&self, patches: &[Tensor], trim_patches: usize) -> Result<Tensor> {
+        anyhow::ensure!(!patches.is_empty(), "decode_patches: no patches");
+        // "b t p d -> b d (t p)": stack the patches into a time axis, then
+        // permute+flatten so channels lead and (step, within-patch) collapse
+        // into one axis, step outer / within-patch inner.
+        let terms: Vec<Tensor> = patches
+            .iter()
+            .map(|p| p.unsqueeze(1))
+            .collect::<candle_core::Result<_>>()?;
+        let stacked = Tensor::cat(&terms, 1)?; // [1, n, P, D]
+        let (_b, n, p, d) = stacked.dims4()?;
+        let latent = stacked
+            .permute((0, 3, 1, 2))?
+            .contiguous()?
+            .reshape((1, d, n * p))?;
+        let tm = std::env::var_os("CRANE_VOXCPM2_TIMING").map(|_| std::time::Instant::now());
+        let wav = self
+            .audio_vae
+            .decode(&latent.to_dtype(DType::F32)?)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(t) = tm {
+            sync_tensor(&wav);
+            eprintln!("[voxcpm2] AudioVAE decode ({n} patches): {:?}", t.elapsed());
+        }
+        if trim_patches == 0 {
+            return Ok(wav);
+        }
+        let trim = self.patch_size * self.decoder_chunk_size * trim_patches;
+        let total = wav.dim(2)?;
+        anyhow::ensure!(
+            trim < total,
+            "decode_patches: trim ({trim}) >= decoded length ({total})"
+        );
+        Ok(wav.narrow(2, trim, total - trim)?)
+    }
+
+    /// Streaming counterpart of [`Self::generate_speech_conditioned`]: returns
+    /// a [`VoxCpm2SpeechStream`] iterator that yields flat `[n_samples]` f32
+    /// PCM chunks as the autoregressive loop produces patches, so callers can
+    /// start playback long before the whole utterance is generated.
+    ///
+    /// The waveform is bit-for-bit the same as the non-streaming path for the
+    /// same inputs (each chunk is decoded with
+    /// [`VoxCpm2StreamConfig::decode_left_context_patches`] patches of real
+    /// left context re-fed to the causal AudioVAE decoder, then trimmed), with
+    /// two deliberate differences: the stop head is checked every step (no
+    /// deferred-sync batching — a stream must not emit audio it may later have
+    /// to retract), and the near-silent-output retry in
+    /// [`Self::generate_conditioned_retrying`] is skipped (early chunks are
+    /// already gone by the time the whole clip's amplitude is known).
+    pub fn generate_speech_streaming(
+        &mut self,
+        target_text: &str,
+        conditioning: &VoxCpm2Conditioning,
+        cfg: &VoxCpm2GenerationConfig,
+        stream_cfg: VoxCpm2StreamConfig,
+    ) -> Result<VoxCpm2SpeechStream<'_>> {
+        anyhow::ensure!(
+            stream_cfg.first_chunk_patches > 0 && stream_cfg.chunk_patches > 0,
+            "stream chunk sizes must be non-zero"
+        );
+        let dl = DecodeLoop::init(self, target_text, conditioning)?;
+        let emitted_patches = dl.context_len;
+        let sample_rate = self.sample_rate;
+        Ok(VoxCpm2SpeechStream {
+            model: self,
+            dl,
+            cfg: cfg.clone(),
+            stream_cfg,
+            emitted_patches,
+            generation_done: false,
+            failed: false,
+            sample_rate,
+        })
     }
 
     /// Port of `_make_ref_prefix`: brackets a reference-audio segment with
@@ -727,6 +818,221 @@ impl VoxCpm2Model {
     }
 }
 
+/// Whether [`DecodeLoop::advance`] produced a patch that generation should
+/// keep extending, or hit its terminal condition (stop head fired, or
+/// `max_len` reached).
+enum StepOutcome {
+    Continued,
+    Finished,
+}
+
+/// The mutable state of VoxCPM2's autoregressive patch loop, factored out of
+/// [`VoxCpm2Model::generate_conditioned_inner`] so the batch and streaming
+/// paths share exactly one copy of the per-patch numerics. Port of
+/// `_inference`'s decode loop (`voxcpm2.py`).
+struct DecodeLoop {
+    lm_hidden: Tensor,
+    residual_hidden: Tensor,
+    /// The previous patch, fed as CFM conditioning for the next one. `[1, P, D]`.
+    prefix_feat_cond: Tensor,
+    /// `context_len` seed patches (continuation modes) followed by one
+    /// `[1, P, D]` patch per completed step. `pruned` of them have been
+    /// drained off the front by a streaming consumer.
+    generated: Vec<Tensor>,
+    /// Prefill sequence length — the absolute position of generated step 0.
+    total_len: usize,
+    /// Leading seed patches copied from the prompt audio (never emitted).
+    context_len: usize,
+    /// Completed steps so far (`== generated.len() + pruned - context_len`).
+    step: usize,
+    /// Patches drained off the front of `generated` (streaming only).
+    pruned: usize,
+    /// On-device argmax of each not-yet-checked step's stop logits.
+    pending_stop: Vec<Tensor>,
+    /// Step index of `pending_stop[0]`.
+    pending_base: usize,
+    /// Step at which the stop head fired, once detected.
+    stopped_at: Option<usize>,
+    /// `CRANE_VOXCPM2_TIMING` set — print per-phase wall-clock to stderr.
+    timing: bool,
+}
+
+impl DecodeLoop {
+    fn init(
+        m: &mut VoxCpm2Model,
+        target_text: &str,
+        conditioning: &VoxCpm2Conditioning,
+    ) -> Result<Self> {
+        let timing = std::env::var_os("CRANE_VOXCPM2_TIMING").is_some();
+        m.clear_kv_cache();
+
+        let (ids, audio_feat, text_mask, audio_mask, context_len) =
+            m.build_conditioning_tensors(target_text, conditioning)?;
+        let total_len = ids.len();
+        anyhow::ensure!(total_len > 0, "empty conditioning sequence");
+
+        let t0 = std::time::Instant::now();
+        let (lm_hidden, residual_hidden) = m.prefill(&ids, &audio_feat, &text_mask, &audio_mask)?;
+        if timing {
+            // `prefill` is lazy on GPU backends; force it to finish so the
+            // number reflects prefill and not the next sync point.
+            sync_tensor(&lm_hidden);
+            eprintln!(
+                "[voxcpm2] prefill (seq_len={total_len}, feat_encoder={}): {:?}",
+                audio_mask.contains(&1),
+                t0.elapsed()
+            );
+        }
+
+        // `feat[:, -1, ...]`: the real last position of the full input — an
+        // all-zero patch for zero-shot/reference-only (text-terminated
+        // prefixes), a real prompt-audio patch for continuation modes.
+        let prefix_feat_cond = audio_feat.narrow(1, total_len - 1, 1)?.squeeze(1)?; // [1, P, D]
+
+        // Seed `generated` with the prompt's own trailing `context_len`
+        // patches (continuation modes only).
+        let mut generated: Vec<Tensor> = Vec::new();
+        if context_len > 0 {
+            let audio_positions: Vec<usize> = audio_mask
+                .iter()
+                .enumerate()
+                .filter(|&(_, &mm)| mm == 1)
+                .map(|(i, _)| i)
+                .collect();
+            for &pos in &audio_positions[audio_positions.len() - context_len..] {
+                generated.push(audio_feat.narrow(1, pos, 1)?.squeeze(1)?);
+            }
+        }
+
+        Ok(Self {
+            lm_hidden,
+            residual_hidden,
+            prefix_feat_cond,
+            generated,
+            total_len,
+            context_len,
+            step: 0,
+            pruned: 0,
+            pending_stop: Vec::new(),
+            pending_base: 0,
+            stopped_at: None,
+            timing,
+        })
+    }
+
+    /// Run one step of the decode loop: sample the next patch via the CFM
+    /// decoder, append it to `generated`, evaluate the stop head, and (unless
+    /// finished) advance `base_lm`/`residual_lm` by one position.
+    ///
+    /// `stop_check_interval` batches host reads of the stop head — `1` checks
+    /// every step (streaming), larger values sync once per window and recover
+    /// the exact fired step (see [`STOP_CHECK_INTERVAL_BATCH`]).
+    fn advance(
+        &mut self,
+        m: &mut VoxCpm2Model,
+        cfg: &VoxCpm2GenerationConfig,
+        stop_check_interval: usize,
+    ) -> Result<StepOutcome> {
+        debug_assert!(self.stopped_at.is_none(), "advance() called after Finished");
+        let step = self.step;
+        // First few steps pay one-time GPU kernel/pipeline compilation; time
+        // the sub-phases so a pathological backend is easy to spot.
+        let tm = (self.timing && step < 3).then(std::time::Instant::now);
+
+        let dit_h1 = m.lm_to_dit_proj.forward(&self.lm_hidden)?;
+        let dit_h2 = m.res_to_dit_proj.forward(&self.residual_hidden)?;
+        let dit_hidden = Tensor::cat(&[&dit_h1, &dit_h2], 1)?; // [1, 2*dit_hidden]
+
+        let cond = self.prefix_feat_cond.transpose(1, 2)?.contiguous()?; // [1, D, P]
+        let pred_feat = m.feat_decoder.forward(
+            &dit_hidden,
+            cfg.inference_timesteps,
+            m.patch_size,
+            &cond,
+            cfg.cfg_value,
+            1.0,
+            1.0,
+            true,
+        )?; // [1, D, P]
+        let pred_feat = pred_feat.transpose(1, 2)?.contiguous()?; // [1, P, D]
+        if let Some(t) = tm {
+            sync_tensor(&pred_feat);
+            eprintln!(
+                "[voxcpm2] step {step}: CFM sampler ({} steps): {:?}",
+                cfg.inference_timesteps,
+                t.elapsed()
+            );
+        }
+
+        let curr_embed = m.feat_encoder.forward(&pred_feat.unsqueeze(1)?)?; // [1, 1, H_enc]
+        let curr_embed = m.enc_to_lm_proj.forward(&curr_embed)?; // [1, 1, H]
+
+        self.generated.push(pred_feat.clone());
+        self.prefix_feat_cond = pred_feat;
+
+        let stop_hidden = Activation::Silu.forward(&m.stop_proj.forward(&self.lm_hidden)?)?;
+        let stop_logits = m.stop_head.forward(&stop_hidden)?; // [1, 2]
+        self.pending_stop.push(stop_logits.argmax(1)?); // [1], stays on-device
+
+        let last_step = step + 1 == cfg.max_len;
+        if self.pending_stop.len() >= stop_check_interval || last_step {
+            // One host sync for the whole window instead of one per step.
+            let flags: Vec<u32> = Tensor::cat(&self.pending_stop, 0)?.to_vec1()?;
+            // First step in the window past `min_len` whose stop flag fired —
+            // matches a per-step `step > min_len && stop_flag == 1` guard.
+            let fired = flags
+                .iter()
+                .enumerate()
+                .find(|&(rel, &f)| f == 1 && self.pending_base + rel > cfg.min_len)
+                .map(|(rel, _)| self.pending_base + rel);
+            if let Some(s) = fired {
+                self.stopped_at = Some(s);
+                // Drop patches produced after the fired step (only possible
+                // when `stop_check_interval > 1`).
+                self.generated
+                    .truncate((self.context_len + s + 1).saturating_sub(self.pruned));
+                self.step = s + 1;
+                return Ok(StepOutcome::Finished);
+            }
+            self.pending_stop.clear();
+            self.pending_base = step + 1;
+        }
+
+        if last_step {
+            self.step = step + 1;
+            return Ok(StepOutcome::Finished);
+        }
+
+        let step_embed = curr_embed.squeeze(1)?; // [1, H]
+        let position = self.total_len + step;
+        let next_lm_hidden = m.base_lm.forward_step(&step_embed, position)?; // [1, H]
+        self.lm_hidden = m.fsq_layer.forward(&next_lm_hidden)?; // FSQ every generated step.
+        let residual_input = m
+            .fusion_concat_proj
+            .forward(&Tensor::cat(&[&self.lm_hidden, &step_embed], 1)?)?;
+        self.residual_hidden = m.residual_lm.forward_step(&residual_input, position)?;
+        self.step = step + 1;
+        if let Some(t) = tm {
+            sync_tensor(&self.residual_hidden);
+            eprintln!("[voxcpm2] step {step}: total: {:?}", t.elapsed());
+        }
+        Ok(StepOutcome::Continued)
+    }
+
+    /// Total patches produced so far, including any drained off the front.
+    fn total_patches(&self) -> usize {
+        self.generated.len() + self.pruned
+    }
+}
+
+/// Force a lazy GPU backend to finish computing `t` (for wall-clock timing).
+fn sync_tensor(t: &Tensor) {
+    let _ = t
+        .to_dtype(DType::F32)
+        .and_then(|t| t.sum_all())
+        .and_then(|t| t.to_scalar::<f32>());
+}
+
 fn mask_to_tensor(mask: &[u32], device: &Device, dtype: DType) -> Result<Tensor> {
     let floats: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
     Ok(Tensor::from_vec(floats, (1, mask.len(), 1), device)?.to_dtype(dtype)?)
@@ -810,6 +1116,129 @@ impl VoxCpm2PromptCache {
                 prompt_feat: p.clone(),
             },
             (None, None) => VoxCpm2Conditioning::ZeroShot,
+        }
+    }
+}
+
+/// Chunking knobs for [`VoxCpm2Model::generate_speech_streaming`]. Each patch
+/// is `patch_size` latent frames ≈ 0.24 s of 48 kHz audio.
+#[derive(Debug, Clone, Copy)]
+pub struct VoxCpm2StreamConfig {
+    /// Patches to accumulate before emitting the first chunk (time-to-first-audio).
+    pub first_chunk_patches: usize,
+    /// Patches per subsequent chunk.
+    pub chunk_patches: usize,
+    /// Trailing already-emitted patches re-fed to the causal AudioVAE decoder
+    /// as left context on every chunk (then trimmed back off), so each chunk's
+    /// samples match a full-sequence decode. Must exceed the decoder's
+    /// latent-frame receptive field (~2 patches); `4` leaves headroom.
+    pub decode_left_context_patches: usize,
+}
+
+impl Default for VoxCpm2StreamConfig {
+    fn default() -> Self {
+        Self {
+            first_chunk_patches: 2,
+            chunk_patches: 8,
+            decode_left_context_patches: 4,
+        }
+    }
+}
+
+/// Incremental speech generator returned by
+/// [`VoxCpm2Model::generate_speech_streaming`]. Implements
+/// `Iterator<Item = Result<Tensor>>`, each item a flat `[n_samples]` f32 PCM
+/// chunk at [`VoxCpm2Model::sample_rate`]. After an `Err` the iterator ends.
+pub struct VoxCpm2SpeechStream<'a> {
+    model: &'a mut VoxCpm2Model,
+    dl: DecodeLoop,
+    cfg: VoxCpm2GenerationConfig,
+    stream_cfg: VoxCpm2StreamConfig,
+    /// Patches whose audio has already been emitted (starts at `context_len`).
+    emitted_patches: usize,
+    /// The decode loop hit its stop head / `max_len`.
+    generation_done: bool,
+    /// A previous `next()` returned `Err`; the iterator is now exhausted.
+    failed: bool,
+    pub sample_rate: u32,
+}
+
+impl VoxCpm2SpeechStream<'_> {
+    fn try_next(&mut self) -> Result<Option<Tensor>> {
+        let target = if self.emitted_patches == self.dl.context_len {
+            self.stream_cfg.first_chunk_patches
+        } else {
+            self.stream_cfg.chunk_patches
+        };
+
+        // Generate patches until we have `target` unemitted ones, generation
+        // ends, or the hard `max_len` cap is hit.
+        while !self.generation_done
+            && self.dl.step < self.cfg.max_len
+            && self.dl.total_patches() - self.emitted_patches < target
+        {
+            // interval `1`: a stream must never emit a patch it might later
+            // have to retract, so the stop head is checked every step.
+            if let StepOutcome::Finished = self.dl.advance(self.model, &self.cfg, 1)? {
+                self.generation_done = true;
+            }
+        }
+
+        let total = self.dl.total_patches();
+        if total <= self.emitted_patches {
+            return Ok(None);
+        }
+
+        // Re-feed up to `decode_left_context_patches` already-emitted patches
+        // as causal left context, then trim their samples from the output.
+        let ctx = self
+            .stream_cfg
+            .decode_left_context_patches
+            .min(self.emitted_patches);
+        let win_start = self.emitted_patches - ctx;
+        anyhow::ensure!(
+            win_start >= self.dl.pruned,
+            "streaming left context {ctx} outran the retained patch window"
+        );
+        let lo = win_start - self.dl.pruned;
+        let wav = self
+            .model
+            .decode_patches(&self.dl.generated[lo..], ctx)?
+            .flatten_all()?;
+
+        self.emitted_patches = total;
+
+        // Keep only what the next chunk's left context can still need.
+        let keep = self
+            .emitted_patches
+            .saturating_sub(self.stream_cfg.decode_left_context_patches);
+        let drain = keep.saturating_sub(self.dl.pruned);
+        if drain > 0 {
+            self.dl.generated.drain(..drain);
+            self.dl.pruned += drain;
+        }
+
+        Ok(Some(wav))
+    }
+}
+
+impl Iterator for VoxCpm2SpeechStream<'_> {
+    type Item = Result<Tensor>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        if self.generation_done && self.emitted_patches >= self.dl.total_patches() {
+            return None;
+        }
+        match self.try_next() {
+            Ok(Some(chunk)) => Some(Ok(chunk)),
+            Ok(None) => None,
+            Err(e) => {
+                self.failed = true;
+                Some(Err(e))
+            },
         }
     }
 }

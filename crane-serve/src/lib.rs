@@ -235,6 +235,8 @@ fn generate_audio(
         temperature: req.temperature,
         top_p: req.top_p,
         repetition_penalty: req.repetition_penalty,
+        cfm_steps: req.cfm_steps,
+        cfg_scale: req.cfg_scale,
     };
     if let Some(ref ref_audio_path) = req.reference_audio {
         if !tts.supports_voice_cloning() {
@@ -284,32 +286,109 @@ fn run_tts_loop(
 ) {
     info!("{model_name} engine thread started");
     let audio_info = tts.audio_info();
-    while let Some(req) = tts_rx.blocking_recv() {
+    while let Some(mut req) = tts_rx.blocking_recv() {
         tracing::debug!(
-            "TTS request received: language={}, voice={:?}, input_len={}",
+            "TTS request received: language={}, voice={:?}, input_len={}, stream={}",
             req.language,
             req.voice,
-            req.input.chars().count()
+            req.input.chars().count(),
+            matches!(
+                req.responder,
+                Some(handlers::tts::TtsResponder::Stream { .. })
+            ),
         );
-        let result = generate_audio(tts, model_name, &req).and_then(|audio| {
-            let encoded = encode_tts_audio(&audio, &audio_info, &req.response_format);
-            tracing::debug!("TTS: dropping output tensor {:?}", audio.dims());
-            drop(audio);
-            tracing::debug!("TTS: output tensor dropped");
-            encoded
-        });
-        tracing::debug!("TTS: result ready ({}), sending to client", result.is_ok());
-        if let Err(ref e) = result {
-            tracing::error!(
-                "TTS generation failed: {e} (language={}, voice={:?}, input_len={})",
-                req.language,
-                req.voice,
-                req.input.chars().count()
-            );
+        match req.responder.take().expect("responder set on the wire") {
+            handlers::tts::TtsResponder::Whole(tx) => {
+                let result = generate_audio(tts, model_name, &req).and_then(|audio| {
+                    let encoded = encode_tts_audio(&audio, &audio_info, &req.response_format);
+                    tracing::debug!("TTS: dropping output tensor {:?}", audio.dims());
+                    drop(audio);
+                    tracing::debug!("TTS: output tensor dropped");
+                    encoded
+                });
+                tracing::debug!("TTS: result ready ({}), sending to client", result.is_ok());
+                if let Err(ref e) = result {
+                    tracing::error!(
+                        "TTS generation failed: {e} (language={}, voice={:?}, input_len={})",
+                        req.language,
+                        req.voice,
+                        req.input.chars().count()
+                    );
+                }
+                let _ = tx.send(result);
+            },
+            handlers::tts::TtsResponder::Stream { meta, chunks } => {
+                stream_tts(tts, model_name, &req, meta, chunks);
+            },
         }
-        let _ = req.tx.send(result);
-        tracing::debug!("TTS: result sent to client, waiting for next request");
+        tracing::debug!("TTS: request handled, waiting for next request");
     }
+}
+
+/// Drive [`crane::audio::Tts::generate_speech_stream`] for one request,
+/// pushing PCM16-LE frames onto `chunks` as the model produces them. `meta`
+/// fires exactly once — the sample rate on success, or a setup error — so the
+/// HTTP handler can choose a status code before the 200 body starts.
+fn stream_tts(
+    tts: &mut dyn crane::audio::Tts,
+    model_name: &str,
+    req: &TtsGenerateRequest,
+    meta: tokio::sync::oneshot::Sender<Result<u32, String>>,
+    chunks: tokio::sync::mpsc::UnboundedSender<Result<Vec<u8>, String>>,
+) {
+    let opts = crane_core::generation::SpeechOptions {
+        max_new_tokens: req.max_tokens,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        repetition_penalty: req.repetition_penalty,
+        cfm_steps: req.cfm_steps,
+        cfg_scale: req.cfg_scale,
+    };
+    let started = std::time::Instant::now();
+    let mut stream =
+        match tts.generate_speech_stream(&req.input, &req.language, req.voice.as_deref(), &opts) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("TTS stream setup failed: {e}");
+                let _ = meta.send(Err(e.to_string()));
+                return;
+            },
+        };
+    let sample_rate = stream.audio_info.sample_rate;
+    if meta.send(Ok(sample_rate)).is_err() {
+        return; // client already gone
+    }
+
+    let mut n_chunks = 0usize;
+    loop {
+        match stream.next_chunk() {
+            Ok(Some(tensor)) => {
+                let samples: Vec<f32> = match tensor.flatten_all().and_then(|t| t.to_vec1()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = chunks.send(Err(e.to_string()));
+                        break;
+                    },
+                };
+                let pcm = crane::audio::pcm_f32_to_i16(&samples);
+                n_chunks += 1;
+                if chunks.send(Ok(pcm)).is_err() {
+                    tracing::debug!("{model_name} TTS stream: client disconnected, stopping");
+                    break;
+                }
+            },
+            Ok(None) => break,
+            Err(e) => {
+                tracing::error!("{model_name} TTS stream failed after {n_chunks} chunks: {e}");
+                let _ = chunks.send(Err(e.to_string()));
+                break;
+            },
+        }
+    }
+    tracing::debug!(
+        "{model_name} TTS stream done: {n_chunks} chunks in {:?}",
+        started.elapsed()
+    );
 }
 
 fn transcribe_audio(

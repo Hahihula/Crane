@@ -9,8 +9,9 @@
 //! Covers **zero-shot generation and reference-audio conditioning (voice
 //! cloning) with prompt-cache support** — see [`model::VoxCpm2Conditioning`]
 //! for the four supported modes and [`model::VoxCpm2PromptCache`] for
-//! multi-turn reuse. **Streaming generation is not implemented** — see the
-//! module docs on [`model::VoxCpm2Model`].
+//! multi-turn reuse — plus **incremental streaming generation** via
+//! [`model::VoxCpm2Model::generate_speech_streaming`] /
+//! [`model::VoxCpm2SpeechStream`].
 
 pub mod audio_vae;
 pub mod cfm;
@@ -23,4 +24,7 @@ pub mod model;
 pub mod tokenizer;
 
 pub use config::{VoxCpm2Config, load_config};
-pub use model::{VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2PromptCache};
+pub use model::{
+    VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2PromptCache,
+    VoxCpm2SpeechStream, VoxCpm2StreamConfig,
+};

@@ -10,9 +10,13 @@
 //! `depthwise=True` default changes which convs are grouped in a way that
 //! isn't obvious from the config alone (see module-level comments below).
 //!
-//! Weights ship in `audiovae.pth` (PyTorch pickle) — converted once to
-//! `audiovae.safetensors` via a small Python script (`safetensors.torch.save_file`
-//! after `torch.load(..., weights_only=True)`); candle has no pickle reader.
+//! Weights ship in `audiovae.pth` (PyTorch pickle); candle has no pickle
+//! reader. `VoxCpm2Model::new` loads `audiovae.safetensors` from next to the
+//! checkpoint if present, else pulls the pre-converted file from the Hub
+//! (`hahihula/VoxCPM2-audiovae-safetensors`) — see
+//! `model.rs::resolve_audiovae_safetensors`. To convert it yourself:
+//! `safetensors.torch.save_file` after `torch.load(..., weights_only=True)`
+//! (`tests/convert_voxcpm_audivae.py`).
 //! **Zero-padding**, not reflect-padding: this checkpoint's `CausalConv1d.forward`
 //! is `F.pad(x, (left_pad, 0))` with no `mode=` argument, i.e. PyTorch's default
 //! `mode="constant", value=0` — different from `voxtral_tts::codec`'s causal

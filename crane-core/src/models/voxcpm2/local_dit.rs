@@ -6,26 +6,32 @@
 //! itself is named identically to the older, structurally different V1 in
 //! `local_dit.py`, which this crate does not implement).
 
-use candle_core::{Module, Result, Tensor};
+use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::{Activation, Linear, VarBuilder, linear};
 
 use super::config::MiniCpm4Config;
 use super::minicpm4::MiniCpm4Model;
 
 /// Functional (no learnable params) sinusoidal timestep embedding. Port of
-/// `SinusoidalPosEmb` — output width equals `dim` (the DiT's `hidden_size`).
-fn sinusoidal_pos_emb(t: &Tensor, dim: usize, scale: f64) -> Result<Tensor> {
-    let device = t.device();
+/// `SinusoidalPosEmb` — output width is `2 * freqs.len()` (the DiT's
+/// `hidden_size`). `freqs` is the precomputed `[hidden_size/2]` frequency
+/// table (see [`VoxCpmLocDit::time_freqs`]) — identical on every call, so it
+/// is built once at construction instead of re-uploaded per Euler step.
+fn sinusoidal_pos_emb(t: &Tensor, freqs: &Tensor, scale: f64) -> Result<Tensor> {
+    let t = t.to_dtype(DType::F32)?.unsqueeze(1)?; // [N, 1]
+    let angles = (t.broadcast_mul(&freqs.unsqueeze(0)?)? * scale)?; // [N, half_dim]
+    Tensor::cat(&[angles.sin()?, angles.cos()?], 1) // [N, dim]
+}
+
+/// Builds the `[dim/2]` sinusoidal frequency table `exp(-i · ln(10000) /
+/// (half_dim - 1))` — the part of [`sinusoidal_pos_emb`] that never changes.
+fn sinusoidal_freqs(dim: usize, device: &candle_core::Device) -> Result<Tensor> {
     let half_dim = dim / 2;
     let emb_scale = (10000f64).ln() / (half_dim as f64 - 1.0);
     let freqs: Vec<f32> = (0..half_dim)
         .map(|i| (-(i as f64) * emb_scale).exp() as f32)
         .collect();
-    let freqs = Tensor::from_vec(freqs, half_dim, device)?; // [half_dim]
-
-    let t = t.to_dtype(candle_core::DType::F32)?.unsqueeze(1)?; // [N, 1]
-    let angles = (t.broadcast_mul(&freqs.unsqueeze(0)?)? * scale)?; // [N, half_dim]
-    Tensor::cat(&[angles.sin()?, angles.cos()?], 1) // [N, dim]
+    Tensor::from_vec(freqs, half_dim, device)
 }
 
 struct TimestepEmbedding {
@@ -57,6 +63,16 @@ pub struct VoxCpmLocDit {
     decoder: MiniCpm4Model,
     hidden_size: usize,
     in_channels: usize,
+    /// Sinusoidal timestep-embedding frequency table (`[hidden_size/2]`, f32),
+    /// built once — see [`sinusoidal_pos_emb`].
+    time_freqs: Tensor,
+    /// `delta_time_mlp(sinusoidal_pos_emb(0))` for a single row
+    /// (`[1, hidden_size]`, runtime dtype). Constant whenever `dt` is all
+    /// zeros — i.e. every non-`mean_mode` config, which is every shipped
+    /// checkpoint. Filled lazily on the first `dt == None` forward and
+    /// broadcast-added thereafter, skipping a sinusoid + a 2-layer MLP per
+    /// Euler step. `mean_mode` configs pass a varying `dt` and never touch it.
+    dt_emb_zero: Option<Tensor>,
 }
 
 impl VoxCpmLocDit {
@@ -80,12 +96,16 @@ impl VoxCpmLocDit {
             decoder: MiniCpm4Model::new(cfg, max_length, vb.pp("decoder"))?,
             hidden_size,
             in_channels,
+            time_freqs: sinusoidal_freqs(hidden_size, vb.device())?,
+            dt_emb_zero: None,
         })
     }
 
     /// `x`: `[N, C, T]` (noisy patch). `mu`: `[N, 2*hidden_size]` (LM
-    /// context, reshaped here into 2 tokens). `t`/`dt`: `[N]`. `cond`:
-    /// `[N, C, T']` (previous patch). Returns `[N, C, T]`.
+    /// context, reshaped here into 2 tokens). `t`: `[N]`. `dt`: `Some([N])`
+    /// under `mean_mode`, else `None` (an all-zero `dt`, whose embedding is a
+    /// cached constant). `cond`: `[N, C, T']` (previous patch). Returns
+    /// `[N, C, T]`.
     ///
     /// Stateless / one-shot, same reasoning as [`super::local_encoder::VoxCpmLocEnc`]
     /// — always clears the inner decoder's KV cache first.
@@ -95,7 +115,7 @@ impl VoxCpmLocDit {
         mu: &Tensor,
         t: &Tensor,
         cond: &Tensor,
-        dt: &Tensor,
+        dt: Option<&Tensor>,
     ) -> Result<Tensor> {
         self.decoder.clear_kv_cache();
 
@@ -105,12 +125,25 @@ impl VoxCpmLocDit {
             .cond_proj
             .forward(&cond.transpose(1, 2)?.contiguous()?)?; // [N, T', H]
         let prefix = cond_h.dim(1)?;
+        let dtype = x_h.dtype();
 
-        let t_emb = sinusoidal_pos_emb(t, self.hidden_size, 1000.0)?.to_dtype(x_h.dtype())?;
-        let t_emb = self.time_mlp.forward(&t_emb)?;
-        let dt_emb = sinusoidal_pos_emb(dt, self.hidden_size, 1000.0)?.to_dtype(x_h.dtype())?;
-        let dt_emb = self.delta_time_mlp.forward(&dt_emb)?;
-        let t_tok = (t_emb + dt_emb)?.unsqueeze(1)?; // [N, 1, H]
+        let t_emb = sinusoidal_pos_emb(t, &self.time_freqs, 1000.0)?.to_dtype(dtype)?;
+        let t_emb = self.time_mlp.forward(&t_emb)?; // [N, H]
+        let dt_emb = match dt {
+            Some(dt) => {
+                let e = sinusoidal_pos_emb(dt, &self.time_freqs, 1000.0)?.to_dtype(dtype)?;
+                self.delta_time_mlp.forward(&e)? // [N, H]
+            },
+            None => {
+                if self.dt_emb_zero.is_none() {
+                    let zero = Tensor::zeros(1, DType::F32, x_h.device())?; // [1]
+                    let e = sinusoidal_pos_emb(&zero, &self.time_freqs, 1000.0)?.to_dtype(dtype)?;
+                    self.dt_emb_zero = Some(self.delta_time_mlp.forward(&e)?); // [1, H]
+                }
+                self.dt_emb_zero.clone().expect("just populated")
+            },
+        };
+        let t_tok = t_emb.broadcast_add(&dt_emb)?.unsqueeze(1)?; // [N, 1, H]
 
         let mu_toks = mu.reshape((n, mu.dim(1)? / self.hidden_size, self.hidden_size))?; // [N, 2, H]
         let mu_len = mu_toks.dim(1)?;

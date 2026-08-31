@@ -247,9 +247,22 @@ impl MiniCpm4Model {
             None
         };
 
+        let dbg = std::env::var_os("CRANE_VOXCPM2_TIMING").is_some();
         let mut hidden = inputs_embeds.clone();
-        for layer in &mut self.layers {
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let t = std::time::Instant::now();
             hidden = layer.forward(&hidden, cos_sin_ref, mask.as_ref())?;
+            if dbg && i < 3 {
+                let _ = hidden
+                    .to_dtype(DType::F32)
+                    .and_then(|h| h.sum_all())
+                    .and_then(|s| s.to_scalar::<f32>());
+                eprintln!(
+                    "[voxcpm2]     minicpm4 layer {i} (h={}, seq={seq_len}, causal={is_causal}): {:?}",
+                    inputs_embeds.dim(2).unwrap_or(0),
+                    t.elapsed()
+                );
+            }
         }
         self.norm.forward(&hidden)
     }
