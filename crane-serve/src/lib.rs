@@ -163,6 +163,8 @@ pub fn init_logging() {
         .with_target(false)
         .with_file(false)
         .with_line_number(false)
+        // Allows RUST_LOG=crane_core=trace,crane_serve=info
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
 }
