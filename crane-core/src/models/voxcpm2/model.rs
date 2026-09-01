@@ -220,7 +220,7 @@ impl VoxCpm2Model {
         // Cast dtype on the CPU rather than on-device; see `cast_var_builder`.
         let weights_path = format!("{model_path}/model.safetensors");
         let vb = unsafe {
-            crate::models::cast_var_builder::from_mmaped_safetensors_cpu_cast(
+            crate::utils::cast_var_builder::from_mmaped_safetensors_cpu_cast(
                 &[weights_path],
                 *dtype,
                 device,
