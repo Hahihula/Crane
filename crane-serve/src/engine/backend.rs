@@ -92,6 +92,18 @@ pub trait ModelBackend: Send + 'static {
         None
     }
 
+    /// Re-run expert promotion with an updated policy (e.g. after
+    /// `derive_safe_max_seq_len` tightens `max_seq_len`). The default
+    /// implementation is a no-op — only `MoE` backends override this.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying promotion fails for reasons
+    /// unrelated to out-of-memory (which is caught inside the model).
+    fn re_promote_experts(&mut self, _policy: &ExpertPromotionPolicy) -> Result<()> {
+        Ok(())
+    }
+
     // ── Batch decode (GPU-efficient concurrent serving) ───────
 
     /// Whether this backend supports batched decoding.
@@ -735,6 +747,14 @@ impl ModelBackend for Qwen3Backend {
 
     fn kv_bytes_per_token(&self) -> Option<u64> {
         Some(self.model.kv_bytes_per_token())
+    }
+
+    fn re_promote_experts(&mut self, policy: &ExpertPromotionPolicy) -> Result<()> {
+        self.model.promote_experts_to_gpu(
+            policy.vram_ceiling_bytes,
+            policy.max_concurrent,
+            policy.max_seq_len,
+        )
     }
 
     // ── Batch decode ──
