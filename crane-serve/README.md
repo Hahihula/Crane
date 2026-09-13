@@ -105,6 +105,12 @@ voice lists, generation parameters, and troubleshooting.
 Build with `--features cuda`, control VRAM usage, and use GGUF
 quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 
+## Mixture-of-Experts (MoE) Models
+
+Run MoE checkpoints too large to fit entirely in VRAM (e.g. Qwen3-Coder-30B-A3B)
+by keeping part of the model on CPU and part on GPU: see
+[Mixture-of-Experts (MoE) Models](docs/moe.md).
+
 ## CLI Parameters
 
 | Flag | Default | Description |
@@ -118,14 +124,15 @@ quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 | `--ui` | `false` | Serve Crane Local AI's built-in browser UI at `/` |
 | `--log-level` | *(none)* | Log verbosity filter: a bare level (`debug`, `info`, `warn`) or per-target filters (`info,crane_core=debug`). Overrides `RUST_LOG` when both are set |
 | `--cpu` | `false` | Force CPU even when a GPU is available |
-| `--max-concurrent` | `16` | Hard cap on concurrently decoding sequences. Actual concurrency may be lower when `--gpu-memory-limit` is active. |
-| `--decode-tokens-per-seq` | `16` | Max decode rounds per scheduling step. Higher = less scheduling overhead, higher TTFT for queued requests. |
+| `--max-concurrent` / `-c` | `16` | Maximum number of requests the server generates responses for at the same time. Actual concurrency may be lower when `--gpu-memory-limit` is active. |
+| `--decode-tokens-per-seq` | `16` | How many tokens to generate for one request before checking on the others waiting their turn. Higher = the GPU spends more time per switch (slightly more efficient), but a request that just arrived waits longer for its first token. Lower = requests share GPU time more evenly, so new ones start responding sooner. |
 | `--format` | `auto` | Weight format: `auto`, `safetensors`, `gguf` |
 | `--quant` | *(none)* | Quantize the model on load to reduce memory usage (e.g. `q4k`, `q8_0`). Qwen 3.5 safetensors only |
 | `--dtype` | *(auto)* | Inference precision: `f16`, `bf16`, or `f32`. Defaults to `bf16` on NVIDIA GPUs, `f16` on AMD/Apple GPUs, `f32` on CPU |
 | `--context` | *(none)* | Max context length (prompt + generation) as a human-readable size, e.g. `128K`, `1M`. Mutually exclusive with `--max-seq-len` |
-| `--max-seq-len` | `0` | Max context length as a raw token count; `0` = unlimited. Use `--context` for human-readable sizes instead |
+| `--max-seq-len` | `0` | Max context length as a raw token count; `0` = unlimited. Use `--context` for human-readable sizes instead. If left at `0` and `--context` is also unset while `--gpu-memory-limit` is set, and the loaded model supports it (currently Qwen3), a safe value is auto-derived from measured VRAM headroom at load time — see [Auto-derived context length](docs/gpu.md#auto-derived-context-length). |
 | `--gpu-memory-limit` | *(none)* | VRAM cap: absolute (`5G`, `8G`, `5120M`) or fractional (`0.7` = 70% of total) |
+| `--offload-experts` | `false` | Mixture-of-Experts models only: keep every expert weight on CPU instead of measuring VRAM and promoting some to GPU. Use this if you already know your GPU has no room for any experts, to skip that measurement step at startup. See [Mixture-of-Experts (MoE) Models](docs/moe.md). |
 | `--text-only` | `false` | Qwen 3.5-VL / Ornith only: opt out of the vision tower and load the same checkpoint as a plain text model (skips the ~600M-param ViT entirely — no extra VRAM — and unlocks `--quant`, which the VLM path doesn't support). Vision-capable checkpoints load with vision by default; this flag is the opt-out. |
 | `--llm-gguf` | *(none)* | MiniCPM-o duplex only: load the language model from a quantized GGUF file to cut its memory usage roughly in half. Other components still load from `--model-path` |
 | `--api-key` | *(none)* | API key required for non-exempt endpoints; repeatable to configure multiple valid keys. Pass with no value (`--api-key`) to generate a random key printed to stdout at startup. Also settable via `CRANE_API_KEY` (always requires a value there). Unset means open access. |
@@ -139,6 +146,7 @@ quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 | Maximum throughput | Increase `--decode-tokens-per-seq` to `32` to reduce scheduling round-trips |
 | Lowest time-to-first-token | Decrease `--decode-tokens-per-seq` to `4–8` so prefill slots in sooner |
 | Long context generation | Set `--context` (e.g. `128K`) to avoid unbounded KV growth |
+| Large MoE model on a small GPU | See [Mixture-of-Experts (MoE) Models](docs/moe.md) |
 
 ### Authentication
 
@@ -187,6 +195,64 @@ crane-serve implements the OpenAI API shape, so the official `openai`
 Python package works unmodified. See
 [Using the OpenAI SDK](docs/openai-sdk.md) for chat, tool calling, and
 TTS examples.
+
+## Using with opencode
+
+[opencode](https://opencode.ai/) can talk to crane-serve as a custom
+OpenAI-compatible provider. crane-serve has no auth layer and ignores the
+`model` field in requests (it always serves whatever was loaded via
+`--model-path`/`--model-name` at startup), so any placeholder API key and
+model ID work — the `models` entry below just controls what opencode shows
+in its UI and what context/output limits it enforces client-side.
+
+Start crane-serve with the [Qwen3-Coder worked example](docs/moe.md#worked-example-qwen3-coder-30b-a3b-gguf-on-a-16-gb-card), then add this to
+`opencode.json` (project root) or `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "clipboard": {
+    "linux": {
+      "enablePrimaryCopy": true
+    }
+  },
+  "provider": {
+    "crane": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Crane Local AI",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "qwen3-coder": {
+            "name": "Qwen3 Coder",
+            "limit": { "context": 131072, "output": 8192 }
+        }
+      }
+    }
+  },
+  "model": "crane/qwen3-coder"
+}
+```
+
+- `"model": "crane/qwen3-coder"` makes this the default model opencode opens
+  with, so there's no need to select it manually via `/models` each session.
+- `"limit": { "context": 131072, "output": 8192 }` should match whatever
+  `--context` you actually started crane-serve with. opencode's config
+  wants a raw token count here, not `128K` shorthand, so convert it
+  yourself: multiply by 1024 (`K` means x1024, not x1000) — `128 * 1024 =
+  131072`. If you instead start crane-serve with `--context 64K`, use
+  `65536` (`64 * 1024`) here. This number is only used by opencode, to know
+  when to start trimming old messages from the conversation — the server
+  isn't told about it, so a mismatch doesn't crash anything, it just means
+  opencode trims too early or too late.
+- `autoupdate`, `share`, and `clipboard` are general opencode settings
+  unrelated to Crane; keep, drop, or change them independently.
+
+Restart opencode and it opens directly on `Crane Local AI`.
 
 ## Source Structure
 
@@ -238,7 +304,7 @@ Tool calling and reasoning control are **template-driven**, not model-type-drive
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CRANE_SAMPLE_TRACE` | `0` | Verbose sampling timing logs |
-| `CRANE_KV_QUANT` | unset | Qwen 3.5 family K/V cache: `int8` (~2x smaller) or `int4` (~4x smaller) |
+| `CRANE_KV_QUANT` | unset | Qwen 3 and Qwen 3.5 family K/V cache: `int8` (~2x smaller) or `int4` (~4x smaller). Auto-derived context length conservatively assumes ~2x for both. For Qwen 3, `--kv-quant` does the same thing as a CLI flag and takes precedence over this variable. |
 | `CRANE_EMBED_DENSE` | `0` | GGUF: dequantize the whole embedding table at load instead of gathering rows (pre-optimization behaviour; costs ~1.7 GiB on Qwen 3.8-27B) |
 | `CRANE_PROF` | `0` | Per-forward-pass profiler: splits kernel *submission* time from wall time after a device sync |
 
@@ -251,9 +317,15 @@ GPU-specific environment variables (`CRANE_FORCE_GPU_TOPK`,
 - **API key authentication is opt-in** — unset by default (open access); see
   [Authentication](#authentication) for `--api-key`/`--api-key-file`.
 - **KV eviction is lossless** — Evicted sequences preserve their full state and
-  resume automatically; in-flight requests are not dropped or errored.
+  resume automatically; in-flight requests are not dropped or errored. Eviction
+  only kicks in when a *new* request needs room; one long-running session's own
+  growing memory use is never paused this way — see
+  [Mixture-of-Experts (MoE) Models](docs/moe.md) for why `--context` is the
+  real safety net there.
 - **No `--context` (or `--max-seq-len`)** means no limit. On constrained
-  hardware, always set an explicit value to avoid runaway memory growth.
+  hardware, always set an explicit value to avoid runaway memory growth, or
+  rely on [auto-derived context length](docs/gpu.md#auto-derived-context-length)
+  as a safety net if you don't.
 - **`--decode-tokens-per-seq`** controls decode rounds per engine step, not per
   request. Requests always complete fully regardless of this value.
 
