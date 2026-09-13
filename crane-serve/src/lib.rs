@@ -43,6 +43,12 @@ pub struct Args {
     pub host: String,
     #[arg(short = 'p', long, default_value_t = 8080)]
     pub port: u16,
+    /// Serve HTTP/1.1 over a Unix domain socket at this path instead of TCP.
+    /// A stale socket file left by a crashed run is removed before binding,
+    /// and the new socket is created with 0600 permissions. Unix only.
+    #[cfg(unix)]
+    #[arg(long)]
+    pub unix_socket: Option<std::path::PathBuf>,
     /// Serve Crane's built-in browser UI at `/`. Disabled by default.
     #[arg(long)]
     pub ui: bool,
@@ -1280,9 +1286,70 @@ pub async fn run(args: Args) -> Result<()> {
     });
     let app = build_router_with_ui(state.clone(), args.ui);
     let addr = format!("{}:{}", args.host, args.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    let local_addr = listener.local_addr()?;
-    info!(version = env!("CARGO_PKG_VERSION"), listen = %format!("http://{local_addr}"), "crane-serve ready");
+    // The TCP and UDS listeners are distinct types behind axum's
+    // `serve::Listener` trait, so the serve future is boxed to pick one.
+    // `local_addr` keeps an authority/path-only form so the endpoint log
+    // lines below stay unchanged for both modes.
+    #[cfg(unix)]
+    let (local_addr, listen_display, serve): (
+        String,
+        String,
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>,
+    ) = match &args.unix_socket {
+        Some(path) => {
+            let _ = std::fs::remove_file(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let listener = tokio::net::UnixListener::bind(path)?;
+            std::fs::set_permissions(
+                path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+            )
+            .map_err(|e| anyhow::anyhow!("chmod 0600 {}: {e}", path.display()))?;
+            (
+                path.display().to_string(),
+                format!("unix://{}", path.display()),
+                Box::pin(async move {
+                    axum::serve(listener, app)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }),
+            )
+        },
+        None => {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let local_addr = listener.local_addr()?;
+            (
+                local_addr.to_string(),
+                format!("http://{local_addr}"),
+                Box::pin(async move {
+                    axum::serve(listener, app)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }),
+            )
+        },
+    };
+    #[cfg(not(unix))]
+    let (local_addr, listen_display, serve): (
+        String,
+        String,
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>,
+    ) = {
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let local_addr = listener.local_addr()?;
+        (
+            local_addr.to_string(),
+            format!("http://{local_addr}"),
+            Box::pin(async move {
+                axum::serve(listener, app)
+                    .await
+                    .map_err(anyhow::Error::from)
+            }),
+        )
+    };
+    info!(version = env!("CARGO_PKG_VERSION"), listen = %listen_display, "crane-serve ready");
     info!(model = %model_name, model_type = %resolved_type.display_name(), device = %state.device_name, dtype = %state.dtype_name, "model loaded");
     if is_vlm {
         info!("mode: vlm");
@@ -1312,7 +1379,7 @@ pub async fn run(args: Args) -> Result<()> {
     if args.ui {
         info!(ui = %format!("http://{local_addr}/"), "browser UI enabled");
     }
-    axum::serve(listener, app).await?;
+    serve.await?;
     Ok(())
 }
 
