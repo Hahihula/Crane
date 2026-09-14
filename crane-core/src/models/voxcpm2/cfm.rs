@@ -92,25 +92,39 @@ impl UnifiedCfm {
         let n = t_span.len();
         let zero_init_steps = ((0.04 * n as f64) as usize).max(1);
 
+        // CFG batch base `[cond ; uncond]`: `mu`/`cond` are fixed across the
+        // whole Euler integration, so double them once rather than per step.
+        let mu2 = Tensor::cat(&[mu, &mu.zeros_like()?], 0)?;
+        let cond2 = Tensor::cat(&[cond, cond], 0)?;
+
         let mut t = t_span[0];
         let mut dt = t_span[0] - t_span[1];
 
+        let timing = std::env::var_os("CRANE_VOXCPM2_TIMING").is_some();
         for step in 1..n {
             let dphi_dt = if use_cfg_zero_star && step <= zero_init_steps {
                 x.zeros_like()?
             } else {
                 let x2 = Tensor::cat(&[&x, &x], 0)?;
-                let mu_zero = mu.zeros_like()?;
-                let mu2 = Tensor::cat(&[mu, &mu_zero], 0)?;
-                let cond2 = Tensor::cat(&[cond, cond], 0)?;
                 let t2 = Tensor::full(t as f32, 2 * b, device)?.to_dtype(dtype)?;
+                // `!mean_mode` → `dt` is all-zeros; pass `None` so the DiT
+                // uses its cached constant delta-time embedding.
                 let dt2 = if self.mean_mode {
-                    Tensor::full(dt as f32, 2 * b, device)?.to_dtype(dtype)?
+                    Some(Tensor::full(dt as f32, 2 * b, device)?.to_dtype(dtype)?)
                 } else {
-                    Tensor::zeros(2 * b, dtype, device)?
+                    None
                 };
 
-                let out = self.estimator.forward(&x2, &mu2, &t2, &cond2, &dt2)?; // [2b, C, T]
+                let __t = std::time::Instant::now();
+                let out = self
+                    .estimator
+                    .forward(&x2, &mu2, &t2, &cond2, dt2.as_ref())?; // [2b, C, T]
+                if timing && step <= 2 {
+                    let _ = out
+                        .sum_all()
+                        .and_then(|t| t.to_dtype(DType::F32)?.to_scalar::<f32>());
+                    eprintln!("[voxcpm2]   cfm estimator step {step}: {:?}", __t.elapsed());
+                }
                 let cond_out = out.narrow(0, 0, b)?;
                 let uncond_out = out.narrow(0, b, b)?;
 

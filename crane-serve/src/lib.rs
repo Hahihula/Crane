@@ -43,6 +43,12 @@ pub struct Args {
     pub host: String,
     #[arg(short = 'p', long, default_value_t = 8080)]
     pub port: u16,
+    /// Serve HTTP/1.1 over a Unix domain socket at this path instead of TCP.
+    /// A stale socket file left by a crashed run is removed before binding,
+    /// and the new socket is created with 0600 permissions. Unix only.
+    #[cfg(unix)]
+    #[arg(long)]
+    pub unix_socket: Option<std::path::PathBuf>,
     /// Serve Crane's built-in browser UI at `/`. Disabled by default.
     #[arg(long)]
     pub ui: bool,
@@ -163,6 +169,8 @@ pub fn init_logging() {
         .with_target(false)
         .with_file(false)
         .with_line_number(false)
+        // Allows RUST_LOG=crane_core=trace,crane_serve=info
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
 }
@@ -235,6 +243,8 @@ fn generate_audio(
         temperature: req.temperature,
         top_p: req.top_p,
         repetition_penalty: req.repetition_penalty,
+        cfm_steps: req.cfm_steps,
+        cfg_scale: req.cfg_scale,
     };
     if let Some(ref ref_audio_path) = req.reference_audio {
         if !tts.supports_voice_cloning() {
@@ -249,14 +259,14 @@ fn generate_audio(
         let started = std::time::Instant::now();
         let result = tts
             .generate_voice_clone(&req.input, &req.language, ref_audio_path, ref_text, &opts)
-            .map_err(|e| e.to_string());
+            .map_err(|e| format!("{e:#}"));
         log_generate_result(&result, started.elapsed());
         result
     } else {
         let started = std::time::Instant::now();
         let result = tts
             .generate_speech(&req.input, &req.language, req.voice.as_deref(), &opts)
-            .map_err(|e| e.to_string());
+            .map_err(|e| format!("{e:#}"));
         log_generate_result(&result, started.elapsed());
         result
     }
@@ -284,32 +294,109 @@ fn run_tts_loop(
 ) {
     info!("{model_name} engine thread started");
     let audio_info = tts.audio_info();
-    while let Some(req) = tts_rx.blocking_recv() {
+    while let Some(mut req) = tts_rx.blocking_recv() {
         tracing::debug!(
-            "TTS request received: language={}, voice={:?}, input_len={}",
+            "TTS request received: language={}, voice={:?}, input_len={}, stream={}",
             req.language,
             req.voice,
-            req.input.chars().count()
+            req.input.chars().count(),
+            matches!(
+                req.responder,
+                Some(handlers::tts::TtsResponder::Stream { .. })
+            ),
         );
-        let result = generate_audio(tts, model_name, &req).and_then(|audio| {
-            let encoded = encode_tts_audio(&audio, &audio_info, &req.response_format);
-            tracing::debug!("TTS: dropping output tensor {:?}", audio.dims());
-            drop(audio);
-            tracing::debug!("TTS: output tensor dropped");
-            encoded
-        });
-        tracing::debug!("TTS: result ready ({}), sending to client", result.is_ok());
-        if let Err(ref e) = result {
-            tracing::error!(
-                "TTS generation failed: {e} (language={}, voice={:?}, input_len={})",
-                req.language,
-                req.voice,
-                req.input.chars().count()
-            );
+        match req.responder.take().expect("responder set on the wire") {
+            handlers::tts::TtsResponder::Whole(tx) => {
+                let result = generate_audio(tts, model_name, &req).and_then(|audio| {
+                    let encoded = encode_tts_audio(&audio, &audio_info, &req.response_format);
+                    tracing::debug!("TTS: dropping output tensor {:?}", audio.dims());
+                    drop(audio);
+                    tracing::debug!("TTS: output tensor dropped");
+                    encoded
+                });
+                tracing::debug!("TTS: result ready ({}), sending to client", result.is_ok());
+                if let Err(ref e) = result {
+                    tracing::error!(
+                        "TTS generation failed: {e} (language={}, voice={:?}, input_len={})",
+                        req.language,
+                        req.voice,
+                        req.input.chars().count()
+                    );
+                }
+                let _ = tx.send(result);
+            },
+            handlers::tts::TtsResponder::Stream { meta, chunks } => {
+                stream_tts(tts, model_name, &req, meta, chunks);
+            },
         }
-        let _ = req.tx.send(result);
-        tracing::debug!("TTS: result sent to client, waiting for next request");
+        tracing::debug!("TTS: request handled, waiting for next request");
     }
+}
+
+/// Drive [`crane::audio::Tts::generate_speech_stream`] for one request,
+/// pushing PCM16-LE frames onto `chunks` as the model produces them. `meta`
+/// fires exactly once — the sample rate on success, or a setup error — so the
+/// HTTP handler can choose a status code before the 200 body starts.
+fn stream_tts(
+    tts: &mut dyn crane::audio::Tts,
+    model_name: &str,
+    req: &TtsGenerateRequest,
+    meta: tokio::sync::oneshot::Sender<Result<u32, String>>,
+    chunks: tokio::sync::mpsc::UnboundedSender<Result<Vec<u8>, String>>,
+) {
+    let opts = crane_core::generation::SpeechOptions {
+        max_new_tokens: req.max_tokens,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        repetition_penalty: req.repetition_penalty,
+        cfm_steps: req.cfm_steps,
+        cfg_scale: req.cfg_scale,
+    };
+    let started = std::time::Instant::now();
+    let mut stream =
+        match tts.generate_speech_stream(&req.input, &req.language, req.voice.as_deref(), &opts) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("TTS stream setup failed: {e:#}");
+                let _ = meta.send(Err(format!("{e:#}")));
+                return;
+            },
+        };
+    let sample_rate = stream.audio_info.sample_rate;
+    if meta.send(Ok(sample_rate)).is_err() {
+        return; // client already gone
+    }
+
+    let mut n_chunks = 0usize;
+    loop {
+        match stream.next_chunk() {
+            Ok(Some(tensor)) => {
+                let samples: Vec<f32> = match tensor.flatten_all().and_then(|t| t.to_vec1()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = chunks.send(Err(e.to_string()));
+                        break;
+                    },
+                };
+                let pcm = crane::audio::pcm_f32_to_i16(&samples);
+                n_chunks += 1;
+                if chunks.send(Ok(pcm)).is_err() {
+                    tracing::debug!("{model_name} TTS stream: client disconnected, stopping");
+                    break;
+                }
+            },
+            Ok(None) => break,
+            Err(e) => {
+                tracing::error!("{model_name} TTS stream failed after {n_chunks} chunks: {e:#}");
+                let _ = chunks.send(Err(format!("{e:#}")));
+                break;
+            },
+        }
+    }
+    tracing::debug!(
+        "{model_name} TTS stream done: {n_chunks} chunks in {:?}",
+        started.elapsed()
+    );
 }
 
 fn transcribe_audio(
@@ -1199,9 +1286,70 @@ pub async fn run(args: Args) -> Result<()> {
     });
     let app = build_router_with_ui(state.clone(), args.ui);
     let addr = format!("{}:{}", args.host, args.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    let local_addr = listener.local_addr()?;
-    info!(version = env!("CARGO_PKG_VERSION"), listen = %format!("http://{local_addr}"), "crane-serve ready");
+    // The TCP and UDS listeners are distinct types behind axum's
+    // `serve::Listener` trait, so the serve future is boxed to pick one.
+    // `local_addr` keeps an authority/path-only form so the endpoint log
+    // lines below stay unchanged for both modes.
+    #[cfg(unix)]
+    let (local_addr, listen_display, serve): (
+        String,
+        String,
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>,
+    ) = match &args.unix_socket {
+        Some(path) => {
+            let _ = std::fs::remove_file(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let listener = tokio::net::UnixListener::bind(path)?;
+            std::fs::set_permissions(
+                path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+            )
+            .map_err(|e| anyhow::anyhow!("chmod 0600 {}: {e}", path.display()))?;
+            (
+                path.display().to_string(),
+                format!("unix://{}", path.display()),
+                Box::pin(async move {
+                    axum::serve(listener, app)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }),
+            )
+        },
+        None => {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let local_addr = listener.local_addr()?;
+            (
+                local_addr.to_string(),
+                format!("http://{local_addr}"),
+                Box::pin(async move {
+                    axum::serve(listener, app)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }),
+            )
+        },
+    };
+    #[cfg(not(unix))]
+    let (local_addr, listen_display, serve): (
+        String,
+        String,
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>,
+    ) = {
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let local_addr = listener.local_addr()?;
+        (
+            local_addr.to_string(),
+            format!("http://{local_addr}"),
+            Box::pin(async move {
+                axum::serve(listener, app)
+                    .await
+                    .map_err(anyhow::Error::from)
+            }),
+        )
+    };
+    info!(version = env!("CARGO_PKG_VERSION"), listen = %listen_display, "crane-serve ready");
     info!(model = %model_name, model_type = %resolved_type.display_name(), device = %state.device_name, dtype = %state.dtype_name, "model loaded");
     if is_vlm {
         info!("mode: vlm");
@@ -1231,7 +1379,7 @@ pub async fn run(args: Args) -> Result<()> {
     if args.ui {
         info!(ui = %format!("http://{local_addr}/"), "browser UI enabled");
     }
-    axum::serve(listener, app).await?;
+    serve.await?;
     Ok(())
 }
 

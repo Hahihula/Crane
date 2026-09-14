@@ -12,6 +12,14 @@ pub struct SpeechOptions {
     pub top_p: Option<f64>,
     /// Repetition penalty applied to previously generated tokens; `1.0` means no penalty.
     pub repetition_penalty: f32,
+    /// Flow-matching / diffusion sampler steps per frame. Only consulted by
+    /// models with an iterative sampler (VoxCPM2's CFM decoder); `None` keeps
+    /// the model's own default. Lower values trade some quality for a roughly
+    /// linear speed-up, since the sampler dominates VoxCPM2 generation cost.
+    pub cfm_steps: Option<usize>,
+    /// Classifier-free guidance strength for the flow-matching sampler
+    /// (VoxCPM2 only). `None` keeps the model's own default.
+    pub cfg_scale: Option<f64>,
 }
 
 impl Default for SpeechOptions {
@@ -21,6 +29,8 @@ impl Default for SpeechOptions {
             temperature: 0.9,
             top_p: None,
             repetition_penalty: 1.05,
+            cfm_steps: None,
+            cfg_scale: None,
         }
     }
 }

@@ -98,6 +98,7 @@ fn main() -> anyhow::Result<()> {
             temperature: 0.9,
             top_p: Some(1.0),
             repetition_penalty: 1.05,
+            ..Default::default()
         };
         let (audio, sr) = model.generate_speech(text, lang, speaker.as_deref(), &opts)?;
         let saved_path = crane::audio::save_wav(&audio, &output_path, sr)?;

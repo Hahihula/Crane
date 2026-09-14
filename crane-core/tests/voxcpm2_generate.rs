@@ -80,3 +80,92 @@ fn voxcpm2_generate_is_well_formed() {
         "output looks like near-silence (max_abs={max_abs})"
     );
 }
+
+/// Streaming (`generate_speech_streaming`) must yield the *same* waveform as
+/// the one-shot path for the same input — each chunk is decoded with real
+/// left context re-fed to the causal AudioVAE, so concatenating them is
+/// numerically equivalent to a full-sequence decode. Also checks the first
+/// chunk lands quickly (a couple of patches, not the whole clip).
+#[test]
+#[ignore = "needs a local VoxCPM2 checkpoint (CRANE_VOXCPM2_DIR), incl. a converted audiovae.safetensors"]
+fn voxcpm2_streaming_matches_oneshot() {
+    use crane_core::models::voxcpm2::{
+        VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2StreamConfig,
+    };
+
+    let dir = std::env::var("CRANE_VOXCPM2_DIR")
+        .expect("set CRANE_VOXCPM2_DIR to a VoxCPM2 checkpoint dir");
+
+    #[cfg(feature = "cuda")]
+    let (device, dtype) = if candle_core::utils::cuda_is_available() {
+        (
+            candle_core::Device::new_cuda(0).unwrap(),
+            candle_core::DType::BF16,
+        )
+    } else {
+        (candle_core::Device::Cpu, candle_core::DType::F32)
+    };
+    #[cfg(all(target_os = "macos", not(feature = "cuda")))]
+    let (device, dtype) = (
+        candle_core::Device::new_metal(0).unwrap_or(candle_core::Device::Cpu),
+        candle_core::DType::F16,
+    );
+    #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
+    let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
+
+    let text = "VoxCPM2 brings multilingual support to Crane.";
+    let cfg = VoxCpm2GenerationConfig {
+        max_len: 200,
+        ..Default::default()
+    };
+
+    let mut model = VoxCpm2Model::new(&dir, &device, &dtype).expect("load VoxCPM2");
+
+    // The CFM sampler draws fresh noise per patch, so the streamed and
+    // one-shot runs only produce the same waveform if they start from the
+    // same RNG state — reseed the device before each.
+    device.set_seed(20260830).ok();
+    let oneshot: Vec<f32> = model
+        .generate_speech(text, &cfg)
+        .expect("generate_speech")
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+
+    let stream_cfg = VoxCpm2StreamConfig::default();
+    device.set_seed(20260830).ok();
+    let mut stream = model
+        .generate_speech_streaming(text, &VoxCpm2Conditioning::ZeroShot, &cfg, stream_cfg)
+        .expect("generate_speech_streaming");
+
+    let mut chunks: Vec<Vec<f32>> = Vec::new();
+    for chunk in stream.by_ref() {
+        let chunk = chunk.expect("stream chunk");
+        chunks.push(chunk.flatten_all().unwrap().to_vec1().unwrap());
+    }
+    assert!(chunks.len() >= 2, "expected multiple streamed chunks");
+    assert!(
+        chunks[0].len() <= stream_cfg.first_chunk_patches * 4 * 1920 + 4 * 1920,
+        "first chunk ({} samples) is far larger than first_chunk_patches",
+        chunks[0].len()
+    );
+
+    let streamed: Vec<f32> = chunks.concat();
+    assert_eq!(
+        streamed.len(),
+        oneshot.len(),
+        "streamed total length differs from one-shot"
+    );
+    let max_diff = streamed
+        .iter()
+        .zip(&oneshot)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    // Same math, same order — differences are pure fp noise from decoding in
+    // windows vs. all at once (identical with full left context).
+    assert!(
+        max_diff < 1e-3,
+        "streamed waveform diverged from one-shot (max abs diff {max_diff})"
+    );
+}

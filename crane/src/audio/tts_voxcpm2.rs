@@ -13,17 +13,36 @@
 //!
 //! `voices()` still returns no presets — cloning is always driven by a
 //! caller-supplied reference clip, never a discrete preset list.
-//! `generate_speech_stream` is left at the trait default (single-chunk-wrap)
-//! — real streaming generation is a separate, not-yet-implemented pass (see
-//! `crane_core::models::voxcpm2`'s module docs).
+//! `generate_speech_stream` drives the zero-shot path incrementally via
+//! [`VoxCpm2Model::generate_speech_streaming`], yielding PCM chunks as the
+//! autoregressive loop produces them (voice-clone streaming is not exposed
+//! through the trait — its `ref_audio` args have no streaming entry point).
 
 use anyhow::Result;
 use candle_core::Tensor;
 use crane_core::generation::SpeechOptions;
-use crane_core::models::voxcpm2::{VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model};
+use crane_core::models::voxcpm2::{
+    VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2StreamConfig,
+};
 
 use super::pcm::{AudioInfo, load_wav_f32};
-use super::tts::{Tts, VoiceInfo};
+use super::tts::{Tts, TtsStream, VoiceInfo};
+
+/// Build a [`VoxCpm2GenerationConfig`] from the trait-level [`SpeechOptions`],
+/// honoring the optional CFM-sampler overrides (`cfm_steps` / `cfg_scale`) and
+/// falling back to the model defaults otherwise. `cfm_steps` is clamped to at
+/// least 1 — the CFM sampler divides by the step count.
+fn gen_config(opts: &SpeechOptions) -> VoxCpm2GenerationConfig {
+    let defaults = VoxCpm2GenerationConfig::default();
+    VoxCpm2GenerationConfig {
+        max_len: opts.max_new_tokens.max(1),
+        inference_timesteps: opts
+            .cfm_steps
+            .map_or(defaults.inference_timesteps, |s| s.max(1)),
+        cfg_value: opts.cfg_scale.unwrap_or(defaults.cfg_value),
+        ..defaults
+    }
+}
 
 impl Tts for VoxCpm2Model {
     fn audio_info(&self) -> AudioInfo {
@@ -58,10 +77,7 @@ impl Tts for VoxCpm2Model {
         // latent patch) — pass through directly as an upper bound rather
         // than inventing an unjustified conversion factor. The model's own
         // stop head almost always ends generation well before this cap.
-        let cfg = VoxCpm2GenerationConfig {
-            max_len: opts.max_new_tokens.max(1),
-            ..Default::default()
-        };
+        let cfg = gen_config(opts);
         VoxCpm2Model::generate_speech(self, text, &cfg)
     }
 
@@ -85,10 +101,29 @@ impl Tts for VoxCpm2Model {
             prompt_text: ref_text.to_string(),
             prompt_feat,
         };
-        let cfg = VoxCpm2GenerationConfig {
-            max_len: opts.max_new_tokens.max(1),
-            ..Default::default()
-        };
+        let cfg = gen_config(opts);
         self.generate_speech_conditioned(text, &conditioning, &cfg)
+    }
+
+    /// Incremental zero-shot streaming. Yields f32 PCM chunks (flat
+    /// `[n_samples]`) as patches are generated; the concatenation of all
+    /// chunks equals [`Self::generate_speech`]'s output for the same inputs.
+    /// `language`/`voice` unused, same as [`Self::generate_speech`].
+    fn generate_speech_stream(
+        &mut self,
+        text: &str,
+        _language: &str,
+        _voice: Option<&str>,
+        opts: &SpeechOptions,
+    ) -> Result<TtsStream<'_>> {
+        let audio_info = self.audio_info();
+        let cfg = gen_config(opts);
+        let stream = self.generate_speech_streaming(
+            text,
+            &VoxCpm2Conditioning::ZeroShot,
+            &cfg,
+            VoxCpm2StreamConfig::default(),
+        )?;
+        Ok(TtsStream::new(audio_info, stream))
     }
 }

@@ -2,13 +2,14 @@
 //!
 //! Generates speech from text using VoxCPM2 (OpenBMB): zero-shot, or with
 //! reference-audio conditioning / voice cloning (all three real modes —
-//! see `crane_core::models::voxcpm2::VoxCpm2Conditioning`). Streaming
-//! generation is a separate, not-yet-implemented pass — see the module docs
-//! on `crane_core::models::voxcpm2`.
+//! see `crane_core::models::voxcpm2::VoxCpm2Conditioning`). Pass `--stream`
+//! (zero-shot only) to drive the incremental
+//! `VoxCpm2Model::generate_speech_streaming` path and print time-to-first-chunk.
 //!
-//! Expects `model.safetensors` + a pre-converted `audiovae.safetensors`
-//! (converted once from the upstream `audiovae.pth`, see the module docs)
-//! alongside `config.json`/`tokenizer.json` in the checkpoint directory.
+//! Expects `model.safetensors`, `config.json` and `tokenizer.json` in the
+//! checkpoint directory. `audiovae.safetensors` is used from there too if
+//! present, otherwise it is downloaded once from the Hub
+//! (`hahihula/VoxCPM2-audiovae-safetensors`) and cached under `HF_HOME`.
 //!
 //! # Usage
 //!
@@ -57,6 +58,14 @@ struct Args {
     prompt_text: Option<String>,
     #[arg(long, default_value = "data/audio/output")]
     output_dir: String,
+    /// Zero-shot only: use the incremental streaming path and report
+    /// time-to-first-chunk plus per-chunk timing.
+    #[arg(long)]
+    stream: bool,
+    /// Force F32 compute instead of the per-device default (BF16 on CUDA,
+    /// F16 on Metal) — a diagnostic knob for Metal matmul-kernel issues.
+    #[arg(long)]
+    f32: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -106,6 +115,7 @@ fn main() -> anyhow::Result<()> {
             DType::F32
         }
     };
+    let dtype = if args.f32 { DType::F32 } else { dtype };
 
     if matches!(device, Device::Cpu) {
         eprintln!(
@@ -202,9 +212,35 @@ fn main() -> anyhow::Result<()> {
             println!("  Text: {text}");
 
             let start = std::time::Instant::now();
-            let wav = model.generate_speech(text, &cfg)?;
             let output_path = format!("{}/{filename}", args.output_dir);
-            let saved_path = crane::audio::save_wav(&wav, &output_path, model.sample_rate)?;
+            let saved_path = if args.stream {
+                use crane_core::models::voxcpm2::VoxCpm2StreamConfig;
+                let sr = model.sample_rate;
+                let mut stream = model.generate_speech_streaming(
+                    text,
+                    &VoxCpm2Conditioning::ZeroShot,
+                    &cfg,
+                    VoxCpm2StreamConfig::default(),
+                )?;
+                let mut all: Vec<f32> = Vec::new();
+                let mut n = 0;
+                for chunk in stream.by_ref() {
+                    let chunk = chunk?;
+                    let samples: Vec<f32> = chunk.flatten_all()?.to_vec1()?;
+                    n += 1;
+                    println!(
+                        "  chunk {n}: {:.2}s audio @ {:.1?} elapsed",
+                        samples.len() as f32 / sr as f32,
+                        start.elapsed()
+                    );
+                    all.extend_from_slice(&samples);
+                }
+                let wav = candle_core::Tensor::from_vec(all.clone(), (1, 1, all.len()), &device)?;
+                crane::audio::save_wav(&wav, &output_path, sr)?
+            } else {
+                let wav = model.generate_speech(text, &cfg)?;
+                crane::audio::save_wav(&wav, &output_path, model.sample_rate)?
+            };
             println!("  Saved {saved_path} in {:.1?}", start.elapsed());
         }
     }
