@@ -365,15 +365,13 @@ impl DuplexSession {
         let embed_dim = config.llm.hidden_size;
         let (audio_encoder, audio_projector) = match gguf.audio {
             Some(path) => {
-                let mmap =
-                    crate::models::hunyuan_dense::modeling::mmap_gguf_file(path).map_err(|e| {
-                        candle_core::Error::Msg(format!("failed to mmap audio GGUF {path}: {e}"))
-                    })?;
-                let mut cursor = std::io::Cursor::new(mmap.as_ref());
-                let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
+                let mut file = std::fs::File::open(path).map_err(|e| {
+                    candle_core::Error::Msg(format!("failed to open audio GGUF {path}: {e}"))
+                })?;
+                let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
                 let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
                     ct,
-                    &mut cursor,
+                    &mut file,
                     device.clone(),
                     dtype,
                 );
@@ -397,15 +395,13 @@ impl DuplexSession {
 
         let tts = match gguf.tts {
             Some(path) => {
-                let mmap =
-                    crate::models::hunyuan_dense::modeling::mmap_gguf_file(path).map_err(|e| {
-                        candle_core::Error::Msg(format!("failed to mmap tts GGUF {path}: {e}"))
-                    })?;
-                let mut cursor = std::io::Cursor::new(mmap.as_ref());
-                let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
+                let mut file = std::fs::File::open(path).map_err(|e| {
+                    candle_core::Error::Msg(format!("failed to open tts GGUF {path}: {e}"))
+                })?;
+                let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
                 let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
                     ct,
-                    &mut cursor,
+                    &mut file,
                     device.clone(),
                     dtype,
                 );

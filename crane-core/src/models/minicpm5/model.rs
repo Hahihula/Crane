@@ -172,9 +172,8 @@ impl Model {
         let parent = gguf_path.parent().unwrap_or(gguf_path);
 
         // Open and parse GGUF
-        let mmap = crate::models::hunyuan_dense::modeling::mmap_gguf_file(gguf_path)?;
-        let mut cursor = std::io::Cursor::new(mmap.as_ref());
-        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
+        let mut file = std::fs::File::open(gguf_path)?;
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
 
         eprintln!(
             "GGUF loaded: {} tensors, {} metadata entries",
@@ -234,7 +233,7 @@ impl Model {
             eos_token_ids.push(im_end);
         }
 
-        let inner = MiniCpm5Model::from_gguf(ct, &mut cursor, device)?;
+        let inner = MiniCpm5Model::from_gguf(ct, &mut file, device)?;
         let dtype = if device.is_cuda() {
             DType::BF16
         } else {
