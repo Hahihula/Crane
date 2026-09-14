@@ -1,3 +1,4 @@
+use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::rotary::RotaryEmbedding;
 use crate::utils::DeviceExt;
 use candle_core::quantized::{QTensor, gguf_file};
@@ -9,6 +10,27 @@ use std::io::{Read, Seek};
 use std::sync::Arc;
 
 // ── GGUF loading helper ──
+
+/// Opens and memory-maps a GGUF file for zero-syscall tensor reads.
+///
+/// The returned `Mmap` can be wrapped in a `std::io::Cursor` and passed
+/// anywhere a `Read + Seek` reader is expected (e.g. [`Gguf::new`]), letting
+/// tensor loads page data in from disk on demand instead of going through
+/// per-tensor `seek`/`read_exact` syscalls.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or memory-mapped.
+pub fn mmap_gguf_file(path: impl AsRef<std::path::Path>) -> std::io::Result<memmap2::Mmap> {
+    let file = std::fs::File::open(path)?;
+    // SAFETY: the caller must not truncate or replace this file on disk while
+    // the returned mapping is alive. Doing so raises SIGBUS on a later page-in
+    // (e.g. during tensor loading), which is unrecoverable and not something a
+    // `Result` can catch. Crane itself never writes to model files it has
+    // loaded; this only holds if external tooling (re-downloads, redeploys)
+    // avoids replacing a model file path while a server process has it mapped.
+    unsafe { memmap2::Mmap::map(&file) }
+}
 
 /// Wraps a parsed GGUF file + reader for convenient tensor loading.
 pub struct Gguf<R: Read + Seek> {
@@ -795,7 +817,7 @@ impl DecoderLayer {
 }
 
 pub struct HunYuanDenseV1 {
-    embed_tokens: candle_nn::Embedding,
+    embed_tokens: EmbeddingLayer,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     lm_head: LinearLayer,
@@ -812,11 +834,11 @@ impl HunYuanDenseV1 {
     pub fn new(config: &Config, vb: &VarBuilder) -> Result<Self> {
         let dtype = vb.dtype();
         let model_vb = vb.pp("model");
-        let embed_tokens = candle_nn::embedding(
+        let embed_tokens = EmbeddingLayer::Dense(candle_nn::embedding(
             config.vocab_size,
             config.hidden_size,
             model_vb.pp("embed_tokens"),
-        )?;
+        )?);
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let layers_vb = model_vb.pp("layers");
@@ -828,7 +850,7 @@ impl HunYuanDenseV1 {
             candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
 
         let lm_head = if config.tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            embed_tokens.tied_output()?
         } else {
             LinearLayer::Standard(linear_no_bias(
                 config.hidden_size,
@@ -868,8 +890,8 @@ impl HunYuanDenseV1 {
     }
 
     /// Construct from a GGUF file. Reads config from GGUF metadata and loads
-    /// all weights as quantized tensors (`QMatMul` for linear layers, dequantized
-    /// for embeddings and norms).
+    /// all weights as quantized tensors (`QMatMul` for linear layers, norms
+    /// dequantized, embeddings kept quantized and gathered lazily per row).
     ///
     /// # Errors
     ///
@@ -958,8 +980,8 @@ impl HunYuanDenseV1 {
         };
 
         // Load embedding
-        let embed_tokens = gg.embedding("token_embd.weight", hidden_size)?;
-        let actual_vocab_size = embed_tokens.embeddings().dim(0)?;
+        let embed_tokens = gg.quantized_embedding("token_embd.weight", hidden_size)?;
+        let actual_vocab_size = embed_tokens.vocab_size();
 
         // Update config with actual vocab size
         let config = Config {
@@ -978,7 +1000,7 @@ impl HunYuanDenseV1 {
 
         // LM head (may be tied to embeddings)
         let lm_head = if tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            embed_tokens.tied_output()?
         } else {
             gg.linear("output.weight")?
         };
@@ -1176,7 +1198,7 @@ impl HunYuanDenseV1 {
     ) -> Result<(Vec<usize>, usize)> {
         let kv_heads = self.config.num_key_value_heads;
         let head_dim = self.config.head_dim();
-        let device = self.embed_tokens.embeddings().device();
+        let device = self.embed_tokens.device();
 
         // Compute per-sequence KV lengths from the first layer's cache.
         let kv_lens: Vec<usize> = seq_kv_caches
@@ -1200,7 +1222,7 @@ impl HunYuanDenseV1 {
                 max_kv_len,
                 kv_heads,
                 head_dim,
-                device,
+                &device,
                 self.dtype,
             )?;
 
@@ -1454,4 +1476,60 @@ fn pad_and_stack_kv_caches(
     let stacked_k = Tensor::cat(&padded_ks, 0)?.contiguous()?;
     let stacked_v = Tensor::cat(&padded_vs, 0)?.contiguous()?;
     Ok(Some((stacked_k, stacked_v)))
+}
+
+#[cfg(test)]
+mod mmap_gguf_tests {
+    use super::mmap_gguf_file;
+    use candle_core::Tensor;
+    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
+
+    /// Writes a single quantized tensor to a real GGUF file on disk, for
+    /// exercising the mmap read path against a real file.
+    fn write_test_gguf(path: &std::path::Path) {
+        let src = Tensor::arange(0f32, 4. * 32., &candle_core::Device::Cpu)
+            .unwrap()
+            .reshape((4, 32))
+            .unwrap();
+        let qtensor = QTensor::quantize(&src, GgmlDType::Q4_0).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        gguf_file::write(&mut file, &[], &[("weight", &qtensor)]).unwrap();
+    }
+
+    // Reading a GGUF tensor through the mmap'd path must return the exact
+    // same bytes as reading it through a plain `File` reader, since the mmap
+    // change (`mmap_gguf_file`) is only meant to swap the I/O mechanism, not
+    // the data it produces.
+    #[test]
+    fn mmap_read_matches_direct_file_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.gguf");
+        write_test_gguf(&path);
+
+        let mmap = mmap_gguf_file(&path).unwrap();
+        let mut mmap_cursor = std::io::Cursor::new(mmap.as_ref());
+        let mmap_content = gguf_file::Content::read(&mut mmap_cursor).unwrap();
+        let mmap_tensor = mmap_content
+            .tensor(&mut mmap_cursor, "weight", &candle_core::Device::Cpu)
+            .unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let file_content = gguf_file::Content::read(&mut file).unwrap();
+        let file_tensor = file_content
+            .tensor(&mut file, "weight", &candle_core::Device::Cpu)
+            .unwrap();
+
+        let mmap_data = mmap_tensor.data().unwrap();
+        let file_data = file_tensor.data().unwrap();
+        assert_eq!(mmap_data, file_data);
+    }
+
+    // A missing path must surface as an `Err`, not panic (e.g. on the
+    // `unsafe` `Mmap::map` call).
+    #[test]
+    fn mmap_missing_file_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.gguf");
+        assert!(mmap_gguf_file(&path).is_err());
+    }
 }
