@@ -18,78 +18,13 @@
 //! architecture description to confirm against.
 
 use crate::models::modules::rotary::RotaryEmbedding;
-use candle_core::quantized::{QTensor, gguf_file};
+use crate::quantized::gguf_file::Gguf;
+use candle_core::quantized::gguf_file;
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::rotary_emb::rope;
 use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
-use std::sync::Arc;
-
-// ── GGUF loading helper ──
-
-/// Wraps a parsed GGUF file + reader for convenient tensor loading.
-pub struct Gguf<R: Read + Seek> {
-    pub ct: gguf_file::Content,
-    reader: R,
-    device: Device,
-    /// Target compute dtype. Dequantized tensors (norms, embeddings) are
-    /// cast to this dtype so they match the activations flowing through the
-    /// model (e.g. BF16 on CUDA). Quantized linear layers (QMatMul) handle
-    /// their own internal dtype and the `LinearLayer` wrapper casts their
-    /// output to the input's dtype.
-    dtype: DType,
-}
-
-impl<R: Read + Seek> Gguf<R> {
-    pub fn new(ct: gguf_file::Content, reader: R, device: Device, dtype: DType) -> Self {
-        Self {
-            ct,
-            reader,
-            device,
-            dtype,
-        }
-    }
-
-    /// Load a quantized tensor and wrap as a LinearLayer (QMatMul).
-    pub fn linear(&mut self, name: &str) -> Result<LinearLayer> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(ws))?;
-        Ok(LinearLayer::Quantized(qmm))
-    }
-
-    /// Load a tensor, dequantize, and create an RmsNorm.
-    /// The weight is cast to the target `dtype` so it matches activations.
-    pub fn rms_norm(&mut self, name: &str, eps: f64) -> Result<RmsNorm> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        let weight = ws.dequantize(&self.device)?.to_dtype(self.dtype)?;
-        Ok(RmsNorm::new(weight, eps))
-    }
-
-    /// Load a tensor, dequantize, and create an Embedding.
-    /// The weight is cast to the target `dtype` so lookups produce
-    /// tensors in the expected compute precision.
-    pub fn embedding(&mut self, name: &str, hidden_size: usize) -> Result<candle_nn::Embedding> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        let weight = ws.dequantize(&self.device)?.to_dtype(self.dtype)?;
-        Ok(candle_nn::Embedding::new(weight, hidden_size))
-    }
-
-    /// Load a raw QTensor by name.
-    pub fn tensor(&mut self, name: &str) -> Result<QTensor> {
-        self.ct.tensor(&mut self.reader, name, &self.device)
-    }
-
-    /// Whether the file contains a tensor with this exact name.
-    pub fn contains_tensor(&self, name: &str) -> bool {
-        self.ct.tensor_infos.contains_key(name)
-    }
-
-    /// Access GGUF metadata.
-    pub fn metadata(&self) -> &std::collections::HashMap<String, gguf_file::Value> {
-        &self.ct.metadata
-    }
-}
 
 pub use crate::ops::linear::LinearLayer;
 

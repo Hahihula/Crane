@@ -19,8 +19,8 @@ use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::io::{Read, Seek};
 
-use crate::models::hunyuan_dense::modeling::Gguf;
 use crate::ops::linear::{LinearLayer, linear_layer};
+use crate::quantized::gguf_file::Gguf;
 
 // ── Qwen 3.5 RMSNorm (unit-offset) ───────────────────────────────────────
 

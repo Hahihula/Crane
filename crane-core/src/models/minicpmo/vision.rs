@@ -20,8 +20,8 @@ use candle_nn::{
     layer_norm, linear,
 };
 
-use crate::models::hunyuan_dense::modeling::Gguf;
 use crate::models::minicpm_v::config::VisionConfig;
+use crate::quantized::gguf_file::Gguf;
 
 // ── Attention ────────────────────────────────────────────────────────────
 
@@ -639,16 +639,11 @@ mod gguf_cross_check {
         .expect("load resampler");
 
         // ── GGUF path (new) ──
-        let mut gguf_file =
-            std::fs::File::open(&gguf_path).unwrap_or_else(|e| panic!("open {gguf_path}: {e}"));
-        let ct =
-            candle_core::quantized::gguf_file::Content::read(&mut gguf_file).expect("parse gguf");
-        let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
-            ct,
-            &mut gguf_file,
-            device.clone(),
-            dtype,
-        );
+        let mmap = crate::quantized::gguf_file::mmap_gguf_file(&gguf_path)
+            .unwrap_or_else(|e| panic!("mmap {gguf_path}: {e}"));
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).expect("parse gguf");
+        let mut gg = crate::quantized::gguf_file::Gguf::new(ct, &mut cursor, device.clone(), dtype);
         let gguf_vpm = VisionModel::from_gguf(&mut gg, &config.vision_config)
             .expect("load vision model from gguf");
         let gguf_resampler = Resampler::from_gguf(&mut gg, embed_dim / 128, vision_dim, embed_dim)
