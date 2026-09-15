@@ -20,7 +20,7 @@ use candle_nn::{
 };
 
 use super::config::AudioConfig;
-use crate::models::hunyuan_dense::modeling::Gguf;
+use crate::quantized::gguf_file::Gguf;
 
 const LAYER_NORM_EPS: f64 = 1e-5;
 

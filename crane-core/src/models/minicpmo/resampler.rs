@@ -17,7 +17,7 @@ use std::io::{Read, Seek};
 use candle_core::{DType, Result, Tensor};
 use candle_nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm};
 
-use crate::models::hunyuan_dense::modeling::Gguf;
+use crate::quantized::gguf_file::Gguf;
 
 /// `nn.MultiheadAttention` equivalent: query and key/value come from
 /// different tensors (both already projected to `embed_dim`), packed

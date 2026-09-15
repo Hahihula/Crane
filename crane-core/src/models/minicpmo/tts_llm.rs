@@ -21,12 +21,12 @@ use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{Embedding, Linear, VarBuilder, embedding, linear};
 
 use super::config::TtsConfig;
-use crate::models::hunyuan_dense::modeling::Gguf;
 use crate::models::modules::attention::{AttentionConfig, RopeMode};
 use crate::models::modules::rotary::RotaryEmbedding;
 use crate::models::modules::transformer::TransformerBlock;
 use crate::models::voxtral_tts::codec::reconstruct_weight_norm;
 use crate::models::with_tracing::RmsNorm;
+use crate::quantized::gguf_file::Gguf;
 
 /// `linear1 -> relu -> linear2` — MiniCPM-o's `MultiModalProjector`, reused
 /// here (not `super::audio::AudioProjector`, which bakes in the `AvgPool1d`
@@ -744,16 +744,11 @@ mod gguf_cross_check {
             MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts");
 
         // ── GGUF path (new) ──
-        let mut gguf_file =
-            std::fs::File::open(&gguf_path).unwrap_or_else(|e| panic!("open {gguf_path}: {e}"));
-        let ct =
-            candle_core::quantized::gguf_file::Content::read(&mut gguf_file).expect("parse gguf");
-        let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
-            ct,
-            &mut gguf_file,
-            device.clone(),
-            dtype,
-        );
+        let mmap = crate::quantized::gguf_file::mmap_gguf_file(&gguf_path)
+            .unwrap_or_else(|e| panic!("mmap {gguf_path}: {e}"));
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).expect("parse gguf");
+        let mut gg = crate::quantized::gguf_file::Gguf::new(ct, &mut cursor, device.clone(), dtype);
         let mut gguf_tts = MiniCpmTts::from_gguf(&mut gg, &config.tts_config, &device, dtype)
             .expect("load tts from gguf");
 

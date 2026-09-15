@@ -14,6 +14,7 @@
 //! | [`autotokenizer`] | HuggingFace-compatible tokenizer loader |
 //! | [`chat`] | Chat-template rendering and message formatting |
 //! | [`bins`] | Model loading helpers used by CLI entry-points |
+//! | [`quantized`] | Shared GGUF file loading (mmap, typed tensor access) |
 //! | [`utils`] | Misc tensor / device utilities |
 //!
 //! ## Feature flags
@@ -28,6 +29,7 @@
 pub mod generation;
 pub mod models;
 pub mod ops;
+pub mod quantized;
 pub mod utils;
 
 #[cfg(feature = "onnx")]

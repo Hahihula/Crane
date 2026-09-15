@@ -26,9 +26,10 @@ use candle_nn::{Activation, Embedding, Linear, RmsNorm, VarBuilder, linear_no_bi
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
-// Reuse the polymorphic linear layer and GGUF loader from the shared Hunyuan module.
-pub use crate::models::hunyuan_dense::modeling::{Gguf, LinearLayer};
+// Reuse the polymorphic linear layer and the shared GGUF loader.
 use crate::models::modules::ffn::SwiGluFfn;
+pub use crate::ops::linear::LinearLayer;
+pub use crate::quantized::gguf_file::Gguf;
 
 // Note: Gemma 4 norms use standard `x * weight` (no `+1` shift unlike Gemma 3).
 // Weights are stored in final form. Use candle_nn::rms_norm / gg.rms_norm directly.

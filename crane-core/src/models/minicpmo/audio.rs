@@ -14,7 +14,7 @@ use std::io::{Read, Seek};
 use candle_core::{Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear};
 
-use crate::models::hunyuan_dense::modeling::Gguf;
+use crate::quantized::gguf_file::Gguf;
 
 pub struct AudioProjector {
     linear1: Linear,
@@ -262,16 +262,11 @@ mod gguf_cross_check {
         .expect("load audio_projection_layer");
 
         // ── GGUF path (new) ──
-        let mut gguf_file =
-            std::fs::File::open(&gguf_path).unwrap_or_else(|e| panic!("open {gguf_path}: {e}"));
-        let ct =
-            candle_core::quantized::gguf_file::Content::read(&mut gguf_file).expect("parse gguf");
-        let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
-            ct,
-            &mut gguf_file,
-            device.clone(),
-            dtype,
-        );
+        let mmap = crate::quantized::gguf_file::mmap_gguf_file(&gguf_path)
+            .unwrap_or_else(|e| panic!("mmap {gguf_path}: {e}"));
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).expect("parse gguf");
+        let mut gg = crate::quantized::gguf_file::Gguf::new(ct, &mut cursor, device.clone(), dtype);
         let gguf_encoder =
             super::super::audio_encoder::AudioEncoder::from_gguf(&mut gg, &config.audio_config)
                 .expect("load audio encoder from gguf");

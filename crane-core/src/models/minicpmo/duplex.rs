@@ -365,16 +365,13 @@ impl DuplexSession {
         let embed_dim = config.llm.hidden_size;
         let (audio_encoder, audio_projector) = match gguf.audio {
             Some(path) => {
-                let mut file = std::fs::File::open(path).map_err(|e| {
-                    candle_core::Error::Msg(format!("failed to open audio GGUF {path}: {e}"))
+                let mmap = crate::quantized::gguf_file::mmap_gguf_file(path).map_err(|e| {
+                    candle_core::Error::Msg(format!("failed to mmap audio GGUF {path}: {e}"))
                 })?;
-                let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-                let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
-                    ct,
-                    &mut file,
-                    device.clone(),
-                    dtype,
-                );
+                let mut cursor = std::io::Cursor::new(mmap.as_ref());
+                let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
+                let mut gg =
+                    crate::quantized::gguf_file::Gguf::new(ct, &mut cursor, device.clone(), dtype);
                 let encoder = AudioEncoder::from_gguf(&mut gg, &config.audio_config)?;
                 let projector = AudioProjector::from_gguf(&mut gg, config.audio_pool_step)?;
                 (encoder, projector)
@@ -395,16 +392,13 @@ impl DuplexSession {
 
         let tts = match gguf.tts {
             Some(path) => {
-                let mut file = std::fs::File::open(path).map_err(|e| {
-                    candle_core::Error::Msg(format!("failed to open tts GGUF {path}: {e}"))
+                let mmap = crate::quantized::gguf_file::mmap_gguf_file(path).map_err(|e| {
+                    candle_core::Error::Msg(format!("failed to mmap tts GGUF {path}: {e}"))
                 })?;
-                let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-                let mut gg = crate::models::hunyuan_dense::modeling::Gguf::new(
-                    ct,
-                    &mut file,
-                    device.clone(),
-                    dtype,
-                );
+                let mut cursor = std::io::Cursor::new(mmap.as_ref());
+                let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
+                let mut gg =
+                    crate::quantized::gguf_file::Gguf::new(ct, &mut cursor, device.clone(), dtype);
                 MiniCpmTts::from_gguf(&mut gg, &config.tts_config, device, dtype)?
             },
             None => MiniCpmTts::new(&config.tts_config, vb.pp("tts"), device, dtype)?,

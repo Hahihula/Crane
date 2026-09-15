@@ -19,8 +19,8 @@ use super::kv_cache::{KvCache, KvCacheKind};
 use super::modeling::{DecoderLayer, MRotaryEmbedding, Qwen35RmsNorm, RopeSlice};
 use crate::generation::GenerationConfig;
 use crate::generation::based::ModelForCausalLM;
-use crate::models::hunyuan_dense::modeling::Gguf;
 use crate::models::modules::embedding::EmbeddingLayer;
+use crate::quantized::gguf_file::Gguf;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 
@@ -749,9 +749,10 @@ impl Model {
         let gguf_path = std::path::Path::new(model_path);
         let parent = gguf_path.parent().unwrap_or(gguf_path);
 
-        let mut file = std::fs::File::open(gguf_path)
-            .with_context(|| format!("open GGUF file {model_path}"))?;
-        let ct = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+        let mmap = crate::quantized::gguf_file::mmap_gguf_file(gguf_path)
+            .with_context(|| format!("mmap GGUF file {model_path}"))?;
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
         eprintln!(
             "[qwen3_5] GGUF loaded: {} tensors, {} metadata entries",
             ct.tensor_infos.len(),
@@ -795,7 +796,7 @@ impl Model {
         }
         merge_canonical_eos_ids(&mut eos_token_ids, &tokenizer.get_vocab(true));
 
-        let inner = Qwen3_5TextModel::from_gguf(ct, &mut file, device)?;
+        let inner = Qwen3_5TextModel::from_gguf(ct, &mut cursor, device)?;
         let dtype = inner.dtype();
 
         Ok(Self {

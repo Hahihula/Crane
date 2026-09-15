@@ -1,125 +1,20 @@
+use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::rotary::RotaryEmbedding;
 use crate::utils::DeviceExt;
-use candle_core::quantized::{QTensor, gguf_file};
+use candle_core::quantized::gguf_file;
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::rotary_emb::rope;
 use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
-use std::sync::Arc;
 
 // ── GGUF loading helper ──
-
-/// Wraps a parsed GGUF file + reader for convenient tensor loading.
-pub struct Gguf<R: Read + Seek> {
-    pub ct: gguf_file::Content,
-    reader: R,
-    device: Device,
-    /// Target compute dtype. Dequantized tensors (norms, embeddings) are
-    /// cast to this dtype so they match the activations flowing through the
-    /// model (e.g. BF16 on CUDA). Quantized linear layers (`QMatMul`) handle
-    /// their own internal dtype and the `LinearLayer` wrapper casts their
-    /// output to the input's dtype.
-    dtype: DType,
-}
+// Moved to `crate::quantized::gguf_file` so every GGUF-loading model can
+// share it; re-exported here for existing users (hunyuan, qwen3, gemma4).
+pub use crate::quantized::gguf_file::{Gguf, mmap_gguf_file};
 
 /// Per-layer KV caches for a batch of sequences: `caches[seq][layer]`.
 pub type BatchKvCache = Vec<Vec<Option<(Tensor, Tensor)>>>;
-
-impl<R: Read + Seek> Gguf<R> {
-    pub fn new(ct: gguf_file::Content, reader: R, device: Device, dtype: DType) -> Self {
-        Self {
-            ct,
-            reader,
-            device,
-            dtype,
-        }
-    }
-
-    /// Load a quantized tensor and wrap as a `LinearLayer` (`QMatMul`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named tensor is missing or malformed.
-    pub fn linear(&mut self, name: &str) -> Result<LinearLayer> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(ws))?;
-        Ok(LinearLayer::Quantized(qmm))
-    }
-
-    /// Load a tensor, dequantize, and create an `RmsNorm`.
-    /// The weight is cast to the target `dtype` so it matches activations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named tensor is missing or malformed.
-    pub fn rms_norm(&mut self, name: &str, eps: f64) -> Result<RmsNorm> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        let weight = ws.dequantize(&self.device)?.to_dtype(self.dtype)?;
-        Ok(RmsNorm::new(weight, eps))
-    }
-
-    /// Load an embedding table that stays quantized when it can, dequantizing
-    /// only the rows a forward pass gathers.
-    ///
-    /// Prefer this over [`Self::embedding`] for large vocabularies: a 248k-row
-    /// table costs ~2.4 GiB dense in BF16 versus ~0.7 GiB as `Q4_K`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named tensor is missing or malformed.
-    pub fn quantized_embedding(
-        &mut self,
-        name: &str,
-        hidden_size: usize,
-    ) -> Result<crate::models::modules::embedding::EmbeddingLayer> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        crate::models::modules::embedding::EmbeddingLayer::from_qtensor(ws, hidden_size, self.dtype)
-    }
-
-    /// Load a tensor, dequantize, and create an Embedding.
-    /// The weight is cast to the target `dtype` so lookups produce
-    /// tensors in the expected compute precision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named tensor is missing or malformed.
-    pub fn embedding(&mut self, name: &str, hidden_size: usize) -> Result<candle_nn::Embedding> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        let weight = ws.dequantize(&self.device)?.to_dtype(self.dtype)?;
-        Ok(candle_nn::Embedding::new(weight, hidden_size))
-    }
-
-    /// Load a raw `QTensor` by name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named tensor is missing.
-    pub fn tensor(&mut self, name: &str) -> Result<QTensor> {
-        self.ct.tensor(&mut self.reader, name, &self.device)
-    }
-
-    /// Load a tensor, dequantize, and cast to the target compute dtype.
-    /// For small full-precision tensors (norm weights, biases, conv kernels).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named tensor is missing or malformed.
-    pub fn dequant_tensor(&mut self, name: &str) -> Result<Tensor> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        ws.dequantize(&self.device)?.to_dtype(self.dtype)
-    }
-
-    /// Whether the file contains a tensor with this exact name.
-    pub fn contains_tensor(&self, name: &str) -> bool {
-        self.ct.tensor_infos.contains_key(name)
-    }
-
-    /// Access GGUF metadata.
-    pub fn metadata(&self) -> &std::collections::HashMap<String, gguf_file::Value> {
-        &self.ct.metadata
-    }
-}
 
 // ── Polymorphic linear layer ──
 // Moved to `crate::ops::linear` so shared ops (e.g. GDN) can use it too;
@@ -795,7 +690,7 @@ impl DecoderLayer {
 }
 
 pub struct HunYuanDenseV1 {
-    embed_tokens: candle_nn::Embedding,
+    embed_tokens: EmbeddingLayer,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     lm_head: LinearLayer,
@@ -812,11 +707,11 @@ impl HunYuanDenseV1 {
     pub fn new(config: &Config, vb: &VarBuilder) -> Result<Self> {
         let dtype = vb.dtype();
         let model_vb = vb.pp("model");
-        let embed_tokens = candle_nn::embedding(
+        let embed_tokens = EmbeddingLayer::Dense(candle_nn::embedding(
             config.vocab_size,
             config.hidden_size,
             model_vb.pp("embed_tokens"),
-        )?;
+        )?);
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let layers_vb = model_vb.pp("layers");
@@ -828,7 +723,7 @@ impl HunYuanDenseV1 {
             candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
 
         let lm_head = if config.tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            embed_tokens.tied_output()?
         } else {
             LinearLayer::Standard(linear_no_bias(
                 config.hidden_size,
@@ -868,8 +763,8 @@ impl HunYuanDenseV1 {
     }
 
     /// Construct from a GGUF file. Reads config from GGUF metadata and loads
-    /// all weights as quantized tensors (`QMatMul` for linear layers, dequantized
-    /// for embeddings and norms).
+    /// all weights as quantized tensors (`QMatMul` for linear layers, norms
+    /// dequantized, embeddings kept quantized and gathered lazily per row).
     ///
     /// # Errors
     ///
@@ -958,8 +853,8 @@ impl HunYuanDenseV1 {
         };
 
         // Load embedding
-        let embed_tokens = gg.embedding("token_embd.weight", hidden_size)?;
-        let actual_vocab_size = embed_tokens.embeddings().dim(0)?;
+        let embed_tokens = gg.quantized_embedding("token_embd.weight", hidden_size)?;
+        let actual_vocab_size = embed_tokens.vocab_size();
 
         // Update config with actual vocab size
         let config = Config {
@@ -978,7 +873,7 @@ impl HunYuanDenseV1 {
 
         // LM head (may be tied to embeddings)
         let lm_head = if tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            embed_tokens.tied_output()?
         } else {
             gg.linear("output.weight")?
         };
@@ -1176,7 +1071,7 @@ impl HunYuanDenseV1 {
     ) -> Result<(Vec<usize>, usize)> {
         let kv_heads = self.config.num_key_value_heads;
         let head_dim = self.config.head_dim();
-        let device = self.embed_tokens.embeddings().device();
+        let device = self.embed_tokens.device();
 
         // Compute per-sequence KV lengths from the first layer's cache.
         let kv_lens: Vec<usize> = seq_kv_caches
@@ -1200,7 +1095,7 @@ impl HunYuanDenseV1 {
                 max_kv_len,
                 kv_heads,
                 head_dim,
-                device,
+                &device,
                 self.dtype,
             )?;
 
