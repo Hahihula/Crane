@@ -1,27 +1,23 @@
 //! HF-compatible config types for KugelAudio (`kugelaudio/kugelaudio-0-open`).
 //!
 //! KugelAudio is a post-trained fine-tune of Microsoft's VibeVoice
-//! architecture (`model_type: "kugelaudio"`, `KugelAudioForConditionalGeneration`
-//! in the checkpoint's `config.json`) — a dense Qwen2 decoder backbone plus two
+//! (`model_type: "kugelaudio"`, `KugelAudioForConditionalGeneration` in the
+//! checkpoint's `config.json`) — a dense Qwen2 decoder backbone plus two
 //! causal-conv VAE "tokenizers" (acoustic + semantic) and a small adaLN
 //! diffusion head that predicts continuous speech latents autoregressively.
-//! See `kugelaudio/mod.rs` for the module map.
-//!
-//! Ported against `kugelaudio-0-open`'s own bundled source (structurally a
-//! renamed copy of `microsoft/VibeVoice`'s `modular_vibevoice_{tokenizer,
-//! diffusion_head}.py` and a vendored copy of `diffusers`'
-//! `DPMSolverMultistepScheduler`) rather than the base VibeVoice repo, since
-//! this checkpoint's `config.json` is what actually ships.
+//! Ported against `kugelaudio-0-open`'s bundled source (a renamed copy of
+//! `microsoft/VibeVoice`'s `modular_vibevoice_*.py` and a vendored
+//! `diffusers` DPM-Solver).
+
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::doc_markdown)] // KugelAudio / VibeVoice / Microsoft are external names
 
 use serde::Deserialize;
 
-/// `decoder_config` — a stock Qwen2 decoder (28 layers / 3584 hidden /
-/// GQA 28:4 heads for the reference 7B checkpoint). Field set matches
-/// `qwen25::qwen2::Config` but is kept separate: this checkpoint's JSON
-/// additionally carries `use_mrope`/`use_sliding_window`/`max_window_layers`
-/// keys that Qwen2.5's config doesn't, and `sliding_window`/`rope_scaling`
-/// are `null` here (Qwen2, not Qwen2.5), which the shared struct's
-/// non-`Option` `sliding_window: usize` field can't represent.
+/// Qwen2 decoder config (28 layers / 3584 hidden / GQA 28:4 for the
+/// reference 7B checkpoint). Kept separate from `qwen25::qwen2::Config` —
+/// the shared struct's non-`Option` `sliding_window: usize` can't represent
+/// this checkpoint's `sliding_window: null` (Qwen2, not Qwen2.5).
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecoderConfig {
     pub vocab_size: usize,
@@ -39,89 +35,73 @@ pub struct DecoderConfig {
 }
 
 impl DecoderConfig {
+    #[must_use]
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
 }
 
-/// Shared shape for `acoustic_tokenizer_config`/`semantic_tokenizer_config`.
-/// Both are causal-conv VAE encoder/decoder stacks (ConvNeXt-style residual
-/// blocks over 1D convs) — see `conv_layers.rs`. The semantic tokenizer only
-/// ever uses the encoder half (no `decoder_depths`, `fix_std`, or
-/// `std_dist_type` reconstruction is meaningful for it), but both configs
-/// share this struct since the checkpoint's JSON gives them the same shape
-/// with a few fields the semantic side leaves at their inert defaults
-/// (`fix_std: 0`, `std_dist_type: "none"`).
+/// Shared `acoustic_tokenizer_config`/`semantic_tokenizer_config` shape:
+/// causal-conv VAE encoder/decoder stacks (see `conv_layers.rs`). Both
+/// configs use this struct — the semantic side leaves decoder-only fields
+/// at inert defaults since it only encodes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenizerConfig {
     pub channels: usize,
-    /// `vae_dim` — the tokenizer's latent dimension (64 for acoustic, 128 for
-    /// semantic in the reference checkpoint). Called `dimension` in the
-    /// Python `TokenizerEncoder`/`TokenizerDecoder` (derived from this field).
+    /// Latent dimension (64 acoustic, 128 semantic for the reference
+    /// checkpoint). Python calls this `dimension`.
     pub vae_dim: usize,
     pub encoder_n_filters: usize,
     pub encoder_ratios: Vec<usize>,
-    /// `"3-3-3-3-3-3-8"` — dash-separated stage depths, parsed by
-    /// [`Self::encoder_depths_vec`].
+    /// Dash-separated stage depths, parsed by [`Self::encoder_depths_vec`].
     pub encoder_depths: String,
     #[serde(default)]
     pub decoder_n_filters: Option<usize>,
     #[serde(default)]
     pub decoder_ratios: Option<Vec<usize>>,
-    /// `null` in the checkpoint → decoder depths default to
-    /// `reversed(encoder_depths)` (mirrors `VibeVoiceAcousticTokenizerModel.__init__`).
+    /// `None` → defaults to `reversed(encoder_depths)`.
     #[serde(default)]
     pub decoder_depths: Option<String>,
     pub causal: bool,
     pub conv_bias: bool,
     /// `"none" | "weight_norm" | "spectral_norm" | "layer_norm" | "time_group_norm"`.
-    /// The reference checkpoint uses `"none"` for both tokenizers, so
-    /// `conv_layers.rs` only implements the no-reparametrization path and
-    /// bails on anything else rather than porting `weight_norm`/
-    /// `spectral_norm` for a path that's never hit.
+    /// Reference checkpoint: `"none"` (no reparametrization). Other values
+    /// are not implemented in `conv_layers.rs`.
     pub conv_norm: String,
-    /// `"constant" | "reflect"`. Reference checkpoint: `"constant"` (zero-pad).
+    /// `"constant" | "reflect"`. Reference checkpoint: `"constant"`.
     pub pad_mode: String,
     /// `"LN" | "RMSNorm"`. Reference checkpoint: `"RMSNorm"`.
     pub layernorm: String,
     pub layernorm_eps: f64,
     pub layernorm_elementwise_affine: bool,
-    /// `"conv" | "depthwise_conv"`. Reference checkpoint: `"depthwise_conv"`
-    /// (groups = channel count).
+    /// `"conv" | "depthwise_conv"`. Reference: `"depthwise_conv"`.
     pub mixer_layer: String,
-    /// Nonzero enables the per-block learnable `LayerScale` (`gamma`/`ffn_gamma`).
+    /// Nonzero enables per-block learnable `LayerScale` (`gamma`/`ffn_gamma`).
     pub layer_scale_init_value: f64,
     pub disable_last_norm: bool,
-    /// Fixed reconstruction std for the acoustic VAE's Gaussian sampling
-    /// (`std_dist_type == "fix"` path). Unused by the semantic tokenizer.
+    /// Fixed reconstruction std for acoustic VAE Gaussian sampling.
+    /// Unused by the semantic tokenizer.
     #[serde(default)]
     pub fix_std: f64,
-    /// `"fix" | "gaussian" | "none"`. Unused at inference here — sampling
-    /// (`VibeVoiceTokenizerEncoderOutput::sample`) is a training-time detail;
-    /// this port's `encode()` returns the distribution mean directly (`mode()`
-    /// in the Python), matching how voice-prompt conditioning is actually
-    /// consumed in `kugelaudio_inference.py`.
+    /// Unused at inference — `encode()` returns the distribution mean.
     #[serde(default)]
     pub std_dist_type: String,
 }
 
 impl TokenizerConfig {
+    #[must_use]
     pub fn encoder_depths_vec(&self) -> Vec<usize> {
         parse_dash_depths(&self.encoder_depths)
     }
 
-    /// Decoder depths: `decoder_depths` if present, else
-    /// `reversed(encoder_depths)` (`VibeVoiceAcousticTokenizerModel.__init__`'s
-    /// fallback).
+    #[must_use]
     pub fn decoder_depths_vec(&self) -> Vec<usize> {
-        match &self.decoder_depths {
-            Some(s) => parse_dash_depths(s),
-            None => {
-                let mut d = self.encoder_depths_vec();
-                d.reverse();
-                d
-            },
+        if let Some(s) = &self.decoder_depths {
+            return parse_dash_depths(s);
         }
+        let mut d = self.encoder_depths_vec();
+        d.reverse();
+        d
     }
 }
 
@@ -129,9 +109,9 @@ fn parse_dash_depths(s: &str) -> Vec<usize> {
     s.split('-').filter_map(|d| d.parse().ok()).collect()
 }
 
-/// `diffusion_head_config` — the small adaLN-modulated FFN stack that
-/// predicts the next acoustic latent's noise/velocity conditioned on the
-/// decoder's hidden state. See `diffusion_head.rs`.
+/// AdaLN-modulated FFN stack that predicts the next acoustic latent's
+/// noise/velocity conditioned on the decoder's hidden state. See
+/// `diffusion_head.rs`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiffusionHeadConfig {
     pub hidden_size: usize,
@@ -139,14 +119,15 @@ pub struct DiffusionHeadConfig {
     pub head_layers: usize,
     pub head_ffn_ratio: f64,
     pub rms_norm_eps: f64,
-    /// `"epsilon" | "v_prediction"`. Reference checkpoint: `"v_prediction"`.
+    /// Reference checkpoint: `"v_prediction"`.
     pub prediction_type: String,
-    /// `"cosine"` is the only schedule `dpm_solver.rs` implements (matches
-    /// the reference checkpoint — see that module's doc comment).
+    /// Reference checkpoint: `"cosine"` (the only schedule implemented in
+    /// `dpm_solver.rs`).
     pub ddpm_beta_schedule: String,
     pub ddpm_num_steps: usize,
     pub ddpm_num_inference_steps: usize,
-    /// `"sde-dpmsolver++"` is the only algorithm `dpm_solver.rs` implements.
+    /// Reference checkpoint: `"sde-dpmsolver++"` (the only algorithm
+    /// implemented in `dpm_solver.rs`).
     pub ddpm_algorithm_type: String,
 }
 
@@ -164,6 +145,10 @@ pub struct KugelAudioConfig {
 }
 
 /// Load `config.json` for a KugelAudio checkpoint.
+///
+/// # Errors
+///
+/// Returns a candle error if the file can't be read or parsed.
 pub fn load_config(path: &str) -> candle_core::Result<KugelAudioConfig> {
     let data = std::fs::read(path)
         .map_err(|e| candle_core::Error::Msg(format!("read config {path}: {e}")))?;
@@ -176,9 +161,9 @@ pub fn load_config(path: &str) -> candle_core::Result<KugelAudioConfig> {
 mod tests {
     use super::*;
 
-    /// The exact `config.json` published for `kugelaudio/kugelaudio-0-open`
-    /// (fetched from the Hub during scoping this port) — a regression test
-    /// against silent schema drift, and documentation of the real shape.
+    /// The exact `config.json` published for `kugelaudio/kugelaudio-0-open` —
+    /// regression test against silent schema drift, also documents the real
+    /// shape.
     const REAL_CONFIG_JSON: &str = r#"{
       "acostic_vae_dim": 64,
       "acoustic_tokenizer_config": {

@@ -1,48 +1,40 @@
 //! DPM-Solver++ (SDE) multistep scheduler — the noise/velocity-to-latent
 //! sampler driving [`super::diffusion_head::DiffusionHead`].
 //!
-//! `kugelaudio_open.schedule.dpm_solver` vendors HuggingFace `diffusers`'
-//! `DPMSolverMultistepScheduler` verbatim (its own doc string:
-//! "This file is strongly influenced by
-//! <https://github.com/LuChengTHU/dpm-solver>"). That scheduler supports a
-//! large matrix of options (`dpmsolver`/`dpmsolver++`/`sde-dpmsolver`/
-//! `sde-dpmsolver++`, `epsilon`/`sample`/`v_prediction`, Karras/Lu sigma
-//! schedules, dynamic thresholding, solver orders 1-3, …), but the reference
-//! checkpoint's `diffusion_head_config` only ever selects one corner of it:
+//! Port of `kugelaudio_open.schedule.dpm_solver` (a vendored
+//! `diffusers.DPMSolverMultistepScheduler`). That scheduler supports a
+//! large matrix of options; the reference checkpoint selects one corner:
 //!
-//! - `ddpm_beta_schedule: "cosine"` (Glide/`squaredcos_cap_v2`)
-//! - `ddpm_algorithm_type: "sde-dpmsolver++"`
-//! - `prediction_type: "v_prediction"`
-//! - solver order 2 (`diffusers`' own default — not a `config.json` field)
-//! - `solver_type: "midpoint"`, `lower_order_final: true`,
-//!   `euler_at_final: false`, `use_karras_sigmas: false`,
-//!   `use_lu_lambdas: false`, `final_sigmas_type: "zero"`,
-//!   `timestep_spacing: "linspace"`, `thresholding: false`,
-//!   `lambda_min_clipped: -inf` (all `diffusers` defaults — none of these
-//!   are `config.json` fields either)
+//! - `ddpm_beta_schedule: "cosine"`, `ddpm_algorithm_type: "sde-dpmsolver++"`,
+//!   `prediction_type: "v_prediction"`
+//! - solver order 2 (`diffusers`' default, not a `config.json` field)
+//! - all other `diffusers` defaults (`solver_type: "midpoint"`,
+//!   `lower_order_final: true`, `final_sigmas_type: "zero"`,
+//!   `timestep_spacing: "linspace"`, etc.)
 //!
-//! This port only implements that corner — [`DpmSolverScheduler::new`] bails
-//! if `beta_schedule`/`algorithm_type`/`prediction_type` don't match, and
-//! [`DpmSolverScheduler::step`] only implements first- and second-order
-//! updates (matching the fixed solver order 2; a third-order update is
-//! never reached at that order and is not ported). With
-//! `final_sigmas_type == "zero"` always true, `diffusers`' `lower_order_final`
-//! condition — an OR of four terms, one of which is exactly
-//! `self.config.final_sigmas_type == "zero"` — collapses to just
-//! `is_last_or_past`; see [`DpmSolverScheduler::step`]'s comment.
+//! [`DpmSolverScheduler::new`] bails on any other choice; [`step`] only
+//! implements first- and second-order updates (third-order never reached
+//! at order 2). With `final_sigmas_type == "zero"` always true, the
+//! Python's `lower_order_final` 4-way OR collapses to `is_last_or_past`.
 //!
-//! Deviation from the Python: `step()` upcasts both `model_output` and
-//! `sample` to F32 for the *entire* step (Python only upcasts `sample`, and
-//! only after `convert_model_output`). Strictly more precision, never less;
-//! done for implementation simplicity (see that method's doc comment).
+//! Deviation: `step()` upcasts both `model_output` and `sample` to F32 for
+//! the whole step (Python only upcasts `sample`, only after
+//! `convert_model_output`). Strictly more precision; done for simplicity.
+
+#![allow(clippy::cast_precision_loss)] // linspace/exp math: usize->f64 intentional
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // i64 timestep->f32: bounded 0-999
+#![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
+#![allow(clippy::must_use_candidate)] // getters are conventionally used at call sites
+#![allow(clippy::doc_markdown)] // NumPy / VoxCPM2 are external project names
+#![allow(clippy::module_name_repetitions)] // DpmSolverScheduler / FinalLayer etc.
+#![allow(clippy::float_cmp)] // tests assert exact f64 step outputs
 
 use candle_core::{DType, Result, Tensor};
 use std::f64::consts::PI;
 
 use super::config::DiffusionHeadConfig;
 
-/// `betas_for_alpha_bar` (`alpha_transform_type="cosine"`): Glide's cosine
-/// noise schedule, discretized into `num_train_timesteps` betas.
+/// Glide cosine noise schedule (`alpha_transform_type="cosine"`).
 fn betas_cosine(num_train_timesteps: usize) -> Vec<f64> {
     let alpha_bar = |t: f64| ((t + 0.008) / 1.008 * PI / 2.0).cos().powi(2);
     (0..num_train_timesteps)
@@ -54,11 +46,10 @@ fn betas_cosine(num_train_timesteps: usize) -> Vec<f64> {
         .collect()
 }
 
-/// `np.round`'s round-half-to-even, needed for [`DpmSolverScheduler::set_timesteps`]'s
-/// `linspace(...).round()` to land on the exact same integer timesteps as
-/// the Python — Rust's `f64::round()` rounds half away from zero instead.
-/// (This codebase has hit real bugs from exactly this Rust/NumPy rounding
-/// mismatch before, in VoxCPM2's FSQ layer.)
+/// `np.round`'s round-half-to-even — needed to land on the same integer
+/// timesteps as `linspace(...).round()` in the Python (Rust's `f64::round`
+/// rounds half away from zero). VoxCPM2's FSQ layer has hit real bugs
+/// from this exact mismatch.
 fn round_half_even(x: f64) -> f64 {
     let floor = x.floor();
     if (x - floor - 0.5).abs() < 1e-9 {
@@ -78,27 +69,24 @@ fn sigma_to_alpha_sigma_t(sigma: f64) -> (f64, f64) {
     (alpha_t, sigma_t)
 }
 
-/// `x * scale`, `scale` a host-side f64 (mirrors the Python's scalar
-/// `torch.Tensor`-times-tensor broadcasts, computed here as a plain affine
-/// — `sigma`/`alpha`/`lambda` are themselves host scalars throughout).
+/// `x * scale` with `scale` a host-side f64.
 fn scale(x: &Tensor, s: f64) -> Result<Tensor> {
     x.affine(s, 0.0)
 }
 
-/// Fixed solver order — see module doc comment. `diffusers`' own default;
-/// not read from `config.json`.
+/// Fixed solver order — `diffusers`' own default, not in `config.json`.
 const SOLVER_ORDER: usize = 2;
 
 pub struct DpmSolverScheduler {
-    /// `sigmas[t] = sqrt((1 - alphas_cumprod[t]) / alphas_cumprod[t])` for
-    /// `t` in `0..num_train_timesteps`, indexed by raw (untouched) timestep.
+    /// `sigmas[t] = sqrt((1 - alphas_cumprod[t]) / alphas_cumprod[t])`,
+    /// indexed by raw timestep.
     sigmas_full: Vec<f64>,
     num_train_timesteps: usize,
 
-    // Set by `set_timesteps`; empty/zeroed before the first call.
+    /// Set by `set_timesteps`; empty/zeroed before the first call.
     timesteps: Vec<i64>,
-    /// `sigmas[0..num_inference_steps]` interpolated from `sigmas_full` at
-    /// each `timesteps[i]`, plus a final `0.0` (`final_sigmas_type == "zero"`).
+    /// `sigmas[0..num_inference_steps]` interpolated from `sigmas_full`,
+    /// plus a final `0.0` (`final_sigmas_type == "zero"`).
     sigmas: Vec<f64>,
     model_outputs: Vec<Option<Tensor>>,
     lower_order_nums: usize,
@@ -107,8 +95,11 @@ pub struct DpmSolverScheduler {
 
 impl DpmSolverScheduler {
     /// Build a scheduler from `diffusion_head_config`. Bails if the config
-    /// selects anything outside the one corner this port implements (see
-    /// module doc comment).
+    /// selects anything outside the one corner this port implements.
+    ///
+    /// # Errors
+    ///
+    /// Returns a candle error on unsupported config.
     pub fn new(cfg: &DiffusionHeadConfig) -> Result<Self> {
         if cfg.ddpm_beta_schedule != "cosine" {
             candle_core::bail!(
@@ -151,23 +142,25 @@ impl DpmSolverScheduler {
         })
     }
 
-    /// Convenience: build directly from `ddpm_num_inference_steps` in the
-    /// config and call [`Self::set_timesteps`].
+    /// Build from `ddpm_num_inference_steps` in the config and call
+    /// [`Self::set_timesteps`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a candle error on unsupported config.
     pub fn new_with_default_steps(cfg: &DiffusionHeadConfig) -> Result<Self> {
         let mut s = Self::new(cfg)?;
         s.set_timesteps(cfg.ddpm_num_inference_steps);
         Ok(s)
     }
 
-    /// Sets the `num_inference_steps` discrete timesteps used for the
-    /// denoising chain, and resets all per-generation solver state
-    /// (`model_outputs`, `lower_order_nums`, `step_index`). Must be called
-    /// before [`Self::step`]; call again to start a fresh denoising chain
-    /// (e.g. for the next generated patch).
+    /// Set the `num_inference_steps` discrete timesteps and reset all
+    /// per-generation solver state. Must be called before [`Self::step`];
+    /// call again to start a fresh denoising chain.
     pub fn set_timesteps(&mut self, num_inference_steps: usize) {
-        // `lambda_min_clipped = -inf` (never overridden) ⇒ `last_timestep`
-        // is always `num_train_timesteps` — the `searchsorted`-based clipping
-        // in the Python is dead code for this config and is not ported.
+        // `lambda_min_clipped = -inf` ⇒ `last_timestep` is always
+        // `num_train_timesteps` — the Python's `searchsorted` clipping is
+        // dead code here.
         let last_timestep = self.num_train_timesteps;
         // `timestep_spacing == "linspace"`:
         // `np.linspace(0, last_timestep-1, n+1).round()[::-1][:-1]`.
@@ -195,29 +188,25 @@ impl DpmSolverScheduler {
         self.step_index = 0;
     }
 
-    /// The timesteps to iterate `step()` over, in order, matching Python's
-    /// `for t in scheduler.timesteps: ...` usage
-    /// (`kugelaudio_inference.py`). The `t` values themselves aren't
-    /// consumed by [`Self::step`] (which tracks its own `step_index`
-    /// counter instead, driven purely by call order) — exposed for parity
-    /// with the Python call site and so callers can report progress.
+    /// Timesteps to iterate `step()` over, matching Python's
+    /// `for t in scheduler.timesteps: ...`. [`Self::step`] doesn't consume
+    /// these (it tracks its own `step_index` counter); exposed for parity
+    /// with the Python call site and progress reporting.
     pub fn timesteps(&self) -> &[i64] {
         &self.timesteps
     }
 
-    /// One denoising step: `model_output` is the diffusion head's raw
-    /// (v-prediction) output for `sample` at the *current* `step_index`'s
-    /// timestep; returns the sample at the *next* (less noisy) timestep.
-    /// Must be called exactly `timesteps().len()` times per generation
-    /// (matching a `for t in timesteps() { sample = step(...) }` loop) —
-    /// `step_index` advances by one on every call, sourced purely from call
-    /// order (see [`Self::timesteps`]'s doc comment).
+    /// One denoising step. Must be called exactly `timesteps().len()` times
+    /// per generation — `step_index` advances by one on every call, sourced
+    /// purely from call order.
     ///
     /// `model_output`/`sample` may be any shape, so long as they match
-    /// (typically `[1, latent_size]` for one generated patch, or
-    /// `[N, latent_size]` when denoising `N` positions' latents in
-    /// lockstep — e.g. the `ddpm_batch_mul` training path this port doesn't
-    /// use, or a batched inference path a future caller might add).
+    /// (`[1, latent_size]` for one generated patch, or `[N, latent_size]`
+    /// for batched denoising).
+    ///
+    /// # Errors
+    ///
+    /// Returns a candle error if any tensor op fails.
     pub fn step(&mut self, model_output: &Tensor, sample: &Tensor) -> Result<Tensor> {
         let device = model_output.device().clone();
         let orig_dtype = sample.dtype();
@@ -226,15 +215,11 @@ impl DpmSolverScheduler {
 
         let num_inference_steps = self.timesteps.len();
         let is_last_or_past = self.step_index >= num_inference_steps.saturating_sub(1);
-        // `final_sigmas_type == "zero"` is always true for this config, which
-        // makes the Python's 4-way OR unconditionally true whenever
-        // `is_last_or_past` — see module doc comment.
+        // `final_sigmas_type == "zero"` always true → 4-way OR collapses here.
         let lower_order_final = is_last_or_past;
-        // Python's second-order branch is `elif self.config.solver_order == 2
-        // or self.lower_order_nums < 2 or lower_order_second`, and `or`
-        // short-circuits on the first (always-true, since `SOLVER_ORDER` is
-        // fixed at 2) term — so `lower_order_nums`/`lower_order_second` never
-        // actually get consulted here and are not computed at all.
+        // Python's second-order branch is `elif solver_order == 2 or ...` —
+        // `or` short-circuits on the always-true first term, so
+        // `lower_order_nums`/`lower_order_second` are never consulted.
 
         // convert_model_output (sde-dpmsolver++, v_prediction):
         // x0_pred = alpha_t * sample - sigma_t * model_output
@@ -318,10 +303,8 @@ impl DpmSolverScheduler {
     }
 }
 
-/// Same math as [`DpmSolverScheduler`], run entirely on host-side `f64`
-/// scalars — used by tests to cross-check the tensor-based scheduler
-/// without depending on it, and available for a future caller that only
-/// needs the scalar schedule (e.g. to size a batched denoise loop).
+/// Same math as [`DpmSolverScheduler`], host-side `f64` scalars — used by
+/// tests to cross-check the tensor-based scheduler without depending on it.
 #[cfg(test)]
 fn sigmas_for_inference_steps(cfg: &DiffusionHeadConfig, num_inference_steps: usize) -> Vec<f64> {
     let mut s = DpmSolverScheduler::new(cfg).expect("scheduler");
@@ -409,8 +392,7 @@ mod tests {
         let mut sample = Tensor::rand(-1f32, 1f32, (1, latent_size), &device).unwrap();
         let steps = s.timesteps().len();
         for _ in 0..steps {
-            // Stand-in "model output": in real use this comes from
-            // `DiffusionHead::forward`; a fixed function of `sample` here is
+            // Stand-in "model output": a fixed function of `sample` is
             // enough to exercise the scheduler's control flow and numerics.
             let fake_model_output = scale(&sample, 0.1).unwrap();
             sample = s.step(&fake_model_output, &sample).expect("step");
@@ -426,10 +408,9 @@ mod tests {
         assert!(max_abs.is_finite());
     }
 
-    /// Same denoising loop on Metal (skipped where Metal isn't available) —
-    /// `step`'s scalar-coefficient `cos`/`sin`/`exp` math is plain candle
-    /// tensor ops with no CUDA-only path, but this is the only place that
-    /// actually runs the scheduler on the Metal backend.
+    /// Same denoising loop on Metal (skipped where Metal isn't available).
+    /// `step`'s scalar `cos`/`sin`/`exp` math is plain candle tensor ops
+    /// with no CUDA-only path; this is the only place it runs on Metal.
     #[test]
     fn full_denoise_loop_produces_finite_output_of_correct_shape_on_metal() {
         if !candle_core::utils::metal_is_available() {

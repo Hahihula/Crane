@@ -1,15 +1,15 @@
-//! KugelAudio Simple Example
+//! `KugelAudio` Simple Example
 //!
-//! Generates speech from text using KugelAudio (`kugelaudio/kugelaudio-0-open`,
-//! a post-trained fine-tune of Microsoft's VibeVoice): zero-shot with the
-//! model's built-in voice, or conditioned on a reference clip for voice
-//! cloning (raw audio, resampled to 24kHz — no prompt transcript needed).
+//! Generates speech from text using `KugelAudio`
+//! (`kugelaudio/kugelaudio-0-open`, a post-trained fine-tune of Microsoft's
+//! `VibeVoice`): zero-shot with the model's built-in voice, or conditioned on
+//! a reference clip for voice cloning (raw audio, resampled to 24kHz — no
+//! prompt transcript needed).
 //!
-//! Unlike Crane's other TTS checkpoints, KugelAudio ships **no tokenizer of
-//! its own** — it needs a Qwen2-VL-family `tokenizer.json` (not plain
-//! Qwen2.5's: only the Qwen2-VL vocab defines `<|vision_start/end/pad|>` at
-//! the fixed ids this port hardcodes as speech control tokens). Download one
-//! once, e.g.:
+//! Unlike Crane's other TTS checkpoints, `KugelAudio` ships **no tokenizer of
+//! its own** — it needs a Qwen2-VL-family `tokenizer.json` (only the
+//! Qwen2-VL vocab defines `<|vision_start/end/pad|>` at the fixed ids this
+//! port hardcodes as speech control tokens). Download one once, e.g.:
 //!
 //! ```bash
 //! curl -L -o tokenizer.json \
@@ -25,14 +25,32 @@
 //! cargo run --bin kugelaudio_simple --release --features cuda -- \
 //!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json
 //!
-//! # Zero-shot, custom text
-//! cargo run --bin kugelaudio_simple --release --features cuda -- \
-//!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json "Your custom text here"
-//!
 //! # Voice cloning from a reference clip (no transcript needed)
 //! cargo run --bin kugelaudio_simple --release --features cuda -- \
 //!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json "Text to speak" --ref-wav ref.wav
+//!
+//! # macOS: use --features metal instead of --features cuda
+//!
+//! # Low-VRAM/low-RAM: 4-bit in-situ quantization of the decoder backbone
+//! # (~7B parameters, the bulk of the ~18.7GB checkpoint) — works with
+//! # either --features cuda or --features metal
+//! cargo run --bin kugelaudio_simple --release --features metal -- \
+//!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json --quant q4_0
 //! ```
+//!
+//! **Quantization caveat**: `--quant`/`CRANE_ISQ` is unit-tested on CPU
+//! and Metal with synthetic weights, but loading the real checkpoint
+//! end-to-end on a memory-constrained machine has not been verified. On an
+//! 18GB Mac, attempts to load (even at `--quant q4_0`) repeatedly exhausted
+//! system memory badly enough to crash the whole machine — the loading
+//! path allocates in bursts that can outrun an external memory watchdog.
+//! Watch memory closely (or use a tool that can hard-kill the process) rather
+//! than assuming `q4_0` is safe on a tight-memory machine.
+
+#![allow(clippy::doc_markdown)] // KugelAudio / VibeVoice are external names
+#![allow(clippy::cast_precision_loss)] // u128 nanos / SAMPLE_RATE: bounded
+#![allow(clippy::cast_possible_truncation)] // u128->u64 for nanos; PID u32->u64
+#![allow(clippy::too_many_lines)] // main() does device setup, load, generate, save
 
 use clap::Parser;
 
@@ -40,7 +58,7 @@ use clap::Parser;
 #[command(about = "KugelAudio TTS demo: zero-shot or reference-audio-conditioned (voice cloning)")]
 struct Args {
     /// Path to the KugelAudio checkpoint directory (must contain
-    /// config.json + model-*.safetensors / model.safetensors.index.json)
+    /// config.json + model-*.safetensors / model.safetensors.index.json).
     model_path: String,
     /// Path to a Qwen2-VL-family tokenizer.json — see module doc comment.
     /// Defaults to `<model_path>/tokenizer.json` if present.
@@ -55,8 +73,7 @@ struct Args {
     ref_wav: Option<String>,
     #[arg(long, default_value = "data/audio/output")]
     output_dir: String,
-    /// Classifier-free guidance scale (1.0 disables CFG). Matches the
-    /// checkpoint's own default.
+    /// CFG scale (1.0 disables CFG). Matches the checkpoint's own default.
     #[arg(long, default_value_t = 3.0)]
     cfg_scale: f64,
     #[arg(long, default_value_t = 2048)]
@@ -71,9 +88,17 @@ struct Args {
     #[arg(long)]
     cpu: bool,
     /// Seed for the diffusion-sampling noise. Defaults to a fresh random
-    /// value every launch; pass a fixed value for reproducible output.
+    /// value every launch.
     #[arg(long)]
     seed: Option<u64>,
+    /// In-situ-quantize the decoder backbone (the ~7B-parameter Qwen2
+    /// stack, the bulk of the ~18.7GB checkpoint) to this `GgmlDType` as it
+    /// loads, e.g. `q4_0` for 4-bit — the lever for low-VRAM GPUs or
+    /// low-RAM machines. One of `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0`,
+    /// `q2k`, `q3k`, `q4k`, `q5k`, `q6k`. Works on CUDA and Metal. Falls
+    /// back to `CRANE_ISQ` when unset.
+    #[arg(long)]
+    quant: Option<String>,
 }
 
 const SAMPLE_RATE: u32 = 24_000;
@@ -122,11 +147,9 @@ fn main() -> anyhow::Result<()> {
             "WARNING: KugelAudio on CPU will be slow (28-layer decoder + 20-step diffusion per frame). GPU strongly recommended."
         );
     } else {
-        // candle's CUDA/Metal backends both default to a fixed RNG seed
-        // (299792458), so the diffusion-sampling noise -- the only thing
-        // that varies output when --do-sample is off, the default -- would
-        // be identical on every launch without this. CPU's RNG is already
-        // OS-entropy-seeded per run and errors if you try to reseed it.
+        // candle's CUDA/Metal backends default to a fixed RNG seed
+        // (299792458), so the diffusion noise would be identical on every
+        // launch without this. CPU's RNG is OS-entropy-seeded per run.
         let seed = args.seed.unwrap_or_else(|| {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -138,9 +161,23 @@ fn main() -> anyhow::Result<()> {
         device.set_seed(seed)?;
     }
 
+    let quant = match args.quant.as_deref() {
+        Some(name) => Some(
+            crane_core::ops::linear::parse_ggml_dtype(name)
+                .map_err(|e| anyhow::anyhow!("invalid --quant: {e}"))?,
+        ),
+        None => std::env::var("CRANE_ISQ")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| crane_core::ops::linear::parse_ggml_dtype(&s))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("invalid CRANE_ISQ: {e}"))?,
+    };
+
     println!("Loading KugelAudio from: {}", args.model_path);
-    println!("Device: {device:?}  dtype: {dtype:?}");
-    let mut model = KugelAudioModel::from_pretrained(&args.model_path, &device, dtype)?;
+    println!("Device: {device:?}  dtype: {dtype:?}  quant: {quant:?}");
+    let mut model =
+        KugelAudioModel::from_pretrained_with_quant(&args.model_path, &device, dtype, quant)?;
 
     println!("Loading tokenizer from: {tokenizer_path}");
     let tokenizer = Tokenizer::from_file(&tokenizer_path)

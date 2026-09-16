@@ -2,47 +2,37 @@
 //! splice points `KugelAudioModel::generate` needs, mirroring
 //! `kugelaudio_open.processors.kugelaudio_processor.KugelAudioProcessor.__call__`.
 //!
-//! Text tokenizer note: the checkpoint ships no tokenizer of its own.
-//! `KugelAudioProcessor.from_pretrained` loads
-//! `KugelAudioTextTokenizer.from_pretrained(language_model_pretrained_name)`,
-//! defaulting to `"Qwen/Qwen2.5-1.5B"` — but that default is a red herring:
-//! plain Qwen2.5's tokenizer doesn't define `<|vision_start|>` /
-//! `<|vision_end|>` / `<|vision_pad|>` at all, so
-//! `KugelAudioTextTokenizer._add_speech_special_tokens`'s
-//! `add_special_tokens` call would append them at whatever the next free id
-//! happens to be — not the fixed `151652`/`151653`/`151654` this module (and
-//! `kugelaudio_processor.py`, and the checkpoint's `decoder_config.vocab_size
-//! = 152064`) hardcode. Those exact ids match a **Qwen2-VL-family**
-//! tokenizer instead (verified against `Qwen/Qwen2-VL-2B-Instruct`'s
-//! `tokenizer_config.json`: `<|vision_start|>=151652`,
-//! `<|vision_end|>=151653`, `<|vision_pad|>=151654`), which is what callers
-//! should actually load and pass in here.
+//! Text tokenizer note: the checkpoint ships no tokenizer of its own. The
+//! hardcoded `151652`/`151653`/`151654` for the speech control tokens
+//! match a **Qwen2-VL-family** tokenizer (verified against
+//! `Qwen/Qwen2-VL-2B-Instruct`'s `tokenizer_config.json`) — plain
+//! Qwen2.5's tokenizer doesn't define them at all. Callers should load and
+//! pass in a Qwen2-VL-family tokenizer.
+
+#![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are anyhow
+#![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
+#![allow(clippy::cast_possible_truncation)] // test vocab index -> u32, bounded
 
 use anyhow::Result;
 use tokenizers::Tokenizer;
 
 use super::model::special_tokens::SPEECH_DIFFUSION_ID;
 
-/// Samples of audio per acoustic-latent frame — `1000 * hop_length` (all
-/// six `encoder_ratios` multiplied: `8*5*5*4*2*2 = 3200`), i.e. one
-/// diffusion-generated latent frame is exactly `3200` audio samples at
-/// 24kHz. Called `speech_compression_ratio` in the Python
-/// (`KugelAudioProcessor.__init__`'s default of `3200`, not derived from
-/// `config.json`).
+/// Audio samples per acoustic-latent frame: `1000 * hop_length` (all six
+/// `encoder_ratios` multiplied: `8*5*5*4*2*2 = 3200`). One diffusion-
+/// generated latent frame is exactly `3200` audio samples at 24kHz.
 pub const SPEECH_COMPRESSION_RATIO: usize = 3200;
 
 /// Output of [`build_prompt`]: the full token sequence (voice-prompt frames
-/// represented by `speech_diffusion_id` placeholders, matching what the
-/// Python's `text_ids`/`input_ids` contains) plus where those placeholders
-/// are, so the caller can splice in real voice-prompt embeddings at exactly
-/// those positions.
+/// represented by `speech_diffusion_id` placeholders) plus where those
+/// placeholders are, so the caller can splice in real voice-prompt
+/// embeddings at exactly those positions.
 pub struct PromptResult {
     pub token_ids: Vec<u32>,
-    /// `true` at every voice-prompt placeholder position (there is at most
-    /// one contiguous run — a single optional voice prompt).
+    /// `true` at every voice-prompt placeholder position (at most one
+    /// contiguous run — a single optional voice prompt).
     pub speech_input_mask: Vec<bool>,
-    /// Number of voice-prompt placeholder frames (`0` if no voice prompt),
-    /// i.e. `speech_input_mask.iter().filter(|&&b| b).count()`.
+    /// Number of voice-prompt placeholder frames (`0` if no voice prompt).
     pub voice_frame_count: usize,
 }
 
@@ -59,10 +49,7 @@ fn encode(tokenizer: &Tokenizer, text: &str) -> Result<Vec<u32>> {
 ///
 /// Does **not** append the trailing `speech_start` token that begins
 /// generation — that's appended by [`super::model::KugelAudioModel::generate`]
-/// itself, once, right before the autoregressive loop starts (mirroring
-/// `KugelAudioProcessor.__call__` appending it, immediately followed by
-/// `generate()`'s per-step loop treating it as the first "already generated"
-/// token).
+/// itself, once, right before the autoregressive loop starts.
 pub fn build_prompt(
     tokenizer: &Tokenizer,
     text: &str,
@@ -123,10 +110,9 @@ mod tests {
     use super::*;
 
     fn tiny_tokenizer() -> Tokenizer {
-        // A minimal whitespace-split BPE-free tokenizer is enough to
-        // exercise `build_prompt`'s structure/mask bookkeeping without
-        // needing the real ~7MB Qwen2-VL tokenizer.json in this crate's
-        // test fixtures.
+        // Minimal whitespace-split BPE-free tokenizer — enough to exercise
+        // `build_prompt`'s structure/mask bookkeeping without the real
+        // ~7MB Qwen2-VL tokenizer.json in test fixtures.
         use tokenizers::models::wordlevel::WordLevel;
         use tokenizers::pre_tokenizers::whitespace::Whitespace;
 
@@ -164,12 +150,10 @@ mod tests {
     #[test]
     fn voice_prompt_mask_run_length_matches_frame_count() {
         let tok = tiny_tokenizer();
-        // 3200 * 5 samples -> exactly 5 frames.
         let result = build_prompt(&tok, "hello there", Some(3200 * 5)).expect("build_prompt");
         assert_eq!(result.voice_frame_count, 5);
         let true_count = result.speech_input_mask.iter().filter(|&&b| b).count();
         assert_eq!(true_count, 5);
-        // The true run must be contiguous.
         let first_true = result.speech_input_mask.iter().position(|&b| b).unwrap();
         assert!(
             result.speech_input_mask[first_true..first_true + 5]

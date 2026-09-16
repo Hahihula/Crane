@@ -28,6 +28,7 @@ fn dense_forced() -> bool {
 }
 
 /// An embedding table, dense or quantized.
+#[derive(Clone)]
 pub enum EmbeddingLayer {
     Dense(candle_nn::Embedding),
     Quantized {
@@ -116,7 +117,7 @@ impl EmbeddingLayer {
                 None,
             ))),
             Self::Quantized { weight, .. } => {
-                Ok(LinearLayer::Quantized(QMatMul::from_arc(weight.clone())?))
+                Ok(LinearLayer::quantized(QMatMul::from_arc(weight.clone())?))
             },
         }
     }
@@ -258,7 +259,10 @@ mod tests {
 
         assert!(matches!(
             layer.tied_output()?,
-            LinearLayer::Quantized(QMatMul::QTensor(_))
+            LinearLayer::Quantized(crate::ops::linear::QuantizedLinear {
+                matmul: QMatMul::QTensor(_),
+                ..
+            })
         ));
 
         // …and it projects to vocab logits, i.e. it is the transposed matmul

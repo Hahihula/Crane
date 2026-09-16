@@ -1,13 +1,13 @@
-//! End-to-end sanity check for KugelAudio's `generate()`: build a real
-//! prompt with a real Qwen2-VL-family tokenizer, run it through the real
-//! checkpoint, and verify the output is well-formed (valid token sequence,
+//! End-to-end sanity check for `KugelAudio`'s `generate()`: builds a real
+//! prompt with a real Qwen2-VL-family tokenizer, runs it through the real
+//! checkpoint, verifies the output is well-formed (valid token sequence,
 //! finite non-empty audio) — not output *correctness* (no HF reference
 //! comparison yet).
 //!
-//! Gated by `CRANE_KUGELAUDIO_DIR` (checkpoint) and
-//! `CRANE_KUGELAUDIO_TOKENIZER` (a `tokenizer.json` — see `prompt.rs`'s doc
-//! comment for why this must be a Qwen2-VL-family tokenizer, not plain
-//! Qwen2.5's).
+//! Gated by `CRANE_KUGELAUDIO_DIR` and `CRANE_KUGELAUDIO_TOKENIZER` (see
+//! `prompt.rs` for why the tokenizer must be Qwen2-VL-family).
+
+#![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
 
 #[test]
 #[ignore = "needs a local KugelAudio checkpoint + tokenizer.json (CRANE_KUGELAUDIO_DIR, CRANE_KUGELAUDIO_TOKENIZER)"]
@@ -25,9 +25,7 @@ fn kugelaudio_generate_is_well_formed() {
     let tokenizer_path =
         std::env::var("CRANE_KUGELAUDIO_TOKENIZER").expect("set CRANE_KUGELAUDIO_TOKENIZER");
 
-    // CUDA → CUDA BF16 (the checkpoint's native `torch_dtype`); macOS →
-    // Metal F16; everything else → CPU F32. Same pattern as
-    // `voxcpm2_generate.rs` for another diffusion-head TTS model.
+    // CUDA → CUDA BF16; macOS → Metal F16; everything else → CPU F32.
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
         (Device::new_cuda(0).unwrap(), DType::BF16)
@@ -48,7 +46,7 @@ fn kugelaudio_generate_is_well_formed() {
         KugelAudioModel::from_pretrained(&dir, &device, dtype).expect("from_pretrained");
 
     let gen_cfg = KugelAudioGenerationConfig {
-        cfg_scale: 1.0, // no CFG for this first smoke run — see module doc comment
+        cfg_scale: 1.0, // no CFG for this smoke run
         max_new_tokens: 15,
         do_sample: false,
         temperature: 1.0,

@@ -1,26 +1,32 @@
 //! Causal 1D-conv building blocks shared by the acoustic and semantic
-//! tokenizers (`tokenizer_vae.rs`).
+//! tokenizers.
 //!
-//! Port of `kugelaudio_open.models.tokenizer` (structurally a renamed copy of
-//! `microsoft/VibeVoice`'s `modular_vibevoice_tokenizer.py`) — `SConv1d`,
+//! Port of `kugelaudio_open.models.tokenizer` (a renamed copy of
+//! `microsoft/VibeVoice`'s `modular_vibevoice_tokenizer.py`): `SConv1d`,
 //! `SConvTranspose1d`, `ConvRMSNorm`, `Block1D`, `TokenizerEncoder`,
-//! `TokenizerDecoder`. **Non-streaming only**: the Python source supports an
-//! optional streaming-cache path (`VibeVoiceTokenizerStreamingCache`) for
-//! chunked online encode/decode; this port always takes the
-//! `_forward_non_streaming` branch, since generation always has the full
-//! speech-tensor / full generated-latent sequence available (see `model.rs`).
+//! `TokenizerDecoder`.
 //!
-//! Scoped to the reference checkpoint's config values, matching this crate's
-//! convention elsewhere (e.g. `voxcpm2::audio_vae`'s decode-only `AudioVAE`
-//! port): `conv_norm: "none"` (no weight-norm/spectral-norm reparametrization
-//! — [`SConv1d`]/[`SConvTranspose1d`] only implement the unparametrized
-//! conv), `causal: true` for every conv (the non-causal symmetric-padding
-//! branch is not implemented), `pad_mode: "constant"` (zero-padding; the
-//! Python's `reflect` branch is not implemented), and
-//! `trim_right_ratio = 1.0` (`SConvTranspose1d`'s Python default — not a
-//! `config.json` field, so there is nothing to override here: causal
-//! transpose-conv trimming always removes `kernel_size - stride` samples
-//! from the *end* only, never the start).
+//! **Non-streaming only**: the Python's streaming-cache path isn't needed
+//! since generation always has the full sequence available (see `model.rs`).
+//!
+//! Scoped to the reference checkpoint's config values: `conv_norm: "none"`,
+//! `causal: true`, `pad_mode: "constant"`, `trim_right_ratio = 1.0`. Other
+//! values would need porting.
+
+#![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
+#![allow(clippy::cast_precision_loss)] // tensor dim math: usize->f64 is intentional
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)] // extra_padding_for_conv1d: signed arithmetic is intentional
+#![allow(clippy::similar_names)] // _one / _bias / etc. are intentional short names
+#![allow(clippy::too_many_arguments)] // SConv1d/Tokenizer loaders have many params
+#![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
+#![allow(clippy::missing_panics_doc)] // expect() in tests only
+#![allow(clippy::must_use_candidate)] // getters are conventionally used at call sites
+#![allow(clippy::doc_markdown)] // RMSNorm / ConvNeXt / PyTorch are external names
+#![allow(clippy::many_single_char_names)] // tensor dim math uses c/t/k/x idiomatically
 
 use candle_core::{D, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Module, VarBuilder};
@@ -29,11 +35,8 @@ use crate::models::with_tracing::RmsNorm;
 
 use super::config::TokenizerConfig;
 
-/// `ConvRMSNorm`: RMSNorm applied over the channel dimension of a `[B, C, T]`
-/// tensor (transpose to `[B, T, C]`, normalize the last axis, transpose
-/// back). The Python also supports plain `LayerNorm` (`layernorm: "LN"`);
-/// the reference checkpoint always uses `"RMSNorm"`, so that's the only
-/// variant implemented here.
+/// RMSNorm applied over the channel dim of `[B, C, T]` (transpose,
+/// normalize, transpose back). Reference checkpoint uses `"RMSNorm"` only.
 #[derive(Debug, Clone)]
 struct ConvRmsNorm {
     norm: RmsNorm,
@@ -54,9 +57,7 @@ impl ConvRmsNorm {
 }
 
 /// `get_extra_padding_for_conv1d`: extra right-padding so the conv's output
-/// length matches PyTorch's `ceil`-based length formula (candle's `Conv1d`
-/// follows the `floor` convention like PyTorch's raw op; this recovers the
-/// same "round up" framing the Python's manual padding relies on).
+/// length matches PyTorch's `ceil` convention (candle's `Conv1d` uses `floor`).
 fn extra_padding_for_conv1d(
     length: usize,
     kernel_size: usize,
@@ -70,18 +71,16 @@ fn extra_padding_for_conv1d(
     (ideal_length - length as i64).max(0) as usize
 }
 
-/// Causal `SConv1d`: manual left/right zero-padding (`pad_mode: "constant"`)
-/// sized so output length follows the `ceil` convention, then an
-/// unparametrized `Conv1d` with `padding: 0`.
+/// Causal `SConv1d`: manual left/right zero-padding sized for `ceil` output
+/// length, then unparametrized `Conv1d` with `padding: 0`.
 #[derive(Debug, Clone)]
 struct SConv1d {
     conv: Conv1d,
     kernel_size: usize,
     stride: usize,
     padding_total: usize,
-    /// True depthwise conv (`groups == in_ch == out_ch`, `stride == 1`,
-    /// `dilation == 1`): use the closed-form fast path instead of candle's
-    /// generic grouped-conv fallback.
+    /// True depthwise conv: use the closed-form fast path instead of
+    /// candle's generic grouped-conv fallback.
     depthwise_fast_path: bool,
 }
 
@@ -90,11 +89,11 @@ struct SConv1d {
 fn depthwise_conv1d_stride1(x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
     let (c, _one, k) = weight.dims3()?;
     let t_out = x.dim(D::Minus1)? - k + 1;
-    let w = weight.reshape((1, c, k))?; // [1, C, K]
+    let w = weight.reshape((1, c, k))?;
     let mut acc: Option<Tensor> = None;
     for i in 0..k {
-        let x_i = x.narrow(D::Minus1, i, t_out)?; // [B, C, T_out]
-        let w_i = w.narrow(D::Minus1, i, 1)?; // [1, C, 1]
+        let x_i = x.narrow(D::Minus1, i, t_out)?;
+        let w_i = w.narrow(D::Minus1, i, 1)?;
         let term = x_i.broadcast_mul(&w_i)?;
         acc = Some(match acc {
             Some(a) => (a + term)?,
@@ -120,9 +119,8 @@ impl SConv1d {
         bias: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
-        // Python: `SConv1d.conv` = `NormConv1d`, whose own `.conv` is the raw
-        // `nn.Conv1d` (the norm reparametrization module in between is
-        // `nn.Identity()` for `conv_norm == "none"`, so it carries no weights).
+        // `SConv1d.conv` = `NormConv1d.conv`; the `NormConv1d` reparam
+        // wrapper is `nn.Identity()` for `conv_norm == "none"`.
         let vb_conv = vb.pp("conv").pp("conv");
         let weight = vb_conv.get((out_ch, in_ch / groups, kernel_size), "weight")?;
         let bias = if bias {
@@ -138,9 +136,9 @@ impl SConv1d {
             cudnn_fwd_algo: None,
         };
         let padding_total = (kernel_size - 1) * dilation - (stride - 1);
-        // CRANE_KUGELAUDIO_PORTABLE_CONV: force candle's generic grouped-conv
-        // path instead, for cross-checking against the fast path (same
-        // convention as CRANE_GDN_PORTABLE elsewhere in this crate).
+        // CRANE_KUGELAUDIO_PORTABLE_CONV: force the portable path for
+        // cross-checking against the fast path (same convention as
+        // CRANE_GDN_PORTABLE elsewhere in this crate).
         let depthwise_fast_path = groups == in_ch
             && in_ch == out_ch
             && stride == 1
@@ -159,8 +157,7 @@ impl SConv1d {
         let length = x.dim(D::Minus1)?;
         let extra =
             extra_padding_for_conv1d(length, self.kernel_size, self.stride, self.padding_total);
-        // Causal + `pad_mode == "constant"`: left-pad by `padding_total`,
-        // right-pad by `extra` (both zero).
+
         let x = x.pad_with_zeros(D::Minus1, self.padding_total, extra)?;
         if self.depthwise_fast_path {
             depthwise_conv1d_stride1(&x, self.conv.weight(), self.conv.bias())
@@ -170,9 +167,9 @@ impl SConv1d {
     }
 }
 
-/// Causal `SConvTranspose1d`: an unparametrized `ConvTranspose1d` with
-/// `padding: 0`, followed by trimming `kernel_size - stride` samples off the
-/// **end** only (`trim_right_ratio = 1.0` — see module doc comment).
+/// Causal `SConvTranspose1d`: unparametrized `ConvTranspose1d` with
+/// `padding: 0`, trimming `kernel_size - stride` samples off the end
+/// (`trim_right_ratio = 1.0`).
 #[derive(Debug, Clone)]
 struct SConvTranspose1d {
     convtr: ConvTranspose1d,
@@ -188,11 +185,7 @@ impl SConvTranspose1d {
         bias: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
-        // Python: `SConvTranspose1d.convtr` = `NormConvTranspose1d`, whose
-        // `.convtr` is the raw `nn.ConvTranspose1d` (again, no reparametrization
-        // weights for `conv_norm == "none"`).
         let vb_conv = vb.pp("convtr").pp("convtr");
-        // PyTorch `ConvTranspose1d` weight layout: `[in_channels, out_channels, kernel_size]`.
         let weight = vb_conv.get((in_ch, out_ch, kernel_size), "weight")?;
         let bias = if bias {
             Some(vb_conv.get(out_ch, "bias")?)
@@ -222,9 +215,8 @@ impl SConvTranspose1d {
     }
 }
 
-/// `FFN`: `linear1 -> gelu -> linear2`, expansion ratio 4 (Python's
-/// `Block1D`'s hardcoded `kwargs.get('ffn_expansion', 4)` default — not a
-/// `config.json` field).
+/// `linear1 -> gelu -> linear2`, expansion 4 (Python's hardcoded
+/// `kwargs.get('ffn_expansion', 4)`).
 #[derive(Debug, Clone)]
 struct ConvFfn {
     linear1: candle_nn::Linear,
@@ -244,11 +236,9 @@ impl ConvFfn {
     }
 }
 
-/// One ConvNeXt-style residual block: depthwise/grouped conv mixer (kernel
-/// size fixed at 7 — `Block1D`'s Python default, not config-driven) plus an
-/// FFN, each with an optional learnable `LayerScale` and a residual add.
-/// `DropPath` is intentionally not ported: it's `nn.Identity()` at
-/// `eval()`/inference regardless of `drop_path_rate`.
+/// ConvNeXt-style residual block: depthwise/grouped mixer (kernel 7, the
+/// Python default) plus FFN, each with optional learnable `LayerScale`.
+/// `DropPath` is `nn.Identity()` at inference — not ported.
 #[derive(Debug, Clone)]
 struct Block1D {
     norm: ConvRmsNorm,
@@ -309,7 +299,6 @@ impl Block1D {
 
         let residual = &x;
         let y = self.ffn_norm.forward(&x)?;
-        // FFN operates on the channel-last layout.
         let y = y.transpose(1, 2)?;
         let y = self.ffn.forward(&y)?;
         let y = y.transpose(1, 2)?.contiguous()?;
@@ -321,13 +310,12 @@ impl Block1D {
     }
 }
 
-/// Downsampling/upsampling causal-conv encoder. Structurally: a stem conv,
-/// then `len(depths)` stages of `[downsample conv] -> [Block1D * depth]`,
-/// then an optional final norm and a head conv projecting to `vae_dim`.
+/// Causal-conv encoder: stem + `len(depths)` stages of
+/// `[downsample conv] -> [Block1D * depth]`, optional final norm, head conv.
 pub struct TokenizerEncoder {
     /// `downsample_layers[0]` is the stem (channels -> `n_filters`, no
-    /// downsampling); `downsample_layers[1..]` halve/downsample by
-    /// `ratios[i-1]` and double the channel count.
+    /// downsampling); `downsample_layers[1..]` downsample by `ratios[i-1]`
+    /// and double the channel count.
     downsample_layers: Vec<SConv1d>,
     stages: Vec<Vec<Block1D>>,
     final_norm: Option<ConvRmsNorm>,
@@ -340,8 +328,7 @@ const HEAD_KERNEL_SIZE: usize = 7;
 impl TokenizerEncoder {
     fn load(cfg: &TokenizerConfig, vb: VarBuilder) -> Result<Self> {
         let depths = cfg.encoder_depths_vec();
-        // Python reverses `ratios` for the encoder (finest stride last in
-        // the config list becomes the first downsample step here).
+        // Python reverses `ratios` for the encoder.
         let mut ratios = cfg.encoder_ratios.clone();
         ratios.reverse();
         let n_filters = cfg.encoder_n_filters;
@@ -415,8 +402,7 @@ impl TokenizerEncoder {
         })
     }
 
-    /// `x`: `[batch, channels, time]` raw waveform (or, for the decoder's
-    /// mirror shape, `[batch, vae_dim, time]`). Returns `[batch, vae_dim, T']`.
+    /// `x`: `[batch, channels, time]` waveform. Returns `[batch, vae_dim, T']`.
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let mut x = x.clone();
         for (down, stage) in self.downsample_layers.iter().zip(self.stages.iter()) {
@@ -432,9 +418,8 @@ impl TokenizerEncoder {
     }
 }
 
-/// Mirror of [`TokenizerEncoder`]: upsampling stages back to `channels`
-/// (waveform space). Only built for the acoustic tokenizer (see
-/// `tokenizer_vae.rs`) — the semantic tokenizer never decodes.
+/// Mirror of [`TokenizerEncoder`]: upsampling stages back to waveform.
+/// Only built for the acoustic tokenizer — the semantic never decodes.
 pub struct TokenizerDecoder {
     upsample_layers: Vec<UpsampleLayer>,
     stages: Vec<Vec<Block1D>>,
@@ -443,9 +428,7 @@ pub struct TokenizerDecoder {
 }
 
 enum UpsampleLayer {
-    /// The stem: a plain `SConv1d` (no channel-count change from `vae_dim`),
-    /// matching Python's `TokenizerDecoder`'s stem being an `SConv1d`, not
-    /// an `SConvTranspose1d`.
+    /// Stem: plain `SConv1d` (no channel change from `vae_dim`).
     Stem(SConv1d),
     Up(SConvTranspose1d),
 }
@@ -561,9 +544,7 @@ pub fn load_encoder(cfg: &TokenizerConfig, vb: VarBuilder) -> Result<TokenizerEn
 }
 
 /// Build a `TokenizerDecoder` for a given [`TokenizerConfig`]. Requires
-/// `decoder_n_filters`/`decoder_ratios` to be present (the acoustic
-/// tokenizer's config; the semantic tokenizer's config omits them and never
-/// calls this).
+/// `decoder_n_filters`/`decoder_ratios` (acoustic only — semantic omits them).
 pub fn load_decoder(cfg: &TokenizerConfig, vb: VarBuilder) -> Result<TokenizerDecoder> {
     TokenizerDecoder::load(cfg, vb)
 }
@@ -612,10 +593,10 @@ mod tests {
     }
 
     /// Populate every tensor a `TokenizerEncoder`/`TokenizerDecoder` needs
-    /// with small nonzero values, keyed by exact HF weight name, so
-    /// `VarBuilder::from_tensors` can satisfy every `vb.get`/`vb.pp` call in
-    /// `load`. Shapes are derived the same way `TokenizerEncoder::load` /
-    /// `TokenizerDecoder::load` derive them.
+    /// with small nonzero values, keyed by exact HF weight name. Shapes are
+    /// derived the same way `TokenizerEncoder::load`/`TokenizerDecoder::load`
+    /// derive them.
+    #[allow(clippy::too_many_lines)]
     fn make_vb(cfg: &TokenizerConfig, device: &Device) -> VarBuilder<'static> {
         let mut t: HashMap<String, Tensor> = HashMap::new();
         let fill = |shape: &[usize]| -> Tensor {
@@ -685,10 +666,12 @@ mod tests {
         );
         t.insert("encoder.head.conv.conv.bias".into(), fill(&[cfg.vae_dim]));
 
-        if cfg.decoder_n_filters.is_some() {
+        if let Some(dn_filters) = cfg.decoder_n_filters {
             let ddepths = cfg.decoder_depths_vec();
-            let dratios = cfg.decoder_ratios.clone().unwrap();
-            let dn_filters = cfg.decoder_n_filters.unwrap();
+            let dratios = cfg
+                .decoder_ratios
+                .clone()
+                .expect("decoder_ratios present when decoder_n_filters is");
             let n_stages = ddepths.len();
             let stem_ch = dn_filters * (1 << (n_stages - 1));
             t.insert(
@@ -798,12 +781,9 @@ mod tests {
         assert!(max_abs > 0.0);
     }
 
-    /// Real checkpoint's channel/depth/ratio config (32 filters, 7 stages,
-    /// deepest stage 2048 channels) — big enough to actually exercise the
-    /// `groups` count [`SConv1d::depthwise_fast_path`] targets, unlike
-    /// `small_cfg`'s 4/8-channel toy sizes. Sequence length stays tiny
-    /// (this only needs to stress channel/group count, not real audio
-    /// lengths) so the CPU F32 forward pass here stays fast.
+    /// Real-scale channel/depth/ratio (32 filters, 7 stages) — big enough
+    /// to actually exercise [`SConv1d::depthwise_fast_path`]'s `groups` count.
+    /// Tiny sequence length keeps CPU F32 forward fast.
     fn real_scale_cfg() -> TokenizerConfig {
         TokenizerConfig {
             channels: 1,
@@ -832,6 +812,7 @@ mod tests {
     /// Cross-checks the depthwise fast path against the portable conv path
     /// at real channel/group scale.
     #[test]
+    #[allow(clippy::items_after_statements)]
     fn depthwise_fast_path_matches_portable_conv_at_real_scale() {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
@@ -839,7 +820,8 @@ mod tests {
         let device = Device::Cpu;
         let cfg = real_scale_cfg();
         let vb = make_vb(&cfg, &device);
-        let t_in = 6400usize; // 2 full hops (3200 each) so every downsample stage sees nonzero length
+        // 2 full hops (3200 each) so every downsample stage sees nonzero length.
+        let t_in = 6400usize;
         let x = Tensor::rand(-1f32, 1f32, (1, cfg.channels, t_in), &device).unwrap();
 
         unsafe {
@@ -880,13 +862,12 @@ mod tests {
         );
     }
 
-    /// Same cross-check on Metal (skipped where Metal isn't available, e.g.
-    /// non-macOS CI). The depthwise fast path
-    /// ([`depthwise_conv1d_stride1`]) added by the CUDA speedup commit is
-    /// plain `narrow`/`broadcast_mul`/`add` — no CUDA-only kernel — but this
-    /// is the only place that actually exercises it against candle's
-    /// generic grouped-conv fallback on the Metal backend.
+    /// Same cross-check on Metal (skipped where Metal isn't available).
+    /// [`depthwise_conv1d_stride1`] is plain `narrow`/`broadcast_mul`/`add`
+    /// — no CUDA-only kernel — but this is the only place that actually
+    /// exercises it against candle's grouped-conv fallback on Metal.
     #[test]
+    #[allow(clippy::items_after_statements)]
     fn depthwise_fast_path_matches_portable_conv_at_real_scale_on_metal() {
         if !candle_core::utils::metal_is_available() {
             return;

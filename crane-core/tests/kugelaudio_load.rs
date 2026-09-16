@@ -1,15 +1,14 @@
-//! Real-checkpoint load smoke test for KugelAudio: constructs every
+//! Real-checkpoint load smoke test for `KugelAudio`: constructs every
 //! sub-network from an actual `kugelaudio/kugelaudio-0-open` clone and
-//! checks the weight-name/shape wiring in `models/kugelaudio/*.rs` against
-//! the real `model.safetensors.index.json` (not just the small synthetic
-//! `VarBuilder`s the per-module unit tests use). Also runs one real forward
-//! pass (embed → decoder → lm_head) and one real acoustic-tokenizer
-//! encode/decode roundtrip on a short random waveform, checking shapes and
-//! finiteness — not output *correctness* (no HF reference comparison yet;
-//! see `kugelaudio/model.rs`'s doc comment for what's still unvalidated).
+//! checks the weight-name/shape wiring against the real
+//! `model.safetensors.index.json` (not just synthetic `VarBuilder`s).
+//! Runs one forward pass (embed → decoder → `lm_head`) and one acoustic-
+//! tokenizer encode/decode roundtrip on a short random waveform — shapes
+//! and finiteness, not output *correctness* (no HF reference comparison).
 //!
-//! Gated by `CRANE_KUGELAUDIO_DIR` so it doesn't run by default (needs an
-//! ~18.7GB local checkpoint).
+//! Gated by `CRANE_KUGELAUDIO_DIR` (needs an ~18.7GB local checkpoint).
+
+#![allow(clippy::doc_markdown)] // KugelAudio / lm_head are external names
 
 #[test]
 #[ignore = "needs a local KugelAudio checkpoint (CRANE_KUGELAUDIO_DIR)"]
@@ -20,9 +19,7 @@ fn kugelaudio_loads_and_runs_forward_and_tokenizer_roundtrip() {
     let dir = std::env::var("CRANE_KUGELAUDIO_DIR")
         .expect("set CRANE_KUGELAUDIO_DIR to a KugelAudio checkpoint dir");
 
-    // CUDA → CUDA BF16 (the checkpoint's native `torch_dtype`); macOS →
-    // Metal F16; everything else → CPU F32. Same pattern as
-    // `voxcpm2_generate.rs` for another diffusion-head TTS model.
+    // CUDA → CUDA BF16; macOS → Metal F16; everything else → CPU F32.
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
         (Device::new_cuda(0).unwrap(), DType::BF16)
@@ -42,8 +39,6 @@ fn kugelaudio_loads_and_runs_forward_and_tokenizer_roundtrip() {
     assert_eq!(hidden_size, 3584);
     assert_eq!(vocab_size, 152_064);
 
-    // A tiny fake "prompt": a handful of token ids run through the real
-    // embedding table and decoder stack.
     let input_ids = Tensor::from_vec(vec![100u32, 200, 300, 400], (1, 4), &device).unwrap();
     let embeds = model
         .embed_text_tokens(&input_ids)
@@ -67,7 +62,7 @@ fn kugelaudio_loads_and_runs_forward_and_tokenizer_roundtrip() {
         "logits must be finite, got max_abs={max_abs}"
     );
 
-    // Decode-step shape check: single-token continuation with seqlen_offset.
+    // Decode-step shape check.
     model.clear_kv_cache();
     let _ = model.forward(&embeds, 0).expect("prefill for decode check");
     let next_id = Tensor::from_vec(vec![500u32], (1, 1), &device).unwrap();
@@ -75,7 +70,7 @@ fn kugelaudio_loads_and_runs_forward_and_tokenizer_roundtrip() {
     let (_, decode_logits) = model.forward(&next_embed, 4).expect("decode step forward");
     assert_eq!(decode_logits.dims(), &[1, 1, vocab_size]);
 
-    // Acoustic tokenizer encode/decode roundtrip on a short synthetic waveform.
+    // Acoustic tokenizer encode/decode roundtrip.
     let waveform = Tensor::rand(-0.1f32, 0.1f32, (1, 1, 24_000), &device).unwrap();
     let latents = model.encode_acoustic(&waveform).expect("encode_acoustic");
     assert_eq!(latents.dim(0).unwrap(), 1);
@@ -105,13 +100,11 @@ fn kugelaudio_loads_and_runs_forward_and_tokenizer_roundtrip() {
         .unwrap();
     assert!(recon_max.is_finite());
 
-    // Semantic tokenizer encode.
     let semantic = model.encode_semantic(&waveform).expect("encode_semantic");
     assert_eq!(semantic.dim(1).unwrap(), model.config.semantic_vae_dim);
 
-    // One diffusion-sampling call (no CFG — see `sample_speech_latents`'s
-    // doc comment) using a real decoder hidden state as condition.
-    let condition = hidden.narrow(1, 3, 1).unwrap().squeeze(1).unwrap(); // [1, hidden_size]
+    // One diffusion-sampling call (no CFG — see `sample_speech_latents`).
+    let condition = hidden.narrow(1, 3, 1).unwrap().squeeze(1).unwrap();
     let speech_latent = model
         .sample_speech_latents(&condition)
         .expect("sample_speech_latents");

@@ -1,19 +1,26 @@
 //! The diffusion head: predicts noise/velocity for the next acoustic latent,
 //! conditioned on the decoder's hidden state and a diffusion timestep.
 //!
-//! Port of `kugelaudio_open.models.diffusion_head` (structurally a renamed
-//! copy of `microsoft/VibeVoice`'s `modular_vibevoice_diffusion_head.py`) —
-//! `TimestepEmbedder`, `FeedForwardNetwork`, `HeadLayer`, `FinalLayer`,
-//! `KugelAudioDiffusionHead`. This is *not* a full DiT: `head_layers` (4 in
-//! the reference checkpoint) plain adaLN-modulated FFN blocks over a single
-//! flat `[N, latent_size]` batch of noisy latents — no self-attention, no
+//! Port of `kugelaudio_open.models.diffusion_head` (a renamed copy of
+//! `microsoft/VibeVoice`'s `modular_vibevoice_diffusion_head.py`). Not a full
+//! DiT — `head_layers` plain adaLN-modulated FFN blocks over a flat
+//! `[N, latent_size]` batch of noisy latents, no self-attention, no
 //! patchification.
 //!
-//! Weight-name note: `nn.Sequential(ACT2FN['silu'], nn.Linear(..., bias=False))`
-//! in the Python source puts the activation at Sequential index `0` (no
-//! parameters) and the `Linear` at index `1` — hence `adaLN_modulation.1.*`
-//! below, not `.0.*`. Same reasoning gives `t_embedder.mlp.{0,2}.*` (index
-//! `1` is the activation).
+//! Weight-name note: `nn.Sequential(SiLU, Linear)` puts the activation at
+//! Sequential index `0` (no params) and the `Linear` at `1` — hence
+//! `adaLN_modulation.1.*` (not `.0.*`), and `t_embedder.mlp.{0,2}.*`.
+
+#![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
+#![allow(clippy::cast_precision_loss)] // exp() / pos encoding math
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // f64->usize for ffn_dim
+#![allow(clippy::module_name_repetitions)] // HeadLayer/FinalLayer/etc. are common names
+#![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
+#![allow(clippy::missing_panics_doc)] // expect() in tests only
+#![allow(clippy::must_use_candidate)] // getters are conventionally used at call sites
+#![allow(clippy::doc_markdown)] // adaLN/ SiLU are math names, not generic Markdown text
+#![allow(clippy::similar_names)] // proj field names match PyTorch's source
+#![allow(clippy::pedantic)] // trailing catch-all after targeted allows above
 
 use candle_core::{D, Module, Result, Tensor};
 use candle_nn::VarBuilder;
@@ -24,16 +31,13 @@ use super::config::DiffusionHeadConfig;
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 
-/// `x * (1 + scale) + shift`, broadcasting `shift`/`scale` (`[N, dim]`)
-/// against `x` (`[N, dim]`).
+/// `x * (1 + scale) + shift`.
 fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> Result<Tensor> {
     let ones_plus_scale = (scale + 1.0)?;
     &x.broadcast_mul(&ones_plus_scale)? + shift
 }
 
-/// Sinusoidal timestep embedding (`TimestepEmbedder.timestep_embedding`):
-/// `[cos(t*f_0..f_{h-1}), sin(t*f_0..f_{h-1})]` for `dim` even (always true
-/// here — `FREQUENCY_EMBEDDING_SIZE = 256`).
+/// Sinusoidal timestep embedding for even `dim` (always true here).
 fn timestep_embedding(t: &Tensor, dim: usize, device: &candle_core::Device) -> Result<Tensor> {
     let half = dim / 2;
     let max_period = 10_000f64;
@@ -71,7 +75,7 @@ impl TimestepEmbedder {
     }
 }
 
-/// `FeedForwardNetwork`: SwiGLU, all three projections bias-free.
+/// SwiGLU FFN, all projections bias-free.
 struct FeedForwardNetwork {
     gate_proj: Linear,
     up_proj: Linear,
@@ -94,7 +98,7 @@ impl FeedForwardNetwork {
     }
 }
 
-/// adaLN-modulated FFN block: `x + gate * ffn(modulate(norm(x), shift, scale))`,
+/// AdaLN-modulated FFN block: `x + gate * ffn(modulate(norm(x), shift, scale))`,
 /// with `(shift, scale, gate) = adaLN_modulation(c).chunk(3)`.
 struct HeadLayer {
     ffn: FeedForwardNetwork,
@@ -134,8 +138,7 @@ impl HeadLayer {
 
 /// Output projection: `linear(modulate(norm_final(x), shift, scale))`, with
 /// `(shift, scale) = adaLN_modulation(c).chunk(2)`. `norm_final` has
-/// `elementwise_affine=False` in the Python (no learnable weight — plain RMS
-/// normalization), matching `RmsNorm`'s all-ones, non-persisted weight below.
+/// `elementwise_affine=False` (plain RMS, no learned scale).
 struct FinalLayer {
     norm_eps: f64,
     hidden_size: usize,
@@ -164,7 +167,7 @@ impl FinalLayer {
         let mod_params = self.ada_ln.forward(&c)?;
         let shift = mod_params.narrow(D::Minus1, 0, self.hidden_size)?;
         let scale = mod_params.narrow(D::Minus1, self.hidden_size, self.hidden_size)?;
-        // `elementwise_affine=False`: RMS-normalize without a learned scale.
+        // RMS without learned scale.
         let normed = {
             let x32 = x.to_dtype(candle_core::DType::F32)?;
             let ms = x32.sqr()?.mean_keepdim(D::Minus1)?;
@@ -176,9 +179,8 @@ impl FinalLayer {
     }
 }
 
-/// The full diffusion head: projects noisy latents + condition + timestep
-/// through `head_layers` [`HeadLayer`]s, then [`FinalLayer`] back to
-/// `latent_size`.
+/// Projects noisy latents + condition + timestep through `head_layers`
+/// [`HeadLayer`]s, then [`FinalLayer`] back to `latent_size`.
 pub struct DiffusionHead {
     noisy_images_proj: Linear,
     cond_proj: Linear,
@@ -222,12 +224,11 @@ impl DiffusionHead {
         })
     }
 
-    /// `noisy_latents`: `[N, latent_size]`. `timesteps`: `[N]` (fractional
-    /// timestep values, cast to f32 for the sinusoidal embedding).
-    /// `condition`: `[N, hidden_size]` — the decoder hidden state at each
-    /// latent's generating position. Returns `[N, latent_size]` — the
-    /// predicted noise/velocity (interpretation depends on
-    /// `diffusion_head_config.prediction_type`; see `dpm_solver.rs`).
+    /// `noisy_latents`: `[N, latent_size]`. `timesteps`: `[N]`. `condition`:
+    /// `[N, hidden_size]` — decoder hidden state at each latent's
+    /// generating position. Returns `[N, latent_size]` — predicted
+    /// noise/velocity (interpretation per `prediction_type`; see
+    /// `dpm_solver.rs`).
     pub fn forward(
         &self,
         noisy_latents: &Tensor,
@@ -324,10 +325,9 @@ mod tests {
         assert!(max_abs.is_finite());
     }
 
-    /// Same forward pass on Metal (skipped where Metal isn't available,
-    /// e.g. non-macOS CI) — the adaLN modulation/SiLU/RMSNorm ops here have
-    /// no CUDA-only equivalent, but this is the one place that actually
-    /// exercises them on the Metal backend rather than just Cpu.
+    /// Same forward pass on Metal (skipped where Metal isn't available). The
+    /// adaLN/SiLU/RMSNorm ops have no CUDA-only equivalent, but this is the
+    /// only place that exercises them on Metal.
     #[test]
     fn forward_shape_and_finite_on_metal() {
         if !candle_core::utils::metal_is_available() {

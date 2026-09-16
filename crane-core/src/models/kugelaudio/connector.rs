@@ -1,19 +1,21 @@
 //! `SpeechConnector`: projects a tokenizer's VAE latents into the decoder's
-//! hidden space. One instance each for the acoustic and semantic paths
-//! (`model.acoustic_connector.*` / `model.semantic_connector.*` in the
-//! checkpoint).
+//! hidden space. One instance each for acoustic and semantic paths
+//! (`model.{acoustic,semantic}_connector.*`).
 //!
-//! Port of `kugelaudio_model.py`'s `SpeechConnector`
-//! (`fc1 -> RMSNorm(eps=1e-6) -> fc2`, both linears bias=`true`, the
-//! `1e-6` epsilon hardcoded in the Python rather than config-driven).
+//! Port of `kugelaudio_model.py`'s `SpeechConnector`:
+//! `fc1 -> RMSNorm(eps=1e-6) -> fc2`, both linears with bias.
+
+#![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
+#![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
+#![allow(clippy::cast_precision_loss)] // test fill: bounded n
+#![allow(clippy::float_cmp)] // test asserts on exact f64 step outputs
 
 use candle_core::{Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
 use crate::models::with_tracing::{Linear, RmsNorm, linear};
 
-/// Fixed in the Python (`LlamaRMSNorm(output_dim, eps=1e-6)`), not a
-/// `config.json` field.
+/// Hardcoded in Python (`LlamaRMSNorm(output_dim, eps=1e-6)`), not in `config.json`.
 const NORM_EPS: f64 = 1e-6;
 
 pub struct SpeechConnector {
@@ -23,6 +25,9 @@ pub struct SpeechConnector {
 }
 
 impl SpeechConnector {
+    /// # Errors
+    ///
+    /// Returns a candle error if any weight can't be loaded.
     pub fn load(input_dim: usize, output_dim: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             fc1: linear(input_dim, output_dim, vb.pp("fc1"))?,
@@ -31,6 +36,9 @@ impl SpeechConnector {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns a candle error if any matmul or norm fails.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x = self.fc1.forward(x)?;
         let x = self.norm.forward(&x)?;
@@ -52,7 +60,7 @@ mod tests {
         let fill = |shape: &[usize]| -> Tensor {
             let n: usize = shape.iter().product();
             let data: Vec<f32> = (0..n).map(|i| 0.01 * (i as f32 + 1.0)).collect();
-            Tensor::from_vec(data, shape, &device).unwrap()
+            Tensor::from_vec(data, shape, &device).expect("fill tensor")
         };
         t.insert("fc1.weight".into(), fill(&[output_dim, input_dim]));
         t.insert("fc1.bias".into(), fill(&[output_dim]));

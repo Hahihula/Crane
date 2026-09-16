@@ -1,10 +1,9 @@
 //! `KugelAudioModel`: loads and wires every sub-network from a checkpoint
 //! directory, plus the mechanical building blocks a generation loop needs
 //! (prefill/decode forward, one diffusion-denoising step, tokenizer
-//! encode/decode). All weight-name prefixes below were verified directly
-//! against the real `kugelaudio/kugelaudio-0-open`
-//! `model.safetensors.index.json` (1205 tensors), not just derived from the
-//! Python source:
+//! encode/decode). All weight-name prefixes verified against the real
+//! `kugelaudio/kugelaudio-0-open` `model.safetensors.index.json` (1205
+//! tensors), not just the Python source:
 //!
 //! ```text
 //! lm_head.weight
@@ -16,23 +15,31 @@
 //! model.speech_scaling_factor, model.speech_bias_factor   (scalar buffers)
 //! ```
 //!
-//! **Not yet implemented here: the autoregressive `generate()` loop.**
-//! `kugelaudio_inference.py`'s `generate()` (lines ~358-720 of
-//! `models/kugelaudio_inference.py` in the `kugelaudio-open` package)
-//! interleaves text-token decoding with diffusion-based speech-latent
-//! generation, using a *second*, CFG-negative decoder stream whose KV cache
-//! is kept in sync with only the diffusion-token positions via retroactive
-//! per-token cache/mask/id splicing (lines 601-635) — a batched
-//! optimization with no equivalent in this crate's shared
-//! [`crate::models::modules::attention::GqaAttention`] (append-only cache,
-//! no mid-sequence splice). Porting that exactly needs either extending the
-//! shared cache or accepting a batch-size-1 simplification (the negative
-//! stream only ever needs to contain `speech_start` plus previously
-//! generated audio embeddings — see the doc comment above wherever that
-//! lands) — deferred until the port has real weights to validate against
-//! (see [`KugelAudioModel::from_pretrained`]'s doc comment for status).
+//! The `generate()` loop is a batch-size-1 simplification of
+//! `kugelaudio_inference.py`'s version (the batched version's per-step
+//! cache splice has no equivalent in the shared
+//! [`crate::models::modules::attention::GqaAttention`], append-only). The
+//! simplification is exact for the single-utterance case.
+
+#![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // i64 timestep -> f32: bounded 0-999
+#![allow(clippy::format_in_format_args)] // "kugelaudio: ... {e}" inline format
+#![allow(clippy::too_many_lines)] // generate() is necessarily long
+#![allow(clippy::cast_precision_loss)] // tensor dim / ratio math
+#![allow(clippy::module_name_repetitions)] // KugelAudioModel etc.
+#![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
+#![allow(clippy::missing_panics_doc)] // expect() in tests / debug_asserts only
+#![allow(clippy::must_use_candidate)] // getters are conventionally used at call sites
+#![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
+#![allow(
+    clippy::explicit_iter_loop,
+    clippy::explicit_counter_loop,
+    clippy::float_cmp
+)]
+// //: stylistic; matches the codebase's prevailing style elsewhere
 
 use anyhow::{Context, Result};
+use candle_core::quantized::GgmlDType;
 use candle_core::{D, DType, Device, Module, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
@@ -49,13 +56,9 @@ use super::prompt::PromptResult;
 
 use crate::models::with_tracing::{Linear, linear_no_bias};
 
-/// Speech-related special token ids. Hardcoded in the Python
-/// (`KugelAudioProcessor.__call__` / `generate()`'s `getattr(self.config,
-/// "speech_start_id", None) or 151652` pattern) rather than sourced from
-/// `config.json` — these reuse Qwen2's vision special tokens
-/// (`<|vision_start|>`, `<|vision_end|>`, `<|vision_pad|>`) since KugelAudio
-/// ships no tokenizer of its own (`kugelaudio_processor.py` loads
-/// `Qwen/Qwen2.5-1.5B`'s tokenizer by default and adds no new vocab).
+/// Speech-related special token ids. Hardcoded in the Python (not in
+/// `config.json`) — reuse Qwen2's vision special tokens since KugelAudio
+/// ships no tokenizer of its own.
 pub mod special_tokens {
     pub const SPEECH_START_ID: u32 = 151_652;
     pub const SPEECH_END_ID: u32 = 151_653;
@@ -64,8 +67,7 @@ pub mod special_tokens {
 }
 
 /// Every sub-network wired to one checkpoint's weights, plus the config
-/// values callers need for prompt construction and generation bookkeeping
-/// (`speech_compression_ratio`, `acoustic_vae_dim`, …).
+/// values callers need.
 pub struct KugelAudioModel {
     pub config: KugelAudioConfig,
     decoder: KugelAudioDecoder,
@@ -76,30 +78,65 @@ pub struct KugelAudioModel {
     acoustic_connector: SpeechConnector,
     semantic_connector: SpeechConnector,
     diffusion_head: DiffusionHead,
-    /// `model.speech_scaling_factor` / `model.speech_bias_factor`: scalar
-    /// buffers fit once at training time (`1/std`, `-mean` of the training
-    /// acoustic-latent distribution) and saved into the checkpoint. Applied
-    /// as `(latent + bias) * scale` before the acoustic connector, and
-    /// inverted (`latent / scale - bias`) after diffusion sampling — see
-    /// `kugelaudio_inference.py`'s `_process_speech_inputs`/
-    /// `generate()`. Always present (non-NaN) in a trained checkpoint; the
-    /// Python's NaN-guarded "skip scaling" branch only matters mid-training
-    /// and is not ported.
+    /// `model.speech_scaling_factor` / `model.speech_bias_factor`: training-
+    /// time scalar buffers (`1/std`, `-mean` of the training acoustic-latent
+    /// distribution). Applied as `(latent + bias) * scale` before the
+    /// acoustic connector, inverted after diffusion sampling. Always
+    /// present (non-NaN) in a trained checkpoint — the Python's NaN-guarded
+    /// "skip scaling" branch only matters mid-training.
     speech_scaling_factor: f64,
     speech_bias_factor: f64,
     device: Device,
     dtype: DType,
 }
 
+/// Read the in-situ quantization level from `CRANE_ISQ` (e.g. `q4_0`,
+/// `q8_0`). Invalid values abort with a clear message rather than silently
+/// loading fp.
+fn isq_from_env() -> Option<GgmlDType> {
+    let name = std::env::var("CRANE_ISQ").ok()?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    match crate::ops::linear::parse_ggml_dtype(&name) {
+        Ok(dt) => Some(dt),
+        Err(e) => panic!("invalid CRANE_ISQ: {e}"),
+    }
+}
+
 impl KugelAudioModel {
     /// Load every sub-network from `model_dir` (a directory containing
-    /// `config.json` and `model.safetensors.index.json` + shards, i.e. a
-    /// local clone of `kugelaudio/kugelaudio-0-open`).
+    /// `config.json` and `model.safetensors.index.json` + shards). Verified
+    /// against the real checkpoint in `crane-core/tests/kugelaudio_load.rs`.
     ///
-    /// Verified against the real checkpoint: this constructs successfully
-    /// and produces the expected per-module tensor counts when pointed at a
-    /// full local clone (see `crane-core/tests/kugelaudio_load.rs`).
+    /// In-situ quantization is picked up from `CRANE_ISQ`; use
+    /// [`Self::from_pretrained_with_quant`] to set it explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config can't be read, weights can't be
+    /// mmaped, or any sub-network fails to construct.
     pub fn from_pretrained(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
+        Self::from_pretrained_with_quant(model_dir, device, dtype, isq_from_env())
+    }
+
+    /// Like [`Self::from_pretrained`], but with `quant: Some(dtype)` quantizes
+    /// the decoder backbone's Q/K/V/O and MLP projections in-situ. The
+    /// ~7B-parameter Qwen2 decoder is the bulk of the ~18.7GB checkpoint, so
+    /// this is the lever for low-VRAM/low-RAM machines (works identically on
+    /// CUDA and Metal — see `decoder.rs`'s module doc comment). The VAE
+    /// tokenizers and diffusion head stay at full precision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config can't be read, weights can't be
+    /// mmaped, or any sub-network fails to construct.
+    pub fn from_pretrained_with_quant(
+        model_dir: &str,
+        device: &Device,
+        dtype: DType,
+        quant: Option<GgmlDType>,
+    ) -> Result<Self> {
         let config_path = std::path::Path::new(model_dir).join("config.json");
         let config = load_config(config_path.to_str().context("non-UTF8 model path")?)
             .context("kugelaudio: load config.json")?;
@@ -108,8 +145,27 @@ impl KugelAudioModel {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, device)? };
         let vb_model = vb.pp("model");
 
-        let decoder = KugelAudioDecoder::new(&config.decoder_config, vb_model.pp("language_model"))
-            .context("kugelaudio: load language_model")?;
+        // A second, CPU-scoped handle onto the same checkpoint (cheap: same
+        // mmap) so the decoder's quantized path can read each big matmul
+        // weight without ever materializing it on `device` first. See
+        // `KugelAudioDecoder::new_with_quant`.
+        let decoder_quant = match quant {
+            None => None,
+            Some(dt) => {
+                eprintln!("[kugelaudio] in-situ quantization enabled: {dt:?}");
+                let vb_cpu = unsafe {
+                    VarBuilder::from_mmaped_safetensors(&filenames, dtype, &Device::Cpu)?
+                };
+                Some((dt, vb_cpu.pp("model").pp("language_model")))
+            },
+        };
+        let decoder = KugelAudioDecoder::new_with_quant(
+            &config.decoder_config,
+            vb_model.pp("language_model"),
+            decoder_quant,
+        )
+        .context("kugelaudio: load language_model")?;
+        // Dense even under ISQ — see `KugelAudioDecoder::new_with_quant`.
         let lm_head = linear_no_bias(
             config.decoder_config.hidden_size,
             config.decoder_config.vocab_size,
@@ -178,16 +234,18 @@ impl KugelAudioModel {
         })
     }
 
+    #[must_use]
     pub fn device(&self) -> &Device {
         &self.device
     }
 
+    #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
     }
 
-    /// Text-token embedding lookup (`get_input_embeddings()(ids)` in the
-    /// Python) — `input_ids`: `[batch, seq_len]` → `[batch, seq_len, hidden_size]`.
+    /// Text-token embedding lookup. `input_ids`: `[batch, seq_len]` →
+    /// `[batch, seq_len, hidden_size]`.
     pub fn embed_text_tokens(&self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
         self.decoder.embed_tokens(input_ids)
     }
@@ -210,12 +268,10 @@ impl KugelAudioModel {
         self.decoder.clear_kv_cache();
     }
 
-    /// Encode a raw waveform (`[batch, 1, num_samples]`) through the
-    /// acoustic tokenizer, returning the **unscaled** latent mean
-    /// (`encoder_output.mode()` in the Python — this port always takes the
-    /// distribution's mean rather than the Gaussian-sampled path; see
-    /// `config.rs`'s `TokenizerConfig::std_dist_type` doc comment).
-    /// `[batch, vae_dim, T]`.
+    /// Encode a raw waveform through the acoustic tokenizer, returning the
+    /// **unscaled** latent mean (this port always takes the distribution's
+    /// mean rather than the Gaussian-sampled path — see
+    /// `config.rs`'s `TokenizerConfig::std_dist_type`). `[batch, vae_dim, T]`.
     pub fn encode_acoustic(&self, waveform: &Tensor) -> candle_core::Result<Tensor> {
         self.acoustic_encoder
             .encode(&waveform.to_dtype(self.dtype)?)
@@ -235,9 +291,8 @@ impl KugelAudioModel {
         self.acoustic_decoder.decode(&latents.to_dtype(self.dtype)?)
     }
 
-    /// `(latent + speech_bias_factor) * speech_scaling_factor` — applied to
-    /// encoder output before the acoustic connector projects it into the
-    /// decoder's embedding space (voice-prompt conditioning path).
+    /// `(latent + speech_bias_factor) * speech_scaling_factor` — applied
+    /// before the acoustic connector (voice-prompt conditioning).
     pub fn scale_acoustic_latent(&self, latent: &Tensor) -> candle_core::Result<Tensor> {
         latent.affine(
             self.speech_scaling_factor,
@@ -246,9 +301,8 @@ impl KugelAudioModel {
     }
 
     /// `latent / speech_scaling_factor - speech_bias_factor` — inverts
-    /// [`Self::scale_acoustic_latent`], applied to a diffusion-sampled
-    /// latent before it's decoded to audio or re-encoded through the
-    /// semantic tokenizer for the next autoregressive step.
+    /// [`Self::scale_acoustic_latent`], applied to diffusion-sampled
+    /// latents before decode/re-encode.
     pub fn unscale_acoustic_latent(&self, latent: &Tensor) -> candle_core::Result<Tensor> {
         latent.affine(1.0 / self.speech_scaling_factor, -self.speech_bias_factor)
     }
@@ -265,17 +319,11 @@ impl KugelAudioModel {
     /// `ddpm_num_inference_steps`-step denoising chain, producing one
     /// speech-latent vector per row of `condition`.
     ///
-    /// `condition`: `[N, hidden_size]` decoder hidden states (one per
-    /// speech position being generated this step). No classifier-free
-    /// guidance here — CFG (interpolating between a `condition` and
-    /// `neg_condition` forward pass) is the caller's responsibility, same
-    /// split as the Python's `sample_speech_tokens` vs. its caller in
-    /// `generate()`; this only implements the single-condition diffusion
-    /// loop those `cfg_scale == 1.0` and `!= 1.0` branches both bottom out
-    /// in (`self.model.prediction_head(...)` / `noise_scheduler.step(...)`).
-    /// Returns `[N, latent_size]` — **still in the scaled latent space**;
-    /// callers must apply [`Self::unscale_acoustic_latent`] before decoding
-    /// to audio.
+    /// `condition`: `[N, hidden_size]` decoder hidden states. No CFG here —
+    /// interpolating between `condition` and `neg_condition` is the
+    /// caller's responsibility (see [`Self::sample_speech_latents_cfg`]).
+    /// Returns `[N, latent_size]`, still scaled; callers must apply
+    /// [`Self::unscale_acoustic_latent`] before decoding to audio.
     pub fn sample_speech_latents(&self, condition: &Tensor) -> candle_core::Result<Tensor> {
         let mut scheduler =
             DpmSolverScheduler::new(&self.config.diffusion_head_config).map_err(|e| {
@@ -299,20 +347,17 @@ impl KugelAudioModel {
     }
 
     /// Classifier-free-guided variant of [`Self::sample_speech_latents`],
-    /// for `N == 1` (one speech position; batch>1 is not implemented — see
-    /// [`Self::generate`]'s doc comment). `condition`/`neg_condition`:
-    /// `[1, hidden_size]`. Returns `[1, latent_size]`, still scaled.
+    /// `N == 1` (batch>1 not implemented — see [`Self::generate`]).
+    /// `condition`/`neg_condition`: `[1, hidden_size]`. Returns
+    /// `[1, latent_size]`, still scaled.
     ///
-    /// Deviates from `kugelaudio_inference.py`'s `sample_speech_tokens`'s
-    /// CFG branch in one respect: the Python maintains *two* independently
-    /// noised sample rows (`speech = torch.randn(2, vae_dim)`) through the
-    /// whole denoising loop, feeding the diffusion head only row 0's noisy
-    /// value (duplicated into both rows) at every step, then discarding row
-    /// 1 entirely (`return speech[:1]` at the end) — row 1's own
-    /// `scheduler.step` trajectory is computed but never read. This port
-    /// only ever tracks the one trajectory that's actually returned,
-    /// duplicating it on the fly for the conditional/unconditional forward
-    /// pass — mathematically identical output, without the wasted half.
+    /// Deviates from `kugelaudio_inference.py`'s CFG path: the Python
+    /// maintains *two* noised rows (`speech = torch.randn(2, vae_dim)`)
+    /// through the whole loop, feeding only row 0 to the diffusion head
+    /// (duplicated into both rows) and discarding row 1 at the end. This
+    /// port only tracks the one trajectory actually returned, duplicating
+    /// on the fly for the conditional/unconditional forward pass —
+    /// mathematically identical, no wasted half.
     pub fn sample_speech_latents_cfg(
         &self,
         condition: &Tensor,
@@ -347,8 +392,7 @@ impl KugelAudioModel {
     /// Splice `replacement` (`[T, hidden_size]`) into `embeds`
     /// (`[1, N, hidden_size]`) at the single contiguous run of `true`
     /// positions in `mask` (length `N`) — `build_prompt`'s voice-prompt
-    /// placeholder run. No-op (returns `embeds` unchanged) if `mask` is all
-    /// `false`.
+    /// placeholder run. No-op if `mask` is all `false`.
     fn splice_speech_embeds(
         embeds: &Tensor,
         mask: &[bool],
@@ -361,15 +405,12 @@ impl KugelAudioModel {
         let n = mask.len();
         let before = embeds.narrow(1, 0, start)?;
         let after = embeds.narrow(1, start + count, n - start - count)?;
-        let replacement = replacement.unsqueeze(0)?; // [1, T, hidden]
+        let replacement = replacement.unsqueeze(0)?;
         Tensor::cat(&[&before, &replacement, &after], 1)
     }
 
-    /// Pad/truncate `x` (`[1, T, dim]`) along the time axis to exactly
-    /// `target_len` — mirrors `_process_speech_inputs`'s acoustic/semantic
-    /// length-alignment belt-and-suspenders (in practice a no-op for this
-    /// checkpoint: both tokenizers share `encoder_ratios`, so `T` already
-    /// matches).
+    /// Pad/truncate `x` (`[1, T, dim]`) along time to `target_len`. A
+    /// no-op for this checkpoint (both tokenizers share `encoder_ratios`).
     fn align_time_len(x: &Tensor, target_len: usize) -> candle_core::Result<Tensor> {
         let t = x.dim(1)?;
         match t.cmp(&target_len) {
@@ -385,31 +426,24 @@ impl KugelAudioModel {
 
     /// Generate speech for `prompt`, batch size 1 only.
     ///
-    /// Ports `kugelaudio_inference.py`'s `generate()` (lines ~358-720 of
-    /// `models/kugelaudio_inference.py`), simplified for batch size 1 — see
-    /// `model.rs`'s module doc comment for why the batched version's KV
-    /// cache splicing has no equivalent here. The simplification is exact
-    /// (not approximate) for the realistic single-utterance case: with one
-    /// sample, the Python's per-step "is this sample mid-diffusion or not"
-    /// bookkeeping across a batch collapses to a single always-true-or-false
-    /// flag, and the retroactive cache-correction logic it drives is
-    /// provably dead code (see the reasoning trail in this port's
-    /// development notes) whenever `speech_start` occurs at most once (the
-    /// non-multi-speaker case this implements) and `speech_end`/`eos` are
-    /// terminal. Multi-speaker prompts that re-emit `speech_start` mid-
-    /// generation (`generate()`'s `speech_start_mask` handling, lines
-    /// 550-570 of the Python) are **not** ported — such a token is treated
-    /// like any other non-diffusion token here (see the loop body).
+    /// Simplified batch-1 port of `kugelaudio_inference.py`'s `generate()`
+    /// (see module doc comment for why the batched version's KV cache
+    /// splice isn't ported). The simplification is exact for the
+    /// single-utterance case: with one sample, the Python's per-step
+    /// "is this sample mid-diffusion or not" bookkeeping collapses to a
+    /// single always-true-or-false flag, and the retroactive cache
+    /// correction it drives is dead code when `speech_start` occurs at
+    /// most once and `speech_end`/`eos` are terminal. Multi-speaker
+    /// prompts that re-emit `speech_start` mid-generation are not ported.
     ///
-    /// No streaming tokenizer cache either (see `conv_layers.rs`'s doc
-    /// comment): every diffusion step re-decodes the *entire* accumulated
-    /// latent sequence through the acoustic decoder and re-encodes the
-    /// *entire* resulting waveform through the semantic encoder from
-    /// scratch, keeping only the newest frame's output — correct (causal
-    /// convs give identical results for a position whether computed via a
-    /// streaming cache or a full non-streaming recompute) but `O(steps²)`
-    /// instead of `O(steps)`. Fine for short clips; revisit for long-form
-    /// generation.
+    /// No streaming tokenizer cache either (see `conv_layers.rs`): every
+    /// diffusion step re-decodes the entire accumulated latent sequence
+    /// through the acoustic decoder and re-encodes the entire resulting
+    /// waveform through the semantic encoder from scratch, keeping only
+    /// the newest frame's output — correct (causal convs give identical
+    /// results for a position whether computed via a streaming cache or
+    /// full recompute) but `O(steps²)` instead of `O(steps)`. Fine for
+    /// short clips; revisit for long-form generation.
     #[allow(clippy::too_many_lines)]
     pub fn generate(
         &mut self,
@@ -479,8 +513,7 @@ impl KugelAudioModel {
         let mut prev_audio_len = 0usize;
 
         // CRANE_KUGELAUDIO_PROFILE=1: per-component wall-clock breakdown to
-        // stderr, printed once at the end (same convention as
-        // CRANE_TTS_DEBUG / CRANE_SAMPLE_TRACE elsewhere in this crate).
+        // stderr at end of generation.
         let profile = std::env::var("CRANE_KUGELAUDIO_PROFILE").is_ok();
         let mut t_decoder_main = std::time::Duration::ZERO;
         let mut t_decoder_neg = std::time::Duration::ZERO;
@@ -612,12 +645,12 @@ impl KugelAudioModel {
     }
 }
 
-/// Sampling / stopping-condition knobs for [`KugelAudioModel::generate`].
-/// Defaults match `kugelaudio_inference.py`'s `generate()` signature.
+/// Sampling/stopping knobs for [`KugelAudioModel::generate`]. Defaults
+/// match `kugelaudio_inference.py`'s `generate()` signature.
 #[derive(Debug, Clone)]
 pub struct KugelAudioGenerationConfig {
-    /// Classifier-free guidance strength. `1.0` disables CFG (single
-    /// forward pass per diffusion step, no negative decoder stream).
+    /// CFG strength. `1.0` disables CFG (single forward pass per diffusion
+    /// step, no negative decoder stream).
     pub cfg_scale: f64,
     pub max_new_tokens: usize,
     pub do_sample: bool,
@@ -637,10 +670,8 @@ impl Default for KugelAudioGenerationConfig {
 
 /// Result of [`KugelAudioModel::generate`].
 pub struct KugelAudioGenerationOutput {
-    /// The generated continuation only (control/diffusion-placeholder
-    /// token ids), starting with `speech_start_id` — **not** including the
-    /// prompt. Mirrors `KugelAudioGenerationOutput.sequences` in spirit,
-    /// though the Python returns the full prompt+continuation.
+    /// Generated continuation only (control/diffusion-placeholder token ids),
+    /// starting with `speech_start_id` — **not** including the prompt.
     pub token_ids: Vec<u32>,
     /// Mono 24kHz waveform, concatenated across every generated frame.
     /// Empty if generation stopped before any diffusion token was produced.
@@ -650,9 +681,6 @@ pub struct KugelAudioGenerationOutput {
 #[cfg(test)]
 mod tests {
     // Real-checkpoint loading is exercised by
-    // `crane-core/tests/kugelaudio_load.rs` (requires a local clone of
-    // `kugelaudio/kugelaudio-0-open`, so it's an integration test, not a
-    // unit test here — this module's own logic (scaling affine math) is
-    // trivial enough that its correctness rides on the sub-module unit
-    // tests plus that integration test's shape checks).
+    // `crane-core/tests/kugelaudio_load.rs` (integration test — requires a
+    // local clone of `kugelaudio/kugelaudio-0-open`).
 }
