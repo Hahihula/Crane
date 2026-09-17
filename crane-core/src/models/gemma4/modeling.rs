@@ -949,6 +949,20 @@ impl Gemma4Model {
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
+        // Some GGUF converters (e.g. unsloth) serialize what should be a scalar as a
+        // per-layer I32 array (all layers sharing the same value) or as I32 instead of
+        // U32; take the first element and accept non-negative I32 instead of erroring.
+        fn value_to_u32(v: &gguf_file::Value) -> Result<u32> {
+            match v {
+                gguf_file::Value::Array(arr) => match arr.first() {
+                    Some(first) => value_to_u32(first),
+                    None => candle_core::bail!("empty GGUF array where a u32 was expected"),
+                },
+                gguf_file::Value::I32(n) if *n >= 0 => Ok(n.cast_unsigned()),
+                v => v.to_u32(),
+            }
+        }
+
         let dtype = if device.is_cuda() {
             DType::BF16
         } else {
@@ -968,10 +982,11 @@ impl Gemma4Model {
             .unwrap_or_else(|| "gemma4".to_string());
 
         let num_attention_heads =
-            md_get(&format!("{arch}.attention.head_count"))?.to_u32()? as usize;
-        let num_kv_heads = md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
-        let num_hidden_layers = md_get(&format!("{arch}.block_count"))?.to_u32()? as usize;
-        let hidden_size = md_get(&format!("{arch}.embedding_length"))?.to_u32()? as usize;
+            value_to_u32(&md_get(&format!("{arch}.attention.head_count"))?)? as usize;
+        let num_kv_heads =
+            value_to_u32(&md_get(&format!("{arch}.attention.head_count_kv"))?)? as usize;
+        let num_hidden_layers = value_to_u32(&md_get(&format!("{arch}.block_count"))?)? as usize;
+        let hidden_size = value_to_u32(&md_get(&format!("{arch}.embedding_length"))?)? as usize;
         // feed_forward_length can be a single u32 or a per-layer i32 array (Gemma4 uses
         // different sizes for non-shared vs shared layers due to use_double_wide_mlp).
         let ff_value = md_get(&format!("{arch}.feed_forward_length"))?;
