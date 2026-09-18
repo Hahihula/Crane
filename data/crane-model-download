@@ -109,6 +109,27 @@ MODELS = {
         "quant_template": "Qwen3.8-27B-{quant}.gguf",
         "description": "Qwen 3.8 27B, same arch as Qwen 3.5 scaled up, GGUF quant (Apache-2.0)",
     },
+    "gemma-4-e2b-it-gguf": {
+        "repo_id": "unsloth/gemma-4-E2B-it-GGUF",
+        "dirname": "gemma-4-E2B-it-GGUF",
+        "kind": "llm",
+        "quant_template": "gemma-4-E2B-it-{quant}.gguf",
+        "description": "Gemma 4 E2B (2B effective, MatFormer) instruct, GGUF quant (Gemma license)",
+    },
+    "gemma-4-e4b-it-gguf": {
+        "repo_id": "unsloth/gemma-4-E4B-it-GGUF",
+        "dirname": "gemma-4-E4B-it-GGUF",
+        "kind": "llm",
+        "quant_template": "gemma-4-E4B-it-{quant}.gguf",
+        "description": "Gemma 4 E4B (4B effective, MatFormer) instruct, GGUF quant (Gemma license)",
+    },
+    "gemma-4-12b-it-gguf": {
+        "repo_id": "unsloth/gemma-4-12b-it-GGUF",
+        "dirname": "gemma-4-12b-it-GGUF",
+        "kind": "llm",
+        "quant_template": "gemma-4-12b-it-{quant}.gguf",
+        "description": "Gemma 4 12B instruct, GGUF quant (Gemma license)",
+    },
     "g2p-lexicons": {
         "repo_id": "crane-local-ai/g2p-lexicons",
         "dirname": "g2p-lexicons",
