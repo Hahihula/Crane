@@ -72,7 +72,7 @@ pub(super) fn forward(
     start_pos: usize,
     attention_mask: Option<&Tensor>,
 ) -> Result<Tensor> {
-    let timer = crate::ops::prof::pass(input_ids.dim(1)?);
+    let timer = crate::ops::prof::pass(input_ids.dim(1)?, model.device());
     let out = forward_inner(model, input_ids, start_pos, attention_mask);
     if let Some(timer) = timer {
         timer.finish(model.device());
