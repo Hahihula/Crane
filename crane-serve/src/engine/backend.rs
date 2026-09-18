@@ -41,7 +41,13 @@ pub trait ModelBackend: Send + 'static {
     fn forward_step(&mut self, input_ids: &[u32], start_pos: usize) -> Result<Tensor>;
 
     /// Clear all KV caches.
-    fn clear_kv_cache(&mut self);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a cache could not be reset: on an accelerator this
+    /// issues device memsets, so it fails for the same reasons any other
+    /// device op does.
+    fn clear_kv_cache(&mut self) -> Result<()>;
 
     /// Number of transformer layers (for KV cache vector sizing).
     fn num_layers(&self) -> usize;
@@ -177,8 +183,9 @@ impl ModelBackend for Gemma4Backend {
             .map_err(Into::into)
     }
 
-    fn clear_kv_cache(&mut self) {
+    fn clear_kv_cache(&mut self) -> Result<()> {
         self.model.clear_kv_cache();
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {
@@ -253,8 +260,9 @@ impl ModelBackend for HunyuanBackend {
             .map_err(Into::into)
     }
 
-    fn clear_kv_cache(&mut self) {
+    fn clear_kv_cache(&mut self) -> Result<()> {
         self.model.clear_kv_cache();
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {
@@ -383,8 +391,9 @@ impl ModelBackend for Qwen25Backend {
             .map_err(Into::into)
     }
 
-    fn clear_kv_cache(&mut self) {
+    fn clear_kv_cache(&mut self) -> Result<()> {
         self.model.clear_kv_cache();
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {
@@ -457,8 +466,9 @@ impl ModelBackend for Minicpm5Backend {
             .map_err(Into::into)
     }
 
-    fn clear_kv_cache(&mut self) {
+    fn clear_kv_cache(&mut self) -> Result<()> {
         self.model.clear_kv_cache();
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {
@@ -556,8 +566,8 @@ impl ModelBackend for Qwen3_5Backend {
         self.model.forward_step(input_ids, start_pos)
     }
 
-    fn clear_kv_cache(&mut self) {
-        self.model.clear_kv_cache();
+    fn clear_kv_cache(&mut self) -> Result<()> {
+        self.model.clear_kv_cache()
     }
 
     fn num_layers(&self) -> usize {
@@ -632,8 +642,9 @@ impl ModelBackend for Qwen3Backend {
             .map_err(Into::into)
     }
 
-    fn clear_kv_cache(&mut self) {
+    fn clear_kv_cache(&mut self) -> Result<()> {
         self.model.clear_kv_cache();
+        Ok(())
     }
 
     fn num_layers(&self) -> usize {
