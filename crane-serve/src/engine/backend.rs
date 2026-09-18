@@ -49,6 +49,24 @@ pub trait ModelBackend: Send + 'static {
     /// device op does.
     fn clear_kv_cache(&mut self) -> Result<()>;
 
+    /// Capture the layer state so a later request sharing this token prefix
+    /// can resume from it. `None` when the backend cannot (the default).
+    ///
+    /// The capture is only valid until something resets the caches.
+    fn snapshot_state(&self) -> Option<crane_core::models::qwen3_5::StateSnapshot> {
+        None
+    }
+
+    /// Restore a [`snapshot_state`](Self::snapshot_state) capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot restore, or the snapshot does
+    /// not describe this model.
+    fn restore_state(&mut self, _snap: &crane_core::models::qwen3_5::StateSnapshot) -> Result<()> {
+        anyhow::bail!("this backend does not support state snapshots")
+    }
+
     /// Number of transformer layers (for KV cache vector sizing).
     fn num_layers(&self) -> usize;
 
@@ -568,6 +586,14 @@ impl ModelBackend for Qwen3_5Backend {
 
     fn clear_kv_cache(&mut self) -> Result<()> {
         self.model.clear_kv_cache()
+    }
+
+    fn snapshot_state(&self) -> Option<crane_core::models::qwen3_5::StateSnapshot> {
+        Some(self.model.snapshot_state())
+    }
+
+    fn restore_state(&mut self, snap: &crane_core::models::qwen3_5::StateSnapshot) -> Result<()> {
+        self.model.restore_state(snap)
     }
 
     fn num_layers(&self) -> usize {

@@ -62,7 +62,18 @@ use sequence::{Sequence, SequenceStatus};
 /// prefill. Larger prompts are split into chunks of this size so each forward
 /// step's intermediate state (causal-mask allocation, attention logits, GDN
 /// recurrent scratch) stays bounded. See [`InferenceEngine::step_prefill`].
+///
+/// The engine also hands this size to the model so it does not re-chunk each
+/// pass underneath; every pass dequantizes the whole weight set, so a smaller
+/// inner chunk multiplies that work for no benefit.
 const PREFILL_CHUNK_SIZE: usize = 2048;
+
+/// `CRANE_PREFIX_CACHE=0` disables reusing the model state across requests,
+/// for A/B against a full prefill.
+fn prefix_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("CRANE_PREFIX_CACHE").as_deref(), Ok("0")))
+}
 
 // ─────────────────────────────────────────────────────────────
 //  InferenceEngine
@@ -83,12 +94,64 @@ const KV_GPU_OVERHEAD_FACTOR: u64 = 6;
 
 /// Continuous-batching inference engine.
 ///
+/// What the model's in-place caches currently correspond to.
+///
+/// Only used for backends that cannot swap per-sequence caches
+/// (`!ModelBackend::supports_kv_swap()`), where exactly one sequence's state
+/// lives in the model at a time. When the next request's prompt extends these
+/// tokens, that state is already what prefill would recompute, so prefill can
+/// start at `tokens.len()`.
+///
+/// Reuse requires an **exact** prefix: the hybrid GDN layers carry a recurrent
+/// state summarising everything fed so far, so it resumes only at the position
+/// it actually reached — unlike an attention KV cache there is no truncating
+/// it back to an arbitrary shorter prefix.
+#[derive(Default)]
+struct PrefixCache {
+    /// Tokens the snapshot covers: the previous request's prompt, not its
+    /// prompt plus completion. A chat client re-renders the assistant turn
+    /// through the chat template, so the next prompt rarely contains the
+    /// generated token ids verbatim.
+    tokens: Vec<u32>,
+    /// Layer state as of the end of that prompt's prefill.
+    snapshot: Option<crane_core::models::qwen3_5::StateSnapshot>,
+    /// KV bytes this cache keeps resident in the model after its sequence is
+    /// gone, so the engine's memory budget still accounts for them.
+    bytes: u64,
+}
+
+impl PrefixCache {
+    /// Length of the longest common prefix of `a` and `b`.
+    fn lcp(a: &[u32], b: &[u32]) -> usize {
+        a.iter().zip(b).take_while(|(x, y)| x == y).count()
+    }
+
+    /// How much of `prompt` the model already holds, or 0 if nothing usable.
+    ///
+    /// Requires a *strict* prefix: were the cached tokens the whole prompt,
+    /// prefill would have nothing to run and no logits to sample, so the final
+    /// token is always recomputed.
+    fn reusable_len(&self, prompt: &[u32]) -> usize {
+        let n = self.tokens.len();
+        if n == 0 || n >= prompt.len() || prompt[..n] != self.tokens[..] {
+            return 0;
+        }
+        n
+    }
+}
+
 /// Runs on a dedicated OS thread (model forward passes are synchronous).
 /// Communicates with async API handlers via channels.
 pub struct InferenceEngine {
     model: Box<dyn ModelBackend>,
     sequences: HashMap<String, Sequence>,
     token_streams: HashMap<String, TokenOutputStream>,
+    /// Tokens whose state the model currently holds; see [`PrefixCache`].
+    prefix_cache: PrefixCache,
+    /// Prefill requests that reused cached state, and tokens so skipped.
+    prefix_hits: u64,
+    prefix_misses: u64,
+    prefix_tokens_saved: u64,
     scheduler: Scheduler,
     request_rx: mpsc::UnboundedReceiver<EngineRequest>,
     active_seq_id: Option<String>,
@@ -141,6 +204,10 @@ impl InferenceEngine {
             model,
             sequences: HashMap::new(),
             token_streams: HashMap::new(),
+            prefix_cache: PrefixCache::default(),
+            prefix_hits: 0,
+            prefix_misses: 0,
+            prefix_tokens_saved: 0,
             scheduler: Scheduler::new(effective_max),
             request_rx,
             active_seq_id: None,
@@ -189,6 +256,10 @@ impl InferenceEngine {
                 );
             }
         }
+        // Match the model's inner chunking to ours so it does not split each
+        // pass again; `CRANE_PREFILL_CHUNK` still overrides both.
+        crane_core::models::qwen3_5::set_default_prefill_chunk(PREFILL_CHUNK_SIZE);
+
         info!(
             "Engine started (max_concurrent={}, decode_tokens_per_seq={}, max_seq_len={})",
             self.scheduler.max_running,
@@ -275,6 +346,16 @@ impl InferenceEngine {
         let uptime = self.start_time.elapsed().as_secs();
         let (gpu_used, gpu_total) = query_gpu_memory_usage(self.model.device());
         let budget = self.kv_budget_bytes();
+        let prefix_info = if self.prefix_hits + self.prefix_misses > 0 {
+            format!(
+                " | prefix_cache: {}/{} hit, {} tokens skipped",
+                self.prefix_hits,
+                self.prefix_hits + self.prefix_misses,
+                self.prefix_tokens_saved,
+            )
+        } else {
+            String::new()
+        };
         let budget_info = if budget < u64::MAX {
             format!(" kv_budget: {}", format_bytes_engine(budget))
         } else {
@@ -302,7 +383,7 @@ impl InferenceEngine {
              sequences: active={} waiting={} | \
              tokens: prompt={} completion={} | \
              kv_swaps={} | \
-             speed: prefill={:.1} tok/s decode={:.1} tok/s{}",
+             speed: prefill={:.1} tok/s decode={:.1} tok/s{}{}",
             uptime,
             snap.total_requests,
             snap.completed_requests,
@@ -315,6 +396,7 @@ impl InferenceEngine {
             snap.total_kv_swaps,
             snap.avg_prefill_tokens_per_sec,
             snap.avg_decode_tokens_per_sec,
+            prefix_info,
             gpu_info,
         );
     }
@@ -566,6 +648,7 @@ impl InferenceEngine {
             .fetch_add(prompt_len as u64, Ordering::Relaxed);
 
         let seq = Sequence {
+            cached_prefix_len: 0,
             id: req.id.clone(),
             status: SequenceStatus::Waiting,
             tokens: req.tokens,
@@ -668,15 +751,110 @@ impl InferenceEngine {
     //  Prefill
     // ─────────────────────────────────────────────────────────
 
+    /// Record the model state, which currently covers `covered` tokens of this
+    /// sequence's prompt.
+    fn capture_prefix_cache(&mut self, seq_id: &str, covered: usize) {
+        if self.model.supports_kv_swap() || !prefix_cache_enabled() || covered == 0 {
+            return;
+        }
+        let Some(prompt) = self
+            .sequences
+            .get(seq_id)
+            .filter(|s| covered <= s.prompt_len)
+            .map(|s| s.tokens[..covered].to_vec())
+        else {
+            return;
+        };
+        let Some(snapshot) = self.model.snapshot_state() else {
+            return;
+        };
+        self.prefix_cache.tokens = prompt;
+        self.prefix_cache.snapshot = Some(snapshot);
+    }
+
+    /// Forget the retained state, releasing the bytes it was accounted for.
+    /// Call wherever the model's caches are about to be reset.
+    fn drop_prefix_cache(&mut self) {
+        self.tracked_kv_bytes = self
+            .tracked_kv_bytes
+            .saturating_sub(self.prefix_cache.bytes);
+        self.prefix_cache.bytes = 0;
+        self.prefix_cache.tokens.clear();
+        self.prefix_cache.snapshot = None;
+    }
+
+    /// If the model already holds a prefix of this sequence's prompt, mark how
+    /// much and keep that state; returns the number of tokens reused.
+    ///
+    /// Restricted to backends without per-sequence cache swapping: those are
+    /// the ones where the model holds exactly one sequence's state, so "what
+    /// the model holds" is a single well-defined thing.
+    fn claim_prefix_cache(&mut self, seq_id: &str) -> usize {
+        if self.model.supports_kv_swap() || !prefix_cache_enabled() {
+            return 0;
+        }
+        let Some(seq) = self.sequences.get(seq_id) else {
+            return 0;
+        };
+        let prompt = &seq.tokens[..seq.prompt_len];
+        let reused = self.prefix_cache.reusable_len(prompt);
+        if reused == 0 {
+            self.prefix_misses += 1;
+            if !self.prefix_cache.tokens.is_empty() {
+                debug!(
+                    id = %seq_id,
+                    prompt_len = prompt.len(),
+                    cached_len = self.prefix_cache.tokens.len(),
+                    common_prefix = PrefixCache::lcp(prompt, &self.prefix_cache.tokens),
+                    "Prefix cache miss",
+                );
+            }
+            return 0;
+        }
+        let Some(snapshot) = self.prefix_cache.snapshot.clone() else {
+            return 0;
+        };
+        if let Err(e) = self.model.restore_state(&snapshot) {
+            warn!(id = %seq_id, "Prefix cache restore failed, prefilling in full: {e}");
+            self.drop_prefix_cache();
+            return 0;
+        }
+        if let Some(seq) = self.sequences.get_mut(seq_id) {
+            seq.cached_prefix_len = reused;
+        }
+        // The state stays in the model; claim it for this sequence without the
+        // reset `swap_in` would do. The sequence accounts for those bytes from
+        // here on, so release the cache's claim on them.
+        self.tracked_kv_bytes = self
+            .tracked_kv_bytes
+            .saturating_sub(self.prefix_cache.bytes);
+        self.prefix_cache.bytes = 0;
+        self.active_seq_id = Some(seq_id.to_string());
+        self.prefix_hits += 1;
+        self.prefix_tokens_saved += reused as u64;
+        info!(
+            id = %seq_id,
+            reused_tokens = reused,
+            "Prefix cache hit: skipping prefill of the shared prefix",
+        );
+        reused
+    }
+
     fn step_prefill(&mut self, seq_id: String) {
         let t0 = Instant::now();
 
-        // A failed cache reset would leave the previous sequence's state in
-        // place, so this request cannot run — fail it rather than answer from
-        // corrupt state.
-        if let Err(e) = self.swap_in(&seq_id) {
-            self.send_error(&seq_id, &format!("Cache reset before prefill failed: {e}"));
-            return;
+        // Reuse the state already in the model when this prompt extends it.
+        // Must be decided before `swap_in`, which is what would otherwise
+        // throw that state away.
+        let reused = self.claim_prefix_cache(&seq_id);
+        if reused == 0 {
+            // A failed cache reset would leave the previous sequence's state in
+            // place, so this request cannot run — fail it rather than answer
+            // from corrupt state.
+            if let Err(e) = self.swap_in(&seq_id) {
+                self.send_error(&seq_id, &format!("Cache reset before prefill failed: {e}"));
+                return;
+            }
         }
 
         let (input_ids, start_pos) = {
@@ -686,10 +864,21 @@ impl InferenceEngine {
 
         let prompt_len = input_ids.len();
 
+        // Checkpoint one token short of the prompt's end. The prompt ends with
+        // the generation prompt (`<|im_start|>assistant\n`); next turn the
+        // reply text follows that position and BPE re-tokenizes across the
+        // join, so the last token of this prompt is not the token at that
+        // index next time even though everything before it is identical.
+        // Holding one token back costs one extra single-token forward and
+        // makes the checkpoint land where the next prompt still agrees.
+        let hold_back =
+            usize::from(prefix_cache_enabled() && !self.model.supports_kv_swap() && prompt_len > 0);
+        let checkpoint_at = prompt_len - hold_back;
+
         let mut logits = None;
         let mut processed = 0usize;
-        while processed < prompt_len {
-            let chunk_end = (processed + PREFILL_CHUNK_SIZE).min(prompt_len);
+        while processed < checkpoint_at {
+            let chunk_end = (processed + PREFILL_CHUNK_SIZE).min(checkpoint_at);
             let chunk = &input_ids[processed..chunk_end];
             let chunk_start_pos = start_pos + processed;
             logits = match self.model.forward_step(chunk, chunk_start_pos) {
@@ -703,6 +892,29 @@ impl InferenceEngine {
                 },
             };
             processed = chunk_end;
+        }
+
+        // State now covers everything up to `checkpoint_at`; record it before
+        // the held-back token moves it past where the next prompt agrees.
+        if hold_back > 0 {
+            // `prompt_len` counts only the tokens this pass feeds, so offset
+            // by whatever a prefix-cache hit already covered.
+            self.capture_prefix_cache(&seq_id, start_pos + checkpoint_at);
+        }
+
+        if processed < prompt_len {
+            let chunk = &input_ids[processed..prompt_len];
+            let chunk_start_pos = start_pos + processed;
+            logits = match self.model.forward_step(chunk, chunk_start_pos) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    self.send_error(
+                        &seq_id,
+                        &format!("Prefill forward failed at final token: {e}"),
+                    );
+                    return;
+                },
+            };
         }
 
         let logits = match logits {
@@ -1215,6 +1427,7 @@ impl InferenceEngine {
     /// eviction, teardown, or an error path that has already reported itself.
     /// A failure here is worth knowing about but must not stop the engine.
     fn clear_kv_cache_best_effort(&mut self, context: &str) {
+        self.drop_prefix_cache();
         if let Err(e) = self.model.clear_kv_cache() {
             error!("{context}: KV cache reset failed: {e}");
         }
@@ -1233,6 +1446,7 @@ impl InferenceEngine {
         }
 
         if !self.model.supports_kv_swap() {
+            self.drop_prefix_cache();
             self.model.clear_kv_cache()?;
             self.active_seq_id = Some(seq_id.to_string());
             return Ok(());
@@ -1432,10 +1646,19 @@ impl InferenceEngine {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
-        self.cleanup_sequence(seq_id);
+        // Keep the finished sequence's state in the model so the prefix cache
+        // captured during its prefill stays restorable for the next request.
+        let keep = self.prefix_cache.snapshot.is_some();
+        self.cleanup_sequence_inner(seq_id, keep);
     }
 
     fn cleanup_sequence(&mut self, seq_id: &str) {
+        self.cleanup_sequence_inner(seq_id, false);
+    }
+
+    /// `keep_model_state` leaves the model's caches loaded so the prefix cache
+    /// can hand them to the next request. Everything else is unchanged.
+    fn cleanup_sequence_inner(&mut self, seq_id: &str, keep_model_state: bool) {
         // Subtract this sequence's KV bytes from the tracked total.
         // If active, bytes are in the model (not in seq.kv_caches).
         let freed = if self.active_seq_id.as_deref() == Some(seq_id) {
@@ -1454,7 +1677,14 @@ impl InferenceEngine {
         if self.active_seq_id.as_deref() == Some(seq_id) {
             self.active_seq_id = None;
         }
-        self.clear_kv_cache_best_effort("sequence cleanup");
+        if keep_model_state {
+            // The bytes stay resident under the prefix cache's name, so move
+            // them across rather than letting the budget forget about them.
+            self.prefix_cache.bytes = freed;
+            self.tracked_kv_bytes = self.tracked_kv_bytes.saturating_add(freed);
+        } else {
+            self.clear_kv_cache_best_effort("sequence cleanup");
+        }
 
         // Only lift the eviction cap when the system has drained all
         // waiting sequences. Under sustained load, keeping the cap prevents
@@ -1513,5 +1743,45 @@ mod panic_message_tests {
             caught(|| std::panic::panic_any(42u32)),
             "unknown panic payload"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefix_cache_tests {
+    use super::PrefixCache;
+
+    fn cache(tokens: &[u32]) -> PrefixCache {
+        PrefixCache {
+            tokens: tokens.to_vec(),
+            snapshot: None,
+            bytes: 0,
+        }
+    }
+
+    #[test]
+    fn reuses_a_strict_prefix() {
+        assert_eq!(cache(&[1, 2, 3]).reusable_len(&[1, 2, 3, 4, 5]), 3);
+    }
+
+    #[test]
+    fn rejects_divergence_inside_the_cached_span() {
+        // The recurrent state summarises all three tokens, so it cannot be
+        // rolled back to the common prefix of 2.
+        assert_eq!(cache(&[1, 2, 3]).reusable_len(&[1, 2, 9, 4]), 0);
+    }
+
+    #[test]
+    fn rejects_an_exact_match_so_prefill_still_has_a_token() {
+        assert_eq!(cache(&[1, 2, 3]).reusable_len(&[1, 2, 3]), 0);
+    }
+
+    #[test]
+    fn rejects_a_cache_longer_than_the_prompt() {
+        assert_eq!(cache(&[1, 2, 3, 4]).reusable_len(&[1, 2]), 0);
+    }
+
+    #[test]
+    fn empty_cache_reuses_nothing() {
+        assert_eq!(cache(&[]).reusable_len(&[1, 2, 3]), 0);
     }
 }
