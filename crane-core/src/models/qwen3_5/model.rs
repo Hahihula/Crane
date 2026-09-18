@@ -910,16 +910,16 @@ impl Model {
         self.inner.forward(&input, start_pos, None)
     }
 
-    /// Reset all per-layer GDN caches (between unrelated requests).
+    /// Reset all per-layer GDN and attention caches (between unrelated
+    /// requests).
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if resetting a layer's recurrent state fails — treated as
-    /// unrecoverable internal state corruption rather than a normal error.
-    pub fn clear_kv_cache(&mut self) {
-        self.inner
-            .reset_gdn_caches()
-            .expect("GDN cache reset failed");
+    /// Returns an error if a layer's state could not be reset. This is not
+    /// merely in-memory bookkeeping: on an accelerator the reset issues device
+    /// memsets, so it fails for the same reasons any other device op does.
+    pub fn clear_kv_cache(&mut self) -> Result<()> {
+        self.inner.reset_gdn_caches()
     }
 
     pub fn num_layers(&self) -> usize {
@@ -938,7 +938,9 @@ impl Model {
         if let Err(e) = self.generate(&[45], &GenerationConfig::with_max_tokens(5), None) {
             eprintln!("warmup failed (non-fatal): {e}");
         }
-        self.clear_kv_cache();
+        if let Err(e) = self.clear_kv_cache() {
+            eprintln!("warmup cache reset failed (non-fatal): {e}");
+        }
     }
 }
 
@@ -954,7 +956,7 @@ impl ModelForCausalLM for Model {
         mut streamer: Option<&mut dyn crate::generation::streamer::TokenStreamer>,
     ) -> Result<Vec<u32>> {
         self.tokenizer.clear();
-        self.clear_kv_cache();
+        self.clear_kv_cache()?;
 
         let mut logits_processor = LogitsProcessor::new(1024, config.temperature, config.top_p);
 
@@ -992,7 +994,7 @@ impl ModelForCausalLM for Model {
             let ctxt = &tokens[start_pos..];
 
             if full_recompute {
-                self.clear_kv_cache();
+                self.clear_kv_cache()?;
             }
             let logits = self.forward_step(ctxt, start_pos)?;
             let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;

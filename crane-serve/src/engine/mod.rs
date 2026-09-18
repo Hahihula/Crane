@@ -635,7 +635,7 @@ impl InferenceEngine {
 
             // If this sequence's KV is currently loaded in the model, clear it.
             if self.active_seq_id.as_deref() == Some(&victim_id) {
-                self.model.clear_kv_cache();
+                self.clear_kv_cache_best_effort("eviction");
                 self.active_seq_id = None;
             }
 
@@ -865,7 +865,33 @@ impl InferenceEngine {
     //  Step execution dispatch
     // ─────────────────────────────────────────────────────────
 
+    /// Run one scheduler step, containing any panic to the sequences involved.
+    ///
+    /// The inference thread owns the only handle to the model, so an escaping
+    /// panic takes the whole engine with it and every later request fails with
+    /// "Engine thread has shut down". Instead, fail the step's sequences and
+    /// reset the model's caches — a panic mid-forward says nothing about what
+    /// state they are in.
     fn execute_step(&mut self, output: SchedulerOutput) {
+        let batch = output.batch.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.execute_step_inner(output);
+        }));
+        let Err(panic) = result else {
+            return;
+        };
+        let msg = panic_message(&panic);
+        error!(
+            "Inference step panicked, failing {} sequence(s): {msg}",
+            batch.len()
+        );
+        for seq_id in &batch {
+            self.send_error(seq_id, &format!("Inference step panicked: {msg}"));
+        }
+        self.clear_kv_cache_best_effort("panic recovery");
+    }
+
+    fn execute_step_inner(&mut self, output: SchedulerOutput) {
         if output.is_prefill {
             debug_assert_eq!(output.batch.len(), 1);
             let seq_id = &output.batch[0];
@@ -889,7 +915,13 @@ impl InferenceEngine {
     fn step_prefill(&mut self, seq_id: String) {
         let t0 = Instant::now();
 
-        self.swap_in(&seq_id);
+        // A failed cache reset would leave the previous sequence's state in
+        // place, so this request cannot run — fail it rather than answer from
+        // corrupt state.
+        if let Err(e) = self.swap_in(&seq_id) {
+            self.send_error(&seq_id, &format!("Cache reset before prefill failed: {e}"));
+            return;
+        }
 
         let (input_ids, start_pos) = {
             let seq = self.sequences.get(&seq_id).unwrap();
@@ -1039,7 +1071,7 @@ impl InferenceEngine {
                     seq.kv_caches = caches;
                 }
             }
-            self.model.clear_kv_cache();
+            self.clear_kv_cache_best_effort("swap out");
         }
         self.recount_kv_bytes();
     }
@@ -1075,7 +1107,7 @@ impl InferenceEngine {
             },
             Err(e) => {
                 error!("Final KV extraction failed: {e}");
-                self.model.clear_kv_cache();
+                self.clear_kv_cache_best_effort("final KV extraction");
                 self.recount_kv_bytes();
             },
         }
@@ -1166,7 +1198,7 @@ impl InferenceEngine {
                     for seq_id in &batch {
                         self.send_error(seq_id, &format!("Mask build failed: {e}"));
                     }
-                    self.model.clear_kv_cache();
+                    self.clear_kv_cache_best_effort("mask build");
                     return;
                 },
             };
@@ -1222,7 +1254,7 @@ impl InferenceEngine {
                             );
                         }
                     }
-                    self.model.clear_kv_cache();
+                    self.clear_kv_cache_best_effort("decode input upload");
                     self.drain_pending_completions(&pending_finish, &pending_cancel);
                     return;
                 },
@@ -1248,7 +1280,7 @@ impl InferenceEngine {
                             self.send_error(seq_id, &format!("Batched decode failed: {e}"));
                         }
                     }
-                    self.model.clear_kv_cache();
+                    self.clear_kv_cache_best_effort("batched decode");
                     self.drain_pending_completions(&pending_finish, &pending_cancel);
                     return;
                 },
@@ -1372,7 +1404,10 @@ impl InferenceEngine {
                 continue;
             }
 
-            self.swap_in(seq_id);
+            if let Err(e) = self.swap_in(seq_id) {
+                self.send_error(seq_id, &format!("Cache reset before decode failed: {e}"));
+                continue;
+            }
 
             for _round in 0..self.decode_tokens_per_seq {
                 let (input_ids, start_pos) = {
@@ -1465,15 +1500,31 @@ impl InferenceEngine {
     //  KV cache management
     // ─────────────────────────────────────────────────────────
 
-    fn swap_in(&mut self, seq_id: &str) {
+    /// Clear the model's caches where there is no longer a sequence to fail —
+    /// eviction, teardown, or an error path that has already reported itself.
+    /// A failure here is worth knowing about but must not stop the engine.
+    fn clear_kv_cache_best_effort(&mut self, context: &str) {
+        if let Err(e) = self.model.clear_kv_cache() {
+            error!("{context}: KV cache reset failed: {e}");
+        }
+    }
+
+    /// Make `seq_id` the sequence whose state the model holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model's caches could not be reset, which would
+    /// leave the previous sequence's state in place and silently corrupt this
+    /// one's output. The caller fails the sequence instead.
+    fn swap_in(&mut self, seq_id: &str) -> anyhow::Result<()> {
         if self.active_seq_id.as_deref() == Some(seq_id) {
-            return;
+            return Ok(());
         }
 
         if !self.model.supports_kv_swap() {
-            self.model.clear_kv_cache();
+            self.model.clear_kv_cache()?;
             self.active_seq_id = Some(seq_id.to_string());
-            return;
+            return Ok(());
         }
 
         // Save previous active sequence's KV cache from the model.
@@ -1496,6 +1547,7 @@ impl InferenceEngine {
         self.stats
             .total_kv_swap_count
             .fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Mark that the model finished processing `seq_id` for this scheduling
@@ -1756,7 +1808,7 @@ impl InferenceEngine {
         if self.active_seq_id.as_deref() == Some(seq_id) {
             self.active_seq_id = None;
         }
-        self.model.clear_kv_cache();
+        self.clear_kv_cache_best_effort("sequence cleanup");
 
         // Only lift the eviction cap when the system has drained all
         // waiting sequences. Under sustained load, keeping the cap prevents
@@ -1770,5 +1822,50 @@ impl InferenceEngine {
         }
 
         debug!(id = %seq_id, "Sequence cleaned up");
+    }
+}
+
+/// Best-effort text of a caught panic.
+///
+/// `panic!("literal")` carries a `&'static str`, `panic!("{x}")` and
+/// `.expect(..)` carry a `String`, and anything else is opaque.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_string())
+}
+
+#[cfg(test)]
+mod panic_message_tests {
+    use super::panic_message;
+
+    fn caught(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let err = std::panic::catch_unwind(f).unwrap_err();
+        std::panic::set_hook(prev);
+        panic_message(&err)
+    }
+
+    #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)] // the panic is the point
+    fn reads_str_and_string_payloads() {
+        assert_eq!(caught(|| panic!("a literal")), "a literal");
+        let n = 7;
+        assert_eq!(caught(move || panic!("formatted {n}")), "formatted 7");
+        assert_eq!(
+            caught(|| Err::<(), _>("boom").expect("with context")),
+            "with context: \"boom\""
+        );
+    }
+
+    #[test]
+    fn falls_back_for_an_opaque_payload() {
+        assert_eq!(
+            caught(|| std::panic::panic_any(42u32)),
+            "unknown panic payload"
+        );
     }
 }
