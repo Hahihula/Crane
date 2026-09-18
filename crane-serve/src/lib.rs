@@ -176,6 +176,9 @@ pub fn init_logging() {
 }
 
 pub async fn cli_main() -> Result<()> {
+    // Must run before anything touches SYCL; a no-op off `--features sycl`.
+    crane_core::utils::sycl_env::ensure_sycl_runtime_env();
+
     init_logging();
     run(Args::parse()).await
 }
@@ -504,7 +507,7 @@ fn run_duplex_loop(
 /// silently forces CPU on ROCm builds (the bug this replaced in the
 /// TTS/ASR/duplex/VLM device-selection code below).
 pub(crate) fn is_gpu_device(device: &crane_core::models::Device) -> bool {
-    device.is_cuda() || device.is_rocm()
+    device.is_cuda() || device.is_rocm() || device.is_sycl()
 }
 
 /// Resolve the compute dtype. An explicit `--dtype` always wins; otherwise
@@ -530,6 +533,10 @@ fn resolve_dtype(
     // ROCm backend is experimental: F16 has the broadest kernel coverage on candle's
     // rocm path today, whereas BF16 support is still incomplete. Default there.
     if device.is_rocm() {
+        return Ok(DType::F16);
+    }
+    // F16/BF16/F32 all work on SYCL; default to F16, as on ROCm/Metal.
+    if device.is_sycl() {
         return Ok(DType::F16);
     }
     if device.is_metal() {
@@ -567,7 +574,13 @@ pub async fn run(args: Args) -> Result<()> {
             // Fall back to CPU when no AMD GPU is present, mirroring the metal idiom.
             crane_core::models::Device::new_rocm(0).unwrap_or(crane_core::models::Device::Cpu)
         }
-        #[cfg(all(not(feature = "cuda"), not(feature = "rocm")))]
+        #[cfg(all(not(feature = "cuda"), not(feature = "rocm"), feature = "sycl"))]
+        {
+            // Intel oneAPI / SYCL (proof-of-concept). Fall back to CPU when no
+            // usable SYCL device is found.
+            crane_core::models::Device::new_sycl(0).unwrap_or(crane_core::models::Device::Cpu)
+        }
+        #[cfg(all(not(feature = "cuda"), not(feature = "rocm"), not(feature = "sycl")))]
         {
             #[cfg(target_os = "macos")]
             {

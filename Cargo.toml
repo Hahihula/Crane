@@ -14,3 +14,18 @@ candle-nn = "0.11"
 candle-transformers = "0.11"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 fst = "0.4"
+
+# SYCL (Intel oneAPI) backend — proof-of-concept.
+#
+# candle 0.11 on crates.io has no `sycl` feature, so the `sycl` Cargo feature in
+# `crane-core`/`crane`/`crane-serve` needs a candle build that provides one. The
+# fork below is candle 0.11.0 plus an off-by-default `sycl` feature; with `sycl`
+# off it is stock candle, so CPU/CUDA/Metal builds are unaffected. Drop this
+# patch once the SYCL backend is upstreamed.
+#
+# For local candle iteration, swap to a path dep:
+#   candle-core = { path = "../candle/candle-core" }
+[patch.crates-io]
+candle-core = { git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+candle-nn = { git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+candle-transformers = { git = "https://github.com/Hahihula/candle", branch = "sycle-support" }

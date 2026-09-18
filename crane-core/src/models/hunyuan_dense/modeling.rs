@@ -587,9 +587,9 @@ impl Mlp {
             } => {
                 let gu = gate_up_proj.forward(x)?; // [B, S, 2*intermediate_size]
 
-                #[cfg(any(feature = "cuda", feature = "rocm"))]
+                #[cfg(any(feature = "cuda", feature = "rocm", feature = "sycl"))]
                 {
-                    if gu.device().is_cuda() || gu.device().is_rocm() {
+                    if gu.device().is_cuda() || gu.device().is_rocm() || gu.device().is_sycl() {
                         let activated =
                             crate::ops::fused_silu_mul(&gu.contiguous()?, *intermediate_size)?;
                         return self.down_proj.forward(&activated);
