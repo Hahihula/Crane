@@ -24,6 +24,15 @@ use crate::quantized::gguf_file::Gguf;
 use crate::utils::token_output_stream::TokenOutputStream;
 use crate::utils::utils;
 
+/// A point-in-time capture of every layer's cache, for resuming a shared
+/// prompt prefix. See [`Qwen3_5TextModel::snapshot_state`].
+#[derive(Clone)]
+pub struct StateSnapshot {
+    gdn: Vec<Option<crate::ops::gdn::GdnLayerCache>>,
+    /// Fill level per attention layer; `None` for GDN blocks.
+    attn_lens: Vec<Option<usize>>,
+}
+
 /// Text-only Qwen 3.5 transformer.
 ///
 /// `gdn_caches` is indexed by layer; `None` for full-attention blocks, `Some`
@@ -413,6 +422,54 @@ impl Qwen3_5TextModel {
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// Capture the layer state so a later request replaying this token prefix
+    /// can resume from it.
+    ///
+    /// Cheap: the GDN entries are `Tensor` clones (refcount bumps, and the
+    /// recurrence assigns rather than writes in place), and the attention side
+    /// only records a fill level — its buffer is append-only, so rewinding to
+    /// that level restores exactly these positions.
+    ///
+    /// Valid only until something resets the caches.
+    #[must_use]
+    pub fn snapshot_state(&self) -> StateSnapshot {
+        StateSnapshot {
+            gdn: self.gdn_caches.clone(),
+            attn_lens: self
+                .attn_caches
+                .iter()
+                .map(|c| c.as_ref().map(KvCache::len))
+                .collect(),
+        }
+    }
+
+    /// Restore a [`snapshot_state`](Self::snapshot_state).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot does not describe this model's layers.
+    pub fn restore_state(&mut self, snap: &StateSnapshot) -> Result<()> {
+        if snap.gdn.len() != self.gdn_caches.len() || snap.attn_lens.len() != self.attn_caches.len()
+        {
+            anyhow::bail!(
+                "state snapshot has {} gdn / {} attn layers, model has {} / {}",
+                snap.gdn.len(),
+                snap.attn_lens.len(),
+                self.gdn_caches.len(),
+                self.attn_caches.len(),
+            );
+        }
+        self.gdn_caches = snap.gdn.clone();
+        for (cache, len) in self.attn_caches.iter_mut().zip(&snap.attn_lens) {
+            match (cache.as_mut(), len) {
+                (Some(c), Some(n)) => c.truncate(*n),
+                (None, None) => {},
+                _ => anyhow::bail!("state snapshot layer kinds do not match the model"),
+            }
+        }
+        Ok(())
     }
 
     /// Reset all per-layer GDN caches. Called between unrelated requests
@@ -920,6 +977,22 @@ impl Model {
     /// memsets, so it fails for the same reasons any other device op does.
     pub fn clear_kv_cache(&mut self) -> Result<()> {
         self.inner.reset_gdn_caches()
+    }
+
+    /// Capture the current layer state; see
+    /// [`Qwen3_5TextModel::snapshot_state`].
+    #[must_use]
+    pub fn snapshot_state(&self) -> StateSnapshot {
+        self.inner.snapshot_state()
+    }
+
+    /// Restore a previously captured state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot does not match this model's layers.
+    pub fn restore_state(&mut self, snap: &StateSnapshot) -> Result<()> {
+        self.inner.restore_state(snap)
     }
 
     pub fn num_layers(&self) -> usize {
