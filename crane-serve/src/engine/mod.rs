@@ -50,6 +50,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use candle_core::Tensor;
+use crane_core::{candle_core, candle_transformers};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 

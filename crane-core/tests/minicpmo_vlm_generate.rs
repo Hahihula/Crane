@@ -19,6 +19,7 @@ fn minicpmo_vlm_generate_is_coherent() {
     let image_path = std::env::var("CRANE_MINICPMO_TEST_IMAGE")
         .unwrap_or_else(|_| format!("{dir}/assets/fossil.png"));
 
+    use crane_core::candle_core;
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
         (

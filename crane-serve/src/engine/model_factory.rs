@@ -7,6 +7,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use candle_core::{DType, Device};
+use crane_core::candle_core;
 use serde::Deserialize;
 use std::path::Path;
 

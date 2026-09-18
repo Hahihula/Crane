@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use crane_core::candle_core;
 
 /// Per-layer KV cache for one sequence: `(K, V)` per layer, or `None` for
 /// layers with no cached state yet.

@@ -26,6 +26,8 @@
 //! | `accelerate` | Link against Apple Accelerate for CPU BLAS |
 //! | `mkl` | Link against Intel MKL for CPU BLAS |
 
+include!("candle_backend.rs");
+
 pub mod generation;
 pub mod models;
 pub mod ops;

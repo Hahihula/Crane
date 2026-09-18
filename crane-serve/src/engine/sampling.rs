@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use crane_core::{candle_core, candle_nn};
 use tracing::debug;
 
 use super::grammar::{TokenMask, apply_grammar_mask, suppress_eos_inplace};

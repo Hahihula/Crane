@@ -27,6 +27,7 @@
 
 use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device};
+use crane_core::candle_core;
 use crane_core::generation::GenerationConfig;
 use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::{Model, ModelFormat};

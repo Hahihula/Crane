@@ -22,6 +22,7 @@
 //! a stop token and ran to `max_new_tokens` instead of terminating cleanly.
 
 use candle_core::{DType, Device};
+use crane_core::candle_core;
 use crane_core::chat::{Message, Role};
 use crane_core::generation::GenerationConfig;
 use crane_core::generation::based::ModelForCausalLM;

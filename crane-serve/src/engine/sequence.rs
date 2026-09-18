@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
+use crane_core::{candle_core, candle_transformers};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 

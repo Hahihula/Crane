@@ -10,6 +10,7 @@
 #[test]
 #[ignore = "needs a local MiniCPM-V-4.6 checkpoint (CRANE_MINICPM_V_DIR)"]
 fn minicpm_v_generate_is_coherent() {
+    use crane_core::candle_core;
     use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
 
     let dir = std::env::var("CRANE_MINICPM_V_DIR")

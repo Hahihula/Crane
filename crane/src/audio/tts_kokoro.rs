@@ -10,6 +10,7 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
+use crane_core::candle_core;
 use crane_core::generation::SpeechOptions;
 use crane_core::models::g2p::Phonemizer;
 use crane_core::models::kokoro_tts;

@@ -13,6 +13,7 @@
 //!   --test qwen3_5_gqa_expand_cost -- --ignored --nocapture
 //! ```
 use candle_core::{D, DType, Device, Tensor};
+use crane_core::{candle_core, candle_nn};
 
 // Qwen3.8-27B full-attention geometry.
 const KV_HEADS: usize = 4;

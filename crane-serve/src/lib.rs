@@ -1,3 +1,5 @@
+use crane_core::{candle_core, candle_nn};
+
 pub mod chat_template;
 pub mod engine;
 pub mod handlers;

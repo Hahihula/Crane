@@ -9,8 +9,20 @@ repository = "https://github.com/lucasjinreal/Crane"
 authors = ["Nicholas Jela<nicholasjela@gmail.com>"]
 
 [workspace.dependencies]
-candle-core = "0.11"
-candle-nn = "0.11"
-candle-transformers = "0.11"
+# Candle backend sources — see `crane-core/src/candle_backend.rs`.
+candle-core-upstream = { package = "candle-core", version = "0.11" }
+candle-nn-upstream = { package = "candle-nn", version = "0.11" }
+candle-transformers-upstream = { package = "candle-transformers", version = "0.11" }
+
+# Intel oneAPI/SYCL backend fork (adds a `sycl` candle feature).
+candle-core-sycl = { package = "candle-core", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+candle-nn-sycl = { package = "candle-nn", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+candle-transformers-sycl = { package = "candle-transformers", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+
+# AMD ROCm/HIP backend fork (adds a `rocm` candle feature).
+candle-core-rocm = { package = "candle-core", git = "https://github.com/xmiksay/candle", branch = "feat/rocm-backend" }
+candle-nn-rocm = { package = "candle-nn", git = "https://github.com/xmiksay/candle", branch = "feat/rocm-backend" }
+candle-transformers-rocm = { package = "candle-transformers", git = "https://github.com/xmiksay/candle", branch = "feat/rocm-backend" }
+
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 fst = "0.4"

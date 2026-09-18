@@ -15,6 +15,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
+use crane_core::candle_core;
 use crane_core::models::qwen3_5::Qwen3_5VLModel;
 use std::path::{Path, PathBuf};
 

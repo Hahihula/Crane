@@ -13,6 +13,7 @@
 pub mod tool_call_skeleton;
 
 use candle_core::Tensor;
+use crane_core::candle_core;
 
 /// What the sampler is allowed to produce for the next token.
 #[derive(Debug, Clone, PartialEq, Eq)]

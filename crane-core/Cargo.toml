@@ -26,10 +26,19 @@ required-features = ["onnx"]
 ahash = "0.8"
 anyhow = "1.0.97"
 
-candle-nn = { workspace = true }
+# Candle backend variants — see `src/candle_backend.rs`.
+candle-nn-upstream = { workspace = true }
 # TODO(candle-transformers-removal): See CANDLE_TRANSFORMERS.md for the
 # remaining model/component and generation-helper call sites.
-candle-transformers = { workspace = true }
+candle-transformers-upstream = { workspace = true }
+
+candle-core-sycl = { workspace = true, optional = true }
+candle-nn-sycl = { workspace = true, optional = true }
+candle-transformers-sycl = { workspace = true, optional = true }
+
+candle-core-rocm = { workspace = true, optional = true }
+candle-nn-rocm = { workspace = true, optional = true }
+candle-transformers-rocm = { workspace = true, optional = true }
 clap = { version = "4.5.32", features = ["derive"] }
 hf-hub = { version = "1.0", features = ["blocking"] }
 minijinja = { version = "2.21", features = ["builtins", "preserve_order"] }
@@ -58,45 +67,59 @@ image = "0.25"
 half = "2"
 prost = { version = "0.14.3", optional = true }
 
-# candle-core = { workspace = true, features = ["accelerate"] }
-
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-candle-core = { workspace = true, features = ["metal"] }
-candle-nn = { workspace = true, features = ["metal"] }
+candle-core-upstream = { workspace = true, features = ["metal"] }
+candle-nn-upstream = { workspace = true, features = ["metal"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-candle-core = { workspace = true, features = ["accelerate"] }
+candle-core-upstream = { workspace = true, features = ["accelerate"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = { workspace = true }
+candle-core-upstream = { workspace = true }
 
 [features]
 metal = [
-    "candle-core/metal",
-    "candle-nn/metal",
-    "candle-transformers/metal",
+    "candle-core-upstream/metal",
+    "candle-nn-upstream/metal",
+    "candle-transformers-upstream/metal",
 ]
 cuda = [
-    "candle-core/cuda",
-    "candle-nn/cuda",
-    "candle-transformers/cuda",
+    "candle-core-upstream/cuda",
+    "candle-nn-upstream/cuda",
+    "candle-transformers-upstream/cuda",
     "dep:bindgen_cuda",
 ]
-cudnn = ["candle-core/cudnn"]
-# AMD ROCm/HIP backend (experimental). candle 0.11 on crates.io has no `rocm`
-# feature, so this can't forward to `candle-core/rocm` yet.
-rocm = []
+cudnn = ["candle-core-upstream/cudnn"]
+# AMD ROCm/HIP backend (experimental fork). Also enables the fork's own
+# `rocm` feature — it's off by default there too.
+rocm = [
+    "dep:candle-core-rocm",
+    "dep:candle-nn-rocm",
+    "dep:candle-transformers-rocm",
+    "candle-core-rocm/rocm",
+    "candle-nn-rocm/rocm",
+    "candle-transformers-rocm/rocm",
+]
+# Intel oneAPI/SYCL backend (experimental fork). Same deal as `rocm` above.
+sycl = [
+    "dep:candle-core-sycl",
+    "dep:candle-nn-sycl",
+    "dep:candle-transformers-sycl",
+    "candle-core-sycl/sycl",
+    "candle-nn-sycl/sycl",
+    "candle-transformers-sycl/sycl",
+]
 mkl = [
     "dep:intel-mkl-src",
-    "candle-core/mkl",
-    "candle-nn/mkl",
-    "candle-transformers/mkl",
+    "candle-core-upstream/mkl",
+    "candle-nn-upstream/mkl",
+    "candle-transformers-upstream/mkl",
 ]
 accelerate = [
     "dep:accelerate-src",
-    "candle-core/accelerate",
-    "candle-nn/accelerate",
-    "candle-transformers/accelerate",
+    "candle-core-upstream/accelerate",
+    "candle-nn-upstream/accelerate",
+    "candle-transformers-upstream/accelerate",
 ]
 onnx = ["dep:prost", "dep:prost-build", "dep:lru", "dep:aho-corasick", "dep:unicode-normalization"]
 [dev-dependencies]

@@ -235,6 +235,7 @@ fn main() -> anyhow::Result<()> {
                     );
                     all.extend_from_slice(&samples);
                 }
+                use crane_core::candle_core;
                 let wav = candle_core::Tensor::from_vec(all.clone(), (1, 1, all.len()), &device)?;
                 crane::audio::save_wav(&wav, &output_path, sr)?
             } else {

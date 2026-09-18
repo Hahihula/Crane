@@ -8,6 +8,7 @@
 //! `prompt.rs` for why the tokenizer must be Qwen2-VL-family).
 
 #![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
+use crane_core::candle_core;
 
 #[test]
 #[ignore = "needs a local KugelAudio checkpoint + tokenizer.json (CRANE_KUGELAUDIO_DIR, CRANE_KUGELAUDIO_TOKENIZER)"]

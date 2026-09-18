@@ -9,6 +9,7 @@
 //! Gated by `CRANE_KUGELAUDIO_DIR` (needs an ~18.7GB local checkpoint).
 
 #![allow(clippy::doc_markdown)] // KugelAudio / lm_head are external names
+use crane_core::candle_core;
 
 #[test]
 #[ignore = "needs a local KugelAudio checkpoint (CRANE_KUGELAUDIO_DIR)"]

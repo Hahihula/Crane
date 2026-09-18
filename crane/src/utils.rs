@@ -76,6 +76,7 @@ fn nvidia_smi_gpu_memory_info(index: usize) -> Option<GpuMemoryInfo> {
 // with the CUDA path but unused here.
 #[cfg(feature = "rocm")]
 fn rocm_gpu_memory_info(_index: usize) -> Option<GpuMemoryInfo> {
+    use crane_core::candle_core;
     let info = candle_core::rocm_backend::rocm_rs::hip::memory_info().ok()?;
     Some(GpuMemoryInfo {
         used_bytes: (info.total - info.free) as u64,

@@ -20,6 +20,7 @@ use candle_core::{D, DType, Device, Tensor};
 use crane_core::generation::GenerationConfig;
 use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::{Model, ModelFormat};
+use crane_core::{candle_core, candle_nn};
 
 const PROMPT: &str = "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
 const MAX_NEW_TOKENS: usize = 48;

@@ -22,19 +22,10 @@ audioadapter-buffers = "5.0"
 ribo = "0.1.3"
 tokenizers = { workspace = true }
 
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-candle-core = { workspace = true, features = ["metal"] }
-
-[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-candle-core = { workspace = true, features = ["accelerate"] }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = { workspace = true }
-
 [features]
 onnx = ["crane-core/onnx"]
-metal = ["crane-core/metal", "candle-core/metal"]
-accelerate = ["crane-core/accelerate", "candle-core/accelerate"]
+metal = ["crane-core/metal"]
+accelerate = ["crane-core/accelerate"]
 cuda = ["crane-core/cuda", "dep:nvml-wrapper"]
 # ROCm does not pull `nvml-wrapper` (NVIDIA-only telemetry, cuda-gated).
 rocm = ["crane-core/rocm"]

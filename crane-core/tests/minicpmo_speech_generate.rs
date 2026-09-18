@@ -24,6 +24,7 @@ fn minicpmo_speech_generate_produces_real_audio() {
     use crane_core::models::minicpmo::{
         MiniCpmOLlm, MiniCpmTts, Token2Wav, TtsGenerationConfig, load_config,
     };
+    use crane_core::{candle_core, candle_nn};
 
     let dir = std::env::var("CRANE_MINICPMO_DIR")
         .expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");

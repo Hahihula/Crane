@@ -5,6 +5,7 @@
 //! `InferenceEngine` itself, so it lifts out cleanly.
 
 use candle_core::Device;
+use crane_core::candle_core;
 
 // ─────────────────────────────────────────────────────────────
 //  Memory configuration

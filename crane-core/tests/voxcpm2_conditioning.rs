@@ -9,6 +9,7 @@
 //! default.
 
 use candle_core::{DType, Device};
+use crane_core::candle_core;
 use crane_core::models::voxcpm2::{
     VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2PromptCache,
 };
