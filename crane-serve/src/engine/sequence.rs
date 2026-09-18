@@ -1,7 +1,6 @@
 use std::time::Instant;
 
-use candle_core::Tensor;
-use candle_transformers::generation::LogitsProcessor;
+use crane_core::{LogitsProcessor, Tensor};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -281,7 +280,6 @@ impl Sequence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_transformers::generation::LogitsProcessor;
 
     /// Helper: build a minimal Sequence for testing.
     fn make_seq(

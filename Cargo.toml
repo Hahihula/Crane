@@ -10,8 +10,26 @@ repository = "https://github.com/lucasjinreal/Crane"
 authors = ["Nicholas Jela<nicholasjela@gmail.com>"]
 
 [workspace.dependencies]
-candle-core = "0.11"
-candle-nn = "0.11"
-candle-transformers = "0.11"
+# Candle backend sources — see `crane-core/src/candle_backend.rs`. The
+# default/mainstream candle keeps its plain upstream name; only the forks
+# that add a backend candle doesn't have yet carry a suffix. Each fork (and
+# the `sycl`/`rocm` special-casing in candle_backend.rs) is meant to go away
+# once that backend merges into candle proper.
+candle-core = { version = "0.11" }
+candle-nn = { version = "0.11" }
+candle-transformers = { version = "0.11" }
+
+# Intel oneAPI/SYCL backend fork (adds a `sycl` candle feature). Remove once
+# SYCL support merges into candle main.
+candle-core-sycl = { package = "candle-core", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+candle-nn-sycl = { package = "candle-nn", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+candle-transformers-sycl = { package = "candle-transformers", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
+
+# AMD ROCm/HIP backend fork (adds a `rocm` candle feature). Remove once ROCm
+# support merges into candle main.
+candle-core-rocm = { package = "candle-core", git = "https://github.com/xmiksay/candle", branch = "feat/rocm-backend" }
+candle-nn-rocm = { package = "candle-nn", git = "https://github.com/xmiksay/candle", branch = "feat/rocm-backend" }
+candle-transformers-rocm = { package = "candle-transformers", git = "https://github.com/xmiksay/candle", branch = "feat/rocm-backend" }
+
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 fst = "0.4"

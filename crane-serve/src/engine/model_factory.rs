@@ -6,7 +6,7 @@
 #[cfg(feature = "onnx")]
 use anyhow::Context;
 use anyhow::Result;
-use candle_core::{DType, Device};
+use crane_core::{DType, Device, gguf_file};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -420,7 +420,7 @@ pub fn uses_xml_tool_format(model_path: &str) -> bool {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
         && let Ok(mut file) = std::fs::File::open(path)
-        && let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut file)
+        && let Ok(ct) = gguf_file::Content::read(&mut file)
         && let Some(arch) = ct.metadata.get("general.architecture")
         && let Ok(arch) = arch.to_string()
     {

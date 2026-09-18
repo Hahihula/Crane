@@ -66,6 +66,7 @@ fn minicpmo_omni_generate_is_coherent() {
     };
     let samples = resample_to_16k_mono(&raw, spec.channels, spec.sample_rate);
 
+    use crane_core::candle_core;
     #[cfg(feature = "cuda")]
     let (device, dtype) = if candle_core::utils::cuda_is_available() {
         (

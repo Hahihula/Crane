@@ -20,6 +20,7 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
+use crane_core::candle_core;
 use crane_core::generation::SpeechOptions;
 use crane_core::models::voxcpm2::{
     VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2StreamConfig,

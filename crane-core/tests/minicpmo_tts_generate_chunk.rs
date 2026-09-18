@@ -22,6 +22,7 @@ fn minicpmo_tts_generate_chunk_persists_kv_across_calls() {
     use crane_core::models::minicpmo::{
         MiniCpmOLlm, MiniCpmTts, Token2Wav, TtsGenerationConfig, load_config,
     };
+    use crane_core::{candle_core, candle_nn};
 
     let dir = std::env::var("CRANE_MINICPMO_DIR")
         .expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");

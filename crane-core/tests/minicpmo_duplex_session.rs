@@ -10,6 +10,8 @@
 //!
 //! Gated by `CRANE_MINICPMO_DIR` so it doesn't run by default.
 
+use crane_core::candle_core;
+
 /// Linear-interpolation resample to 16kHz mono (same helper as
 /// `minicpmo_omni_generate.rs` — not a general-purpose resampler, just
 /// good enough for this smoke test).

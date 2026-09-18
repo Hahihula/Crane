@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
+use crane_core::candle_core;
 use crane_core::generation::SpeechOptions;
 use crane_core::models::qwen3_tts::Model;
 use crane_core::models::qwen3_tts::modeling::TalkerConfig;

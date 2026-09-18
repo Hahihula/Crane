@@ -26,6 +26,7 @@
 fn minicpmo_tts_generate_produces_plausible_codes() {
     use candle_core::Tensor;
     use crane_core::models::minicpmo::{MiniCpmOLlm, MiniCpmTts, TtsGenerationConfig, load_config};
+    use crane_core::{candle_core, candle_nn};
 
     let dir = std::env::var("CRANE_MINICPMO_DIR")
         .expect("set CRANE_MINICPMO_DIR to a MiniCPM-o-4.5 checkpoint dir");

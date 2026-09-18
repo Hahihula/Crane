@@ -16,6 +16,7 @@ use crane_core::models::qwen3_5::Qwen35RmsNorm;
 use crane_core::ops::gdn::{
     GdnGateConsts, RmsNormGated, compute_beta_g, l2_alpha, l2_norm, l2_norm_fused,
 };
+use crane_core::{candle_core, candle_nn};
 
 /// Whether this build has a GPU backend compiled in at all.
 const HAS_GPU_FEATURE: bool = cfg!(any(feature = "cuda", feature = "rocm"));

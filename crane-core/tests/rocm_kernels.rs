@@ -12,6 +12,7 @@
 //! candle's own backend tests behave.
 
 #![cfg(all(feature = "rocm", not(feature = "cuda")))]
+use crane_core::{candle_core, candle_nn};
 
 use candle_core::{D, DType, Device, Result, Tensor};
 use crane_core::ops::gdn::{gated_delta_rule_recurrence, gdn_recurrence_rocm};

@@ -8,6 +8,7 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use candle_core::{DType, Tensor};
+use crane_core::candle_core;
 use hound::{SampleFormat, WavSpec, WavWriter};
 
 /// Audio format metadata returned by TTS models.

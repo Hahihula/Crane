@@ -49,7 +49,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use candle_core::Tensor;
+use crane_core::{LogitsProcessor, Tensor};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
@@ -779,7 +779,7 @@ impl InferenceEngine {
             tokens: req.tokens,
             prompt_len,
             kv_caches: vec![None; self.num_layers],
-            logits_processor: candle_transformers::generation::LogitsProcessor::new(
+            logits_processor: LogitsProcessor::new(
                 sampling::rand_seed(),
                 req.temperature,
                 req.top_p,

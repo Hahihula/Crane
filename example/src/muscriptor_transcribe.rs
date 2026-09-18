@@ -12,6 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use crane_core::candle_core;
 
 #[derive(Parser, Debug)]
 #[command(about = "MuScriptor (muscriptor) audio-to-MIDI transcription CLI")]

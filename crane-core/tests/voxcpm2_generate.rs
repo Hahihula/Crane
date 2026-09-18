@@ -8,6 +8,8 @@
 //! development (see `crane_core::models::voxcpm2::cfm`'s `hf_diff` test
 //! module) — this test covers the full pipeline glue on top of that.
 
+use crane_core::candle_core;
+
 #[test]
 #[ignore = "needs a local VoxCPM2 checkpoint (CRANE_VOXCPM2_DIR), incl. a converted audiovae.safetensors"]
 fn voxcpm2_generate_is_well_formed() {

@@ -1,4 +1,6 @@
 pub mod auth;
+use crane_core::{D, DType, Tensor, softmax_last_dim};
+
 pub mod chat_template;
 pub mod engine;
 pub mod handlers;
@@ -268,7 +270,7 @@ pub async fn cli_main() -> Result<()> {
 }
 
 fn encode_tts_audio(
-    audio: &candle_core::Tensor,
+    audio: &Tensor,
     audio_info: &crane::audio::AudioInfo,
     format: &openai_api::AudioResponseFormat,
 ) -> Result<handlers::tts::TtsResult, String> {
@@ -277,7 +279,7 @@ fn encode_tts_audio(
         audio.dims()
     );
     let audio_f32 = audio
-        .to_dtype(candle_core::DType::F32)
+        .to_dtype(DType::F32)
         .map_err(|e| e.to_string())?
         .flatten_all()
         .map_err(|e| e.to_string())?;
@@ -324,7 +326,7 @@ fn generate_audio(
     tts: &mut dyn crane::audio::Tts,
     model_name: &str,
     req: &TtsGenerateRequest,
-) -> Result<candle_core::Tensor, String> {
+) -> Result<Tensor, String> {
     let opts = crane_core::generation::SpeechOptions {
         max_new_tokens: req.max_tokens,
         temperature: req.temperature,
@@ -363,7 +365,7 @@ fn generate_audio(
 /// fact that it errored) plus how long the model call took, so a crash that
 /// aborts the process before a response is ever sent still leaves a trace of
 /// whether the model call itself returned before things went wrong.
-fn log_generate_result(result: &Result<candle_core::Tensor, String>, elapsed: std::time::Duration) {
+fn log_generate_result(result: &Result<Tensor, String>, elapsed: std::time::Duration) {
     match result {
         Ok(tensor) => tracing::debug!(
             "TTS model call returned {:?} ({:?}) in {elapsed:?}",
@@ -738,7 +740,7 @@ pub async fn run(mut args: Args) -> Result<()> {
     // "A weight is negative, too large or not a valid number". Keep an
     // explicit user choice intact, but make the safe precision the default.
     if is_tts && args.dtype.is_none() && device.is_metal() {
-        dtype = candle_core::DType::F32;
+        dtype = DType::F32;
         info!("TTS on Metal: using F32 for numerically stable sampling");
     }
 
@@ -1100,17 +1102,17 @@ pub async fn run(mut args: Args) -> Result<()> {
                                 prompt_ids.extend_from_slice(&[106, 107, 105, 4368, 107]);
                                 vlm.clear_kv_cache();
                                 let input_tensor =
-                                    candle_core::Tensor::new(prompt_ids.as_slice(), &device_clone)?
+                                    Tensor::new(prompt_ids.as_slice(), &device_clone)?
                                         .unsqueeze(0)?;
                                 let logits = vlm
                                     .forward(&input_tensor, Some(&image_embeds), 0)?
                                     .squeeze(0)?
                                     .squeeze(0)?
-                                    .to_dtype(candle_core::DType::F32)?;
+                                    .to_dtype(DType::F32)?;
                                 let mut tokens = prompt_ids.clone();
                                 let mut generated = Vec::new();
-                                let mut next_token = candle_nn::ops::softmax_last_dim(&logits)?
-                                    .argmax(candle_core::D::Minus1)?
+                                let mut next_token = softmax_last_dim(&logits)?
+                                    .argmax(D::Minus1)?
                                     .to_scalar::<u32>()?;
                                 generated.push(next_token);
                                 tokens.push(next_token);
@@ -1119,15 +1121,14 @@ pub async fn run(mut args: Args) -> Result<()> {
                                         break;
                                     }
                                     let input =
-                                        candle_core::Tensor::new(&[next_token], &device_clone)?
-                                            .unsqueeze(0)?;
+                                        Tensor::new(&[next_token], &device_clone)?.unsqueeze(0)?;
                                     let logits = vlm
                                         .forward(&input, None, tokens.len() - 1)?
                                         .squeeze(0)?
                                         .squeeze(0)?
-                                        .to_dtype(candle_core::DType::F32)?;
-                                    next_token = candle_nn::ops::softmax_last_dim(&logits)?
-                                        .argmax(candle_core::D::Minus1)?
+                                        .to_dtype(DType::F32)?;
+                                    next_token = softmax_last_dim(&logits)?
+                                        .argmax(D::Minus1)?
                                         .to_scalar::<u32>()?;
                                     generated.push(next_token);
                                     tokens.push(next_token);

@@ -12,13 +12,15 @@
 #[test]
 #[ignore = "needs a local KugelAudio checkpoint + tokenizer.json (CRANE_KUGELAUDIO_DIR, CRANE_KUGELAUDIO_TOKENIZER)"]
 fn kugelaudio_generate_is_well_formed() {
-    use candle_core::{DType, Device};
+    #[cfg(feature = "cuda")]
+    use crane_core::cuda_is_available;
     use crane_core::models::kugelaudio::model::special_tokens::{
         EOS_TOKEN_ID, SPEECH_DIFFUSION_ID, SPEECH_END_ID, SPEECH_START_ID,
     };
     use crane_core::models::kugelaudio::{
         KugelAudioGenerationConfig, KugelAudioModel, build_prompt,
     };
+    use crane_core::{DType, Device};
     use tokenizers::Tokenizer;
 
     let dir = std::env::var("CRANE_KUGELAUDIO_DIR").expect("set CRANE_KUGELAUDIO_DIR");
@@ -27,7 +29,7 @@ fn kugelaudio_generate_is_well_formed() {
 
     // CUDA → CUDA BF16; macOS → Metal F16; everything else → CPU F32.
     #[cfg(feature = "cuda")]
-    let (device, dtype) = if candle_core::utils::cuda_is_available() {
+    let (device, dtype) = if cuda_is_available() {
         (Device::new_cuda(0).unwrap(), DType::BF16)
     } else {
         (Device::Cpu, DType::F32)
