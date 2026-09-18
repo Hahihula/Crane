@@ -7,43 +7,87 @@
 //! users (hunyuan, qwen3).
 
 use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
-use candle_core::{DType, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{Linear, VarBuilder, linear_no_bias};
 use std::sync::Arc;
+
+/// A `QMatMul` with an optional bias. `QMatMul` itself has no bias — Qwen2's
+/// Q/K/V projections need this wrapper to be quantizable at all.
+#[derive(Clone)]
+pub struct QuantizedLinear {
+    pub matmul: QMatMul,
+    pub bias: Option<Tensor>,
+}
+
+impl QuantizedLinear {
+    pub fn new(qmm: QMatMul) -> Self {
+        Self {
+            matmul: qmm,
+            bias: None,
+        }
+    }
+
+    pub fn with_bias(qmm: QMatMul, bias: Tensor) -> Self {
+        Self {
+            matmul: qmm,
+            bias: Some(bias),
+        }
+    }
+
+    /// Apply the quantized matmul + optional bias. `QMatMul` dequantizes to
+    /// F32 internally and requires F32 input; we round-trip the input dtype
+    /// so BF16/F16 activation pipelines keep their dtype downstream
+    /// (residual adds, etc.).
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let input_dtype = xs.dtype();
+        let xs_f32 = if input_dtype != DType::F32 {
+            xs.to_dtype(DType::F32)?
+        } else {
+            xs.clone()
+        };
+        let out = self.matmul.forward(&xs_f32)?;
+        let out = match &self.bias {
+            Some(b) => out.broadcast_add(&b.to_dtype(DType::F32)?)?,
+            None => out,
+        };
+        if input_dtype != DType::F32 {
+            out.to_dtype(input_dtype)
+        } else {
+            Ok(out)
+        }
+    }
+}
 
 /// A linear layer that can be either a standard (f16/f32) Linear or a
 /// quantized QMatMul. Both implement Module::forward identically from the
 /// caller's perspective. This allows the same model code to serve both
 /// safetensors and GGUF weights with zero duplication.
+#[derive(Clone)]
 pub enum LinearLayer {
     Standard(Linear),
-    Quantized(QMatMul),
+    Quantized(QuantizedLinear),
+}
+
+impl LinearLayer {
+    /// Construct a bias-free [`LinearLayer::Quantized`] (the common case —
+    /// GGUF loaders for non-Qwen2 models, etc.).
+    pub fn quantized(qmm: QMatMul) -> Self {
+        Self::Quantized(QuantizedLinear::new(qmm))
+    }
+
+    /// Construct a [`LinearLayer::Quantized`] with a bias carried over
+    /// unquantized. Used by Qwen2's Q/K/V projections — `QMatMul` has no
+    /// bias of its own, so the bias lives alongside in the wrapper.
+    pub fn quantized_with_bias(qmm: QMatMul, bias: Tensor) -> Self {
+        Self::Quantized(QuantizedLinear::with_bias(qmm, bias))
+    }
 }
 
 impl Module for LinearLayer {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Standard(l) => l.forward(xs),
-            Self::Quantized(q) => {
-                // candle's QMatMul internally dequantizes weights to F32
-                // and requires F32 input. When the activation pipeline
-                // runs in BF16/F16 we must:
-                //   1. Cast input to F32 for the quantized matmul
-                //   2. Cast output back to the original dtype for
-                //      downstream binary ops (residual adds, etc.)
-                let input_dtype = xs.dtype();
-                let xs_f32 = if input_dtype != DType::F32 {
-                    xs.to_dtype(DType::F32)?
-                } else {
-                    xs.clone()
-                };
-                let out = q.forward(&xs_f32)?;
-                if input_dtype != DType::F32 {
-                    out.to_dtype(input_dtype)
-                } else {
-                    Ok(out)
-                }
-            },
+            Self::Quantized(q) => q.forward(xs),
         }
     }
 }
@@ -75,12 +119,10 @@ pub fn parse_ggml_dtype(name: &str) -> Result<GgmlDType> {
 ///
 /// K-quants need the input dim to be a multiple of 256; when it isn't, fall
 /// back to `Q8_0` (block size 32) so oddly-shaped projections still shrink
-/// instead of erroring out. Bias-carrying linears are not supported (QMatMul
-/// has no bias) — all Qwen 3.5 linears are bias-free.
+/// instead of erroring out. A bias, if present, is carried over unquantized
+/// (see [`QuantizedLinear`]) — e.g. Qwen2's biased Q/K/V projections.
 pub fn quantize_linear(linear: Linear, dtype: GgmlDType) -> Result<LinearLayer> {
-    if linear.bias().is_some() {
-        candle_core::bail!("ISQ does not support linears with a bias");
-    }
+    let bias = linear.bias().cloned();
     let weight = linear.weight();
     let in_dim = weight.dim(candle_core::D::Minus1)?;
     let dtype = if in_dim % dtype.block_size() == 0 {
@@ -93,7 +135,11 @@ pub fn quantize_linear(linear: Linear, dtype: GgmlDType) -> Result<LinearLayer> 
         return Ok(LinearLayer::Standard(linear));
     }
     let qt = QTensor::quantize(weight, dtype)?;
-    Ok(LinearLayer::Quantized(QMatMul::from_arc(Arc::new(qt))?))
+    let qmm = QMatMul::from_arc(Arc::new(qt))?;
+    Ok(match bias {
+        Some(b) => LinearLayer::quantized_with_bias(qmm, b),
+        None => LinearLayer::quantized(qmm),
+    })
 }
 
 /// Load a bias-free linear from `vb`, optionally quantizing it at load time.
@@ -113,4 +159,51 @@ pub fn linear_layer(
         None => Ok(LinearLayer::Standard(linear)),
         Some(dt) => quantize_linear(linear, dt),
     }
+}
+
+/// Like [`linear_layer`], but `vb_cpu` must be scoped to [`Device::Cpu`]
+/// and the result is quantized directly onto `target_device` via
+/// [`QTensor::quantize_onto`] instead of [`QTensor::quantize`].
+///
+/// Reads from a CPU-scoped `vb_cpu` so the transient unquantized weight is
+/// ordinary, promptly-freed heap memory that never touches the target
+/// device — only the smaller quantized buffer does. Used by the
+/// KugelAudio decoder's `new_with_quant` path: per-tensor GPU-side staging
+/// wasn't being reclaimed between layers otherwise on Metal with an 18GB
+/// unified-memory budget.
+pub fn quantize_linear_onto(
+    in_dim: usize,
+    out_dim: usize,
+    bias: bool,
+    vb_cpu: VarBuilder,
+    dtype: GgmlDType,
+    target_device: &Device,
+) -> Result<LinearLayer> {
+    debug_assert!(
+        vb_cpu.device().is_cpu(),
+        "quantize_linear_onto: vb_cpu must be scoped to Device::Cpu"
+    );
+    let weight = vb_cpu.get((out_dim, in_dim), "weight")?;
+    let bias = if bias {
+        Some(vb_cpu.get(out_dim, "bias")?.to_device(target_device)?)
+    } else {
+        None
+    };
+    let dtype = if in_dim % dtype.block_size() == 0 {
+        dtype
+    } else {
+        GgmlDType::Q8_0
+    };
+    if in_dim % dtype.block_size() != 0 {
+        // Even Q8_0 can't represent this shape; keep it in full precision
+        // (still only ever materialized on the target device once, here).
+        let weight = weight.to_device(target_device)?;
+        return Ok(LinearLayer::Standard(Linear::new(weight, bias)));
+    }
+    let qt = QTensor::quantize_onto(&weight, dtype, target_device)?;
+    let qmm = QMatMul::from_arc(Arc::new(qt))?;
+    Ok(match bias {
+        Some(b) => LinearLayer::quantized_with_bias(qmm, b),
+        None => LinearLayer::quantized(qmm),
+    })
 }

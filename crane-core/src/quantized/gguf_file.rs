@@ -63,7 +63,7 @@ impl<R: Read + Seek> Gguf<R> {
     pub fn linear(&mut self, name: &str) -> Result<crate::ops::linear::LinearLayer> {
         let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
         let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(ws))?;
-        Ok(crate::ops::linear::LinearLayer::Quantized(qmm))
+        Ok(crate::ops::linear::LinearLayer::quantized(qmm))
     }
 
     /// Load a tensor, dequantize, and create an `RmsNorm`.
