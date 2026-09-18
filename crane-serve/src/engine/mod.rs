@@ -29,6 +29,7 @@
 //! | `memory`        | GPU memory-limit parsing + usage queries          |
 
 pub mod backend;
+pub mod grammar;
 mod memory;
 pub mod model_factory;
 pub mod sampling;
@@ -44,6 +45,7 @@ pub use types::{EngineHandle, EngineRequest, EngineResponse, GenerationParams};
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -63,6 +65,20 @@ use sequence::{Sequence, SequenceStatus};
 /// step's intermediate state (causal-mask allocation, attention logits, GDN
 /// recurrent scratch) stays bounded. See [`InferenceEngine::step_prefill`].
 const PREFILL_CHUNK_SIZE: usize = 2048;
+
+/// Whether to log every tool-call grammar state transition and the
+/// resulting next-token mask (`CRANE_GRAMMAR_TRACE=1`).
+///
+/// Diagnostic for confirming whether `grammar::tool_call_skeleton`'s
+/// `<tool_call>` wrapper enforcement is actually engaging for a request,
+/// as opposed to silently degrading to unconstrained (e.g. because
+/// `VocabByteTable::tokens_matching_prefix` found no token able to start
+/// a forced literal — see [`InferenceEngine::new`]'s startup sanity log).
+#[must_use]
+fn grammar_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CRANE_GRAMMAR_TRACE").as_deref() == Ok("1"))
+}
 
 // ─────────────────────────────────────────────────────────────
 //  InferenceEngine
@@ -113,15 +129,28 @@ pub struct InferenceEngine {
     /// grant a short cooldown after preemption to avoid a deadlock where
     /// cuMemGetInfo always reports over-limit.
     eviction_cooldown: u32,
+    /// Token-id → decoded-text lookup for the whole vocabulary, built once
+    /// from the loaded model's tokenizer. Shared (via `Arc`) into every
+    /// sequence's grammar constraint, since it depends only on the model,
+    /// not the request. `None` for models that don't use the tool-call XML
+    /// skeleton grammar (see [`InferenceEngine::new`]'s `uses_xml_tool_format`
+    /// parameter).
+    vocab_byte_table: Option<Arc<grammar::VocabByteTable>>,
 }
 
 impl InferenceEngine {
     /// Create the engine and return a handle for submitting requests.
+    ///
+    /// `uses_xml_tool_format` gates the tool-call XML skeleton grammar
+    /// (see `grammar::tool_call_skeleton`): only Qwen3-Coder checkpoints
+    /// emit that format, so the grammar must stay off for every other
+    /// model or it would corrupt their (already well-formed) tool calls.
     pub fn new(
         model: Box<dyn ModelBackend>,
         max_concurrent: usize,
         decode_tokens_per_seq: usize,
         memory_config: MemoryConfig,
+        uses_xml_tool_format: bool,
     ) -> (Self, EngineHandle) {
         let (request_tx, request_rx) = mpsc::unbounded_channel();
         let num_layers = model.num_layers();
@@ -136,6 +165,22 @@ impl InferenceEngine {
             info!("Model does not support KV swap — limiting max_concurrent to {effective_max}");
         }
 
+        let vocab_byte_table = uses_xml_tool_format.then(|| {
+            let table = Arc::new(grammar::VocabByteTable::build(model.tokenizer()));
+            // One-time sanity check: does the vocab contain any token able to
+            // *start* forcing each literal the tool-call grammar relies on? A
+            // zero here means `apply_grammar_mask` will always see an empty
+            // allow-list for that literal and silently degrade to
+            // unconstrained (see `VocabByteTable::tokens_matching_prefix`'s
+            // doc) — i.e. the grammar would never actually constrain anything
+            // at that point, without erroring.
+            info!(
+                wrapper_open_from_idle = table.tokens_matching_prefix("\n<function=", 0).len(),
+                call_close = table.tokens_matching_prefix("\n</tool_call>", 0).len(),
+                "Grammar vocab sanity check (0 = that literal can never be forced)",
+            );
+            table
+        });
         let stats = Arc::new(EngineStats::new());
         let engine = Self {
             model,
@@ -156,6 +201,7 @@ impl InferenceEngine {
                 .unwrap_or_else(Instant::now),
             tracked_kv_bytes: 0,
             eviction_cooldown: 0,
+            vocab_byte_table,
         };
         let handle = EngineHandle { request_tx, stats };
         (engine, handle)
@@ -523,6 +569,18 @@ impl InferenceEngine {
     }
 
     fn accept_request(&mut self, req: EngineRequest) {
+        // Reject requests that were already queued when the engine hit a
+        // fatal GPU error. `EngineHandle::submit` rejects new requests once
+        // this flag is set, but a request enqueued just before the flag was
+        // set can still reach here.
+        if let Some(err) = self.stats.get_fatal_error() {
+            let _ = req.response_tx.send(EngineResponse::Error(format!(
+                "Engine is unavailable due to a fatal GPU error: {err}"
+            )));
+            self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
         let prompt_len = req.tokens.len();
         let tokenizer = self.model.tokenizer().clone();
 
@@ -555,6 +613,8 @@ impl InferenceEngine {
             rep_penalty = req.repetition_penalty,
             freq_penalty = req.frequency_penalty,
             pres_penalty = req.presence_penalty,
+            stop_sequences = ?req.stop,
+            eos_token_ids = ?req.eos_token_id,
             "New request accepted (queue: waiting={} running={})",
             self.scheduler.waiting.len() + 1,
             self.scheduler.running.len(),
@@ -564,6 +624,35 @@ impl InferenceEngine {
         self.stats
             .total_prompt_tokens
             .fetch_add(prompt_len as u64, Ordering::Relaxed);
+
+        // Constrains the tool-call XML skeleton so Qwen3-Coder's documented
+        // quirk of occasionally omitting the `<tool_call>` opener can't
+        // reach the client. `None` when the request offers no tools, or when
+        // the loaded model isn't Qwen3-Coder (`vocab_byte_table` is only
+        // built for that format — see `InferenceEngine::new`).
+        info!(
+            id = %req.id,
+            tool_count = req.tool_names.len(),
+            tool_names = ?req.tool_names,
+            "Grammar constraint: {}",
+            if req.tool_names.is_empty() {
+                "no tools offered, none constructed"
+            } else if self.vocab_byte_table.is_none() {
+                "tools offered, but model doesn't use the XML tool-call format — none constructed"
+            } else {
+                "constructed"
+            },
+        );
+        let grammar: Option<Box<dyn grammar::GrammarConstraint>> = if req.tool_names.is_empty() {
+            None
+        } else {
+            self.vocab_byte_table.as_ref().map(|vocab_byte_table| {
+                Box::new(grammar::tool_call_skeleton::ToolCallSkeleton::new(
+                    req.tool_names,
+                    vocab_byte_table.clone(),
+                )) as Box<dyn grammar::GrammarConstraint>
+            })
+        };
 
         let seq = Sequence {
             id: req.id.clone(),
@@ -581,12 +670,16 @@ impl InferenceEngine {
             top_k: req.top_k,
             max_tokens: effective_max_tokens,
             eos_token_id: req.eos_token_id,
+            grammar,
             repetition_penalty: req.repetition_penalty,
             frequency_penalty: req.frequency_penalty,
             presence_penalty: req.presence_penalty,
             repeat_last_n: 64,
             stop_sequences: req.stop,
             unsent_text: String::new(),
+            decode_start: None,
+            created_at: Instant::now(),
+            first_token_at: None,
             response_tx: req.response_tx,
         };
 
@@ -607,6 +700,10 @@ impl InferenceEngine {
             .filter(|(_, seq)| seq.response_tx.is_closed())
             .map(|(id, _)| id.clone())
             .collect();
+
+        if !cancelled.is_empty() {
+            debug!(count = cancelled.len(), "Detected cancelled sequences");
+        }
 
         for id in cancelled {
             warn!(id = %id, "Client disconnected, cancelling sequence");
@@ -711,6 +808,7 @@ impl InferenceEngine {
             let seq = self.sequences.get_mut(&seq_id).unwrap();
             seq.tokens.push(next_token);
             seq.status = SequenceStatus::Running;
+            seq.decode_start = Some(Instant::now());
         }
 
         info!(
@@ -813,6 +911,24 @@ impl InferenceEngine {
         }
     }
 
+    /// Finalize sequences that completed or were cancelled during a decode
+    /// round before the round loop itself exited (normally or via an error
+    /// return). Must be called on every exit path out of
+    /// `step_decode_batch`'s round loop, not just the success path, or these
+    /// sequences leak: their client never gets a terminal response and their
+    /// `seq_id` is never freed from the scheduler.
+    fn drain_pending_completions(&mut self, pending_finish: &[String], pending_cancel: &[String]) {
+        for id in pending_finish {
+            self.finish_sequence(id);
+        }
+        for id in pending_cancel {
+            self.stats
+                .cancelled_requests
+                .fetch_add(1, Ordering::Relaxed);
+            self.cleanup_sequence(id);
+        }
+    }
+
     /// Decode step for all running sequences — TRUE BATCHED forward.
     ///
     /// Uses **lazy eviction**: when a sequence completes or is cancelled
@@ -877,7 +993,9 @@ impl InferenceEngine {
             {
                 Ok(m) => m,
                 Err(e) => {
-                    error!("Mask build failed: {e}");
+                    for seq_id in &batch {
+                        self.send_error(seq_id, &format!("Mask build failed: {e}"));
+                    }
                     self.model.clear_kv_cache();
                     return;
                 },
@@ -926,8 +1044,16 @@ impl InferenceEngine {
             {
                 Ok(t) => t,
                 Err(e) => {
-                    error!("Decode input_ids upload failed: {e}");
+                    for (i, seq_id) in batch.iter().enumerate() {
+                        if alive[i] {
+                            self.send_error(
+                                seq_id,
+                                &format!("Decode input_ids upload failed: {e}"),
+                            );
+                        }
+                    }
                     self.model.clear_kv_cache();
+                    self.drain_pending_completions(&pending_finish, &pending_cancel);
                     return;
                 },
             };
@@ -953,6 +1079,7 @@ impl InferenceEngine {
                         }
                     }
                     self.model.clear_kv_cache();
+                    self.drain_pending_completions(&pending_finish, &pending_cancel);
                     return;
                 },
             };
@@ -1020,15 +1147,7 @@ impl InferenceEngine {
 
         self.save_extracted_batch_kv(&batch, &alive, &kv_lens, original_max_kv, rounds_done);
 
-        for id in &pending_finish {
-            self.finish_sequence(id);
-        }
-        for id in &pending_cancel {
-            self.stats
-                .cancelled_requests
-                .fetch_add(1, Ordering::Relaxed);
-            self.cleanup_sequence(id);
-        }
+        self.drain_pending_completions(&pending_finish, &pending_cancel);
 
         #[allow(clippy::cast_possible_truncation)]
         let decode_us = t0.elapsed().as_micros() as u64;
@@ -1256,6 +1375,26 @@ impl InferenceEngine {
 
         if let Some(seq) = self.sequences.get_mut(seq_id) {
             seq.unsent_text.push_str(&text);
+            if let Some(g) = seq.grammar.as_mut() {
+                g.advance(token_id, &text);
+                if grammar_trace_enabled() {
+                    let mask_desc = match g.token_mask() {
+                        grammar::TokenMask::Unconstrained => "unconstrained".to_string(),
+                        grammar::TokenMask::AllowOnly(ids) => format!("allow_only({})", ids.len()),
+                    };
+                    debug!(
+                        id = %seq_id,
+                        token_id,
+                        text = %text,
+                        allows_eos = g.allows_eos(),
+                        next_mask = %mask_desc,
+                        "CRANE_GRAMMAR_TRACE",
+                    );
+                }
+                if g.is_finished() {
+                    seq.grammar = None;
+                }
+            }
         }
     }
 
@@ -1273,13 +1412,17 @@ impl InferenceEngine {
             return;
         };
 
-        if let Some(seq) = self.sequences.get(seq_id)
-            && seq
+        if let Some(seq) = self.sequences.get_mut(seq_id) {
+            if seq.first_token_at.is_none() {
+                seq.first_token_at = Some(Instant::now());
+            }
+            if seq
                 .response_tx
                 .send(EngineResponse::Token { text, token_id: 0 })
                 .is_err()
-        {
-            debug!(id = %seq_id, "Response channel closed (client disconnected)");
+            {
+                debug!(id = %seq_id, "Response channel closed (client disconnected)");
+            }
         }
     }
 
@@ -1289,6 +1432,9 @@ impl InferenceEngine {
             let _ = seq.response_tx.send(EngineResponse::Error(msg.to_string()));
         }
         self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
+        if stats::is_fatal_gpu_error(msg) {
+            self.stats.set_fatal_error(msg);
+        }
         self.cleanup_sequence(seq_id);
     }
 
@@ -1301,6 +1447,13 @@ impl InferenceEngine {
             .sequences
             .get(seq_id)
             .is_some_and(|s| s.stop_sequence_match().is_some());
+
+        if stopped_by_stop_sequence
+            && let Some(seq) = self.sequences.get(seq_id)
+            && let Some(matched) = seq.stop_sequence_match()
+        {
+            debug!(id = %seq_id, matched, "Finishing sequence on stop-sequence match");
+        }
 
         let remaining = if stopped_by_stop_sequence {
             self.sequences
@@ -1326,8 +1479,11 @@ impl InferenceEngine {
         };
 
         if !remaining.is_empty()
-            && let Some(seq) = self.sequences.get(seq_id)
+            && let Some(seq) = self.sequences.get_mut(seq_id)
         {
+            if seq.first_token_at.is_none() {
+                seq.first_token_at = Some(Instant::now());
+            }
             let _ = seq.response_tx.send(EngineResponse::Token {
                 text: remaining,
                 token_id: 0,
@@ -1343,8 +1499,8 @@ impl InferenceEngine {
                 .decode(generated_ids, true)
                 .unwrap_or_default();
 
-            if let Some(stop_seq) = seq.stop_sequence_match() {
-                if let Some(pos) = full_text.rfind(stop_seq) {
+            if stopped_by_stop_sequence {
+                if let Some(pos) = full_text.rfind(seq.unsent_text.as_str()) {
                     full_text.truncate(pos);
                 } else {
                     warn!(
@@ -1355,13 +1511,21 @@ impl InferenceEngine {
                 }
             }
 
-            let finish_reason = seq.finish_reason().to_string();
+            let finish_reason = if stopped_by_stop_sequence {
+                "stop".to_string()
+            } else {
+                seq.finish_reason().to_string()
+            };
+            let decode_tok_s = seq.decode_tokens_per_sec();
+            let ttft_ms = seq.ttft_ms();
 
             info!(
                 id = %seq_id,
                 prompt_tokens = seq.prompt_len,
                 completion_tokens,
                 finish_reason = %finish_reason,
+                decode_tok_s = format!("{:.1}", decode_tok_s),
+                ttft_ms = ?ttft_ms,
                 "Sequence finished",
             );
 
@@ -1370,6 +1534,8 @@ impl InferenceEngine {
                 prompt_tokens: seq.prompt_len,
                 completion_tokens,
                 finish_reason,
+                ttft_ms,
+                decode_tokens_per_sec: decode_tok_s,
             });
 
             self.stats
@@ -1378,6 +1544,12 @@ impl InferenceEngine {
             self.stats
                 .completed_requests
                 .fetch_add(1, Ordering::Relaxed);
+            if let Some(ttft) = ttft_ms {
+                self.stats
+                    .total_ttft_us
+                    .fetch_add(ttft * 1000, Ordering::Relaxed);
+                self.stats.ttft_count.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         self.cleanup_sequence(seq_id);
