@@ -634,6 +634,11 @@ decode steps take exactly the single-pass path. Measured on an RX 7800 XT
   device sync, plus a per-stage breakdown. When the two are close the pass is
   dispatch-bound and no kernel change will help; `rocm-smi`'s busy counter
   cannot distinguish the two cases. Output goes to stderr, no `RUST_LOG` needed.
+- `CRANE_PROF_SYNC=1` — with `CRANE_PROF`, sync the device around every stage so
+  the per-stage numbers become *GPU* time instead of submission time. It removes
+  all CPU/GPU overlap, so read it as a breakdown of where the GPU time goes, not
+  as throughput. Without it a stage that happens to block (a host round-trip, a
+  kernel that waits) charges the whole drained queue to itself.
 - `CRANE_TOPK_HOST=1` — force the host sort for top-k sampling on ROCm
   instead of the GPU kernel (A/B the kernel against the path it replaces).
 - `cargo run -p crane-core --release --features cuda --bin gdn_bench`
@@ -816,6 +821,7 @@ above for context):
 | `CRANE_PREFILL_CHUNK` | `512` | Prefill chunk size in tokens. Prompts longer than this are fed through the KV/GDN caches in chunks, so peak VRAM grows linearly with context instead of quadratically. `0` disables chunking (single-pass prefill) |
 | `CRANE_PROF` | unset | Profile the forward pass: submission time vs. wall time after a device sync, with a per-stage breakdown. Separates dispatch-bound from GPU-bound. Prints to stderr |
 | `CRANE_PROF_EVERY` | `64` | Passes per `CRANE_PROF` summary line |
+| `CRANE_PROF_SYNC` | unset | With `CRANE_PROF`, sync around every stage so stage times are GPU time, not submission time (kills overlap — use to attribute, not to measure) |
 
 ## ⚡️ Speed
 
