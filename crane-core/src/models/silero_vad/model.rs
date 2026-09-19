@@ -585,7 +585,7 @@ impl Vad {
         let output = output.flatten_all()?.to_vec1::<f32>()?;
         debug_assert_eq!(output.len(), 1);
         let output = output[0];
-        log::info!("vad chunk prediction: {output}");
+        log::debug!("vad chunk prediction: {output}");
         // Make segmentation;
         self.make_segment(output);
         Ok(output)
