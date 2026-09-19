@@ -10,7 +10,7 @@
 
 use anyhow::{Error as E, Result};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Module, VarBuilder};
+use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use tokenizers::Tokenizer;
 
