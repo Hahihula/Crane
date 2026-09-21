@@ -1,11 +1,11 @@
 [package]
 name = "crane-examples"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]
-crane = { path = "../crane" }
-crane-core = { path = "../crane-core" }
+crane = { package = "crane-ai", version = "26.9.0", path = "../crane" }
+crane-core = { version = "26.9.0", path = "../crane-core" }
 candle-core = "0.11"
 anyhow = "1.0.100"
 image = "0.25.9"
