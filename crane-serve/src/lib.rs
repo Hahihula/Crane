@@ -1650,6 +1650,30 @@ mod auth_config_tests {
         assert_eq!(mask_api_key("abc"), "***");
         assert_eq!(mask_api_key(""), "");
     }
+
+    // `--api-key` combines `num_args = 0..=1` with `ArgAction::Append`, an
+    // unusual pairing — this pins down that repeated flags accumulate, a
+    // bare flag yields one empty string (the generation trigger), and an
+    // absent flag yields an empty vec (open access).
+    #[test]
+    fn api_key_flag_parses_repeat_bare_and_absent_forms() {
+        let repeated = Args::parse_from([
+            "crane-serve",
+            "-m",
+            "x",
+            "--api-key",
+            "k1",
+            "--api-key",
+            "k2",
+        ]);
+        assert_eq!(repeated.api_key, vec!["k1", "k2"]);
+
+        let bare = Args::parse_from(["crane-serve", "-m", "x", "--api-key"]);
+        assert_eq!(bare.api_key, vec![""]);
+
+        let absent = Args::parse_from(["crane-serve", "-m", "x"]);
+        assert!(absent.api_key.is_empty());
+    }
 }
 
 /// Exercises `auth::require_api_key` wired into a real router via
