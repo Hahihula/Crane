@@ -89,9 +89,12 @@ pub fn linear_f32(
     };
     let packed_slice = packed_slice.slice(packed_layout.start_offset()..);
     let output_buf = unsafe { dev.alloc::<f32>(rows * output_rows) }?;
-    let kernel = match encoding {
-        TernaryEncoding::Pq2_0 => "quant_ternary_pq2_matvec_f32",
-        TernaryEncoding::Ptq1_0 => "quant_ternary_ptq1_matvec_f32",
+    let batch4 = rows >= 4;
+    let kernel = match (encoding, batch4) {
+        (TernaryEncoding::Pq2_0, false) => "quant_ternary_pq2_matvec_f32",
+        (TernaryEncoding::Ptq1_0, false) => "quant_ternary_ptq1_matvec_f32",
+        (TernaryEncoding::Pq2_0, true) => "quant_ternary_pq2_matvec_batch4_f32",
+        (TernaryEncoding::Ptq1_0, true) => "quant_ternary_ptq1_matvec_batch4_f32",
     };
     let func = dev.get_or_load_custom_func(kernel, MODULE_NAME, ptx::QUANT_TERNARY)?;
     let rows_i = rows as i32;
@@ -106,8 +109,12 @@ pub fn linear_f32(
     builder.arg(&cols_i);
     unsafe {
         builder.launch(LaunchConfig {
-            grid_dim: (output_rows as u32, rows as u32, 1),
-            block_dim: (256, 1, 1),
+            grid_dim: (
+                output_rows.div_ceil(4) as u32,
+                if batch4 { rows.div_ceil(4) } else { rows } as u32,
+                1,
+            ),
+            block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         })
     }

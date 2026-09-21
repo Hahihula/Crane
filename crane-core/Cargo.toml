@@ -17,6 +17,9 @@ name = "gdn_bench"
 [[bin]]
 name = "topk_bench"
 
+[[bin]]
+name = "ternary_bench"
+
 # G2P hot-path performance benchmark (text_to_ipa, IpaNormalizer::normalize).
 [[bench]]
 name = "g2p"

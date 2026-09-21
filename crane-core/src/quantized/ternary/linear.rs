@@ -324,7 +324,13 @@ pub(crate) fn fwht_blocks(values: &mut [f32], block_size: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{GdnPermutation, permute_gdn};
+    use super::{GdnPermutation, HadamardMode, TernaryLinear, TernaryWeight, permute_gdn};
+    #[cfg(feature = "cuda")]
+    use crate::quantized::ternary::TernaryEncoding;
+    #[cfg(feature = "cuda")]
+    use candle_core::{Device, Result, Tensor};
+    #[cfg(feature = "cuda")]
+    use std::sync::Arc;
 
     #[test]
     fn gdn_permutation_matches_grouped_layout() {
@@ -338,5 +344,82 @@ mod tests {
             },
         );
         assert_eq!(values, [0., 1., 4., 5., 8., 9., 2., 3., 6., 7., 10., 11.]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_matches_cpu_for_both_ternary_encodings() -> Result<()> {
+        if !candle_core::utils::cuda_is_available() {
+            return Ok(());
+        }
+        let cuda = Device::new_cuda(0)?;
+        for encoding in [TernaryEncoding::Ptq1_0, TernaryEncoding::Pq2_0] {
+            let rows = 7;
+            let cols = 128;
+            let mut packed = vec![0u8; rows * encoding.block_bytes()];
+            let scale = half::f16::from_f32(0.25).to_bits().to_le_bytes();
+            for (block_index, block) in packed.chunks_exact_mut(encoding.block_bytes()).enumerate()
+            {
+                match encoding {
+                    TernaryEncoding::Pq2_0 => {
+                        block[..2].copy_from_slice(&scale);
+                        block[2..].fill((block_index as u8).wrapping_mul(37));
+                    },
+                    TernaryEncoding::Ptq1_0 => {
+                        block[..26].fill(97u8.wrapping_add(block_index as u8 * 11));
+                        block[26..].copy_from_slice(&scale);
+                    },
+                }
+            }
+            let signs = Arc::new(
+                (0..cols)
+                    .map(|index| if index % 3 == 0 { -1.0 } else { 1.0 })
+                    .collect::<Vec<_>>(),
+            );
+            let input_rows = 5;
+            let input = (0..input_rows * cols)
+                .map(|index| (index as f32 * 0.03125).sin())
+                .collect::<Vec<_>>();
+            let cpu = TernaryLinear::new(
+                Arc::new(TernaryWeight::new(
+                    encoding,
+                    packed.clone(),
+                    rows,
+                    cols,
+                    &Device::Cpu,
+                )?),
+                signs.clone(),
+                128,
+                HadamardMode::Forward,
+                None,
+            )?;
+            let gpu = TernaryLinear::new(
+                Arc::new(TernaryWeight::new(encoding, packed, rows, cols, &cuda)?),
+                signs,
+                128,
+                HadamardMode::Forward,
+                None,
+            )?;
+            let expected = cpu
+                .forward_f32(&Tensor::from_vec(
+                    input.clone(),
+                    (input_rows, cols),
+                    &Device::Cpu,
+                )?)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let actual = gpu
+                .forward_f32(&Tensor::from_vec(input, (input_rows, cols), &cuda)?)?
+                .to_device(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let max_error = expected
+                .iter()
+                .zip(actual.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_error < 1e-3, "{encoding:?} max error {max_error}");
+        }
+        Ok(())
     }
 }

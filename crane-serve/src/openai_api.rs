@@ -18,7 +18,11 @@ use serde::{Deserialize, Serialize};
 // ═════════════════════════════════════════════════════════════
 
 fn default_max_tokens() -> usize {
-    512
+    // Omitted means "generate until an EOS/stop sequence".  The engine does
+    // not pre-allocate from this value, and a configured `--max-seq-len`
+    // still caps the request to the remaining context window.  Keep an
+    // explicitly supplied `max_tokens` / `max_completion_tokens` authoritative.
+    usize::MAX
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -32,6 +36,8 @@ fn default_max_tokens() -> usize {
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    /// Maximum completion length. When omitted, generation continues until
+    /// EOS, a stop sequence, cancellation, or the server context limit.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     /// OpenAI's newer alias for `max_tokens`; takes precedence when present.
@@ -374,6 +380,8 @@ impl ChunkDelta {
 pub struct CompletionRequest {
     pub model: String,
     pub prompt: StringOrArray,
+    /// Maximum completion length. When omitted, generation continues until
+    /// EOS, a stop sequence, cancellation, or the server context limit.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     /// OpenAI's newer alias for `max_tokens`; takes precedence when present.
@@ -629,4 +637,31 @@ pub struct ErrorDetail {
     pub message: String,
     pub r#type: String,
     pub code: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatCompletionRequest, CompletionRequest};
+
+    #[test]
+    fn omitted_text_generation_limit_is_unbounded() {
+        let chat: ChatCompletionRequest =
+            serde_json::from_str(r#"{"model":"test","messages":[]}"#).unwrap();
+        let completion: CompletionRequest =
+            serde_json::from_str(r#"{"model":"test","prompt":"hello"}"#).unwrap();
+
+        assert_eq!(chat.max_tokens, usize::MAX);
+        assert_eq!(completion.max_tokens, usize::MAX);
+    }
+
+    #[test]
+    fn explicit_text_generation_limits_are_preserved() {
+        let chat: ChatCompletionRequest = serde_json::from_str(
+            r#"{"model":"test","messages":[],"max_tokens":123,"max_completion_tokens":456}"#,
+        )
+        .unwrap();
+
+        assert_eq!(chat.max_tokens, 123);
+        assert_eq!(chat.max_completion_tokens, Some(456));
+    }
 }
