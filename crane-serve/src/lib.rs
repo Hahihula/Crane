@@ -100,6 +100,23 @@ pub struct Args {
     /// default; this is an opt-out, not the default.
     #[arg(long)]
     pub text_only: bool,
+    /// API key required to access non-exempt endpoints (`/health`, UI assets
+    /// excluded). Repeatable to configure multiple valid keys. Pass with no
+    /// value (`--api-key`) to generate a random key printed to stdout at
+    /// startup. The `CRANE_API_KEY` env var always requires a value — key
+    /// generation is CLI-only. Unset means open access (default).
+    #[arg(
+        long,
+        env = "CRANE_API_KEY",
+        num_args = 0..=1,
+        default_missing_value = "",
+        action = clap::ArgAction::Append
+    )]
+    pub api_key: Vec<String>,
+    /// File with one API key per line; `#`-prefixed lines are comments.
+    /// Combines with `--api-key`.
+    #[arg(long, env = "CRANE_API_KEY_FILE")]
+    pub api_key_file: Option<String>,
 }
 
 pub struct AppState {
@@ -134,6 +151,8 @@ pub struct AppState {
     pub decode_tokens_per_seq: usize,
     pub max_seq_len: usize,
     pub gpu_memory_limit: String,
+    /// Valid API keys. Empty means auth is disabled (open access).
+    pub api_keys: Vec<String>,
 }
 
 pub fn now_epoch() -> u64 {
@@ -164,6 +183,47 @@ pub fn make_error(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorRespo
             },
         }),
     )
+}
+
+/// Merge CLI keys and key-file keys into a deduplicated list, preserving
+/// first-seen order. Empty strings (from a bare `--api-key`) are dropped —
+/// key generation is handled separately by callers that need it.
+fn load_api_keys(cli_keys: &[String], key_file: Option<&str>) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for key in cli_keys {
+        if !key.is_empty() && seen.insert(key.clone()) {
+            keys.push(key.clone());
+        }
+    }
+
+    if let Some(path) = key_file {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read API key file {path}: {e}"))?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && seen.insert(trimmed.to_string())
+            {
+                keys.push(trimmed.to_string());
+            }
+        }
+    }
+
+    Ok(keys)
+}
+
+/// Mask all but the last 4 characters of an API key for safe logging, e.g.
+/// `sk-mysecretkey` becomes `****tkey`. Keys of 4 chars or fewer are fully
+/// masked.
+fn mask_api_key(key: &str) -> String {
+    let len = key.chars().count();
+    if len <= 4 {
+        "*".repeat(len)
+    } else {
+        let visible: String = key.chars().skip(len - 4).collect();
+        format!("****{visible}")
+    }
 }
 
 pub fn init_logging() {
@@ -1299,6 +1359,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         .gpu_memory_limit
         .clone()
         .unwrap_or_else(|| "unlimited".to_string());
+    let api_keys = load_api_keys(&args.api_key, args.api_key_file.as_deref())?;
     let state = Arc::new(AppState {
         engine: engine_handle,
         model_name: model_name.clone(),
@@ -1324,6 +1385,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         decode_tokens_per_seq: args.decode_tokens_per_seq,
         max_seq_len: args.max_seq_len,
         gpu_memory_limit: gpu_memory_limit_display,
+        api_keys: api_keys.clone(),
     });
     let app = build_router_with_ui(state.clone(), args.ui);
     let addr = format!("{}:{}", args.host, args.port);
@@ -1420,6 +1482,16 @@ pub async fn run(mut args: Args) -> Result<()> {
     if args.ui {
         info!(ui = %format!("http://{local_addr}/"), "browser UI enabled");
     }
+    match api_keys.as_slice() {
+        [] => {},
+        [key] => info!(key = %mask_api_key(key), "API key authentication enabled"),
+        keys => info!(count = keys.len(), "API key authentication enabled"),
+    }
+    if !api_keys.is_empty() && args.host == "0.0.0.0" {
+        tracing::warn!(
+            "API key configured but server binds 0.0.0.0 without TLS — keys are sent in cleartext over the network"
+        );
+    }
     serve.await?;
     Ok(())
 }
@@ -1482,6 +1554,51 @@ pub fn build_router_with_ui(state: Arc<AppState>, ui_enabled: bool) -> Router {
     };
 
     app.with_state(state)
+}
+
+#[cfg(test)]
+mod auth_config_tests {
+    use super::*;
+
+    // Verifies CLI keys and key-file keys are merged, empty CLI entries are
+    // dropped, comments/blank lines in the file are skipped, and duplicates
+    // across both sources are removed while preserving first-seen order.
+    #[test]
+    fn load_api_keys_merges_and_dedups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.txt");
+        std::fs::write(&path, "# comment\n\nkey2\nkey3\nkey1\n").unwrap();
+
+        let cli_keys = vec!["key1".to_string(), String::new(), "key1".to_string()];
+        let keys = load_api_keys(&cli_keys, Some(path.to_str().unwrap())).unwrap();
+
+        assert_eq!(keys, vec!["key1", "key2", "key3"]);
+    }
+
+    // Verifies an empty CLI key list with no key file yields no keys (open access).
+    #[test]
+    fn load_api_keys_empty_when_unconfigured() {
+        let keys = load_api_keys(&[], None).unwrap();
+        assert!(keys.is_empty());
+    }
+
+    // Verifies a missing key file surfaces an error instead of silently
+    // producing no keys.
+    #[test]
+    fn load_api_keys_errors_on_missing_file() {
+        assert!(load_api_keys(&[], Some("/nonexistent/path/keys.txt")).is_err());
+    }
+
+    #[test]
+    fn mask_api_key_keeps_last_four_chars() {
+        assert_eq!(mask_api_key("sk-mysecretkey"), "****tkey");
+    }
+
+    #[test]
+    fn mask_api_key_fully_masks_short_keys() {
+        assert_eq!(mask_api_key("abc"), "***");
+        assert_eq!(mask_api_key(""), "");
+    }
 }
 
 #[cfg(test)]
