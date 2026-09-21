@@ -184,16 +184,14 @@ impl AutoTokenizer {
         path: P,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         use crate::utils::tokenizer_utils::{
-            build_tokenizer_from_gguf_path, extract_chat_template_from_gguf,
+            build_tokenizer_from_gguf, extract_chat_template_from_gguf,
         };
-        use candle_core::quantized::gguf_file::Content;
 
         let path = path.as_ref();
-        let mut file = std::fs::File::open(path)?;
-        let ct = Content::read(&mut file)?;
+        let mmap = crate::quantized::gguf_file::mmap_gguf_file(path)?;
+        let (ct, _) = crate::quantized::extended_gguf::read_content(mmap.as_ref())?;
 
-        let tokenizer = build_tokenizer_from_gguf_path(path)?
-            .ok_or_else(|| "GGUF lacks tokenizer.ggml.tokens / merges".to_string())?;
+        let tokenizer = build_tokenizer_from_gguf(&ct)?;
 
         // Populate the chat-template-relevant fields of AutoTokenizerConfig
         // from GGUF metadata. bos/eos/pad ids are read when available; the

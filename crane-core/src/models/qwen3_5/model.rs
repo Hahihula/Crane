@@ -182,6 +182,24 @@ impl Qwen3_5TextModel {
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
+        Self::from_gguf_impl(ct, reader, device, None)
+    }
+
+    pub fn from_gguf_extended<R: std::io::Read + std::io::Seek>(
+        ct: candle_core::quantized::gguf_file::Content,
+        reader: &mut R,
+        device: &Device,
+        extended: crate::quantized::extended_gguf::ExtendedGgufInfo,
+    ) -> Result<Self> {
+        Self::from_gguf_impl(ct, reader, device, Some(extended))
+    }
+
+    fn from_gguf_impl<R: std::io::Read + std::io::Seek>(
+        ct: candle_core::quantized::gguf_file::Content,
+        reader: &mut R,
+        device: &Device,
+        extended: Option<crate::quantized::extended_gguf::ExtendedGgufInfo>,
+    ) -> Result<Self> {
         // QMatMul handles quantized weights internally; dequantized side
         // tensors (norms, conv kernels, embeddings) use a compute dtype of
         // BF16 on CUDA and F16 on Metal (the F32 embedding alone would cost
@@ -193,7 +211,10 @@ impl Qwen3_5TextModel {
         } else {
             DType::F32
         };
-        let mut gg = Gguf::new(ct, reader, device.clone(), dtype);
+        let mut gg = match extended {
+            Some(info) => Gguf::new_extended(ct, reader, device.clone(), dtype, info)?,
+            None => Gguf::new(ct, reader, device.clone(), dtype),
+        };
 
         let arch = gg
             .metadata()
@@ -771,7 +792,7 @@ impl Model {
         let mmap = crate::quantized::gguf_file::mmap_gguf_file(gguf_path)
             .with_context(|| format!("mmap GGUF file {model_path}"))?;
         let mut cursor = std::io::Cursor::new(mmap.as_ref());
-        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)?;
+        let (ct, extended) = crate::quantized::extended_gguf::read_content(mmap.as_ref())?;
         eprintln!(
             "[qwen3_5] GGUF loaded: {} tensors, {} metadata entries",
             ct.tensor_infos.len(),
@@ -794,7 +815,15 @@ impl Model {
         }
         merge_canonical_eos_ids(&mut eos_token_ids, &tokenizer.get_vocab(true));
 
-        let inner = Qwen3_5TextModel::from_gguf(ct, &mut cursor, device)?;
+        let inner = if extended.is_ternary() {
+            eprintln!(
+                "[qwen3_5] detected Prism ternary GGUF: {} PTQ1_0/PQ2_0 tensors",
+                extended.tensors.len()
+            );
+            Qwen3_5TextModel::from_gguf_extended(ct, &mut cursor, device, extended)?
+        } else {
+            Qwen3_5TextModel::from_gguf(ct, &mut cursor, device)?
+        };
         let dtype = inner.dtype();
 
         Ok(Self {

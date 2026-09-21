@@ -325,9 +325,9 @@ pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
 /// `tokenizer.json`); errors out on real I/O / parse problems.
 pub fn build_tokenizer_from_gguf_path<P: AsRef<Path>>(path: P) -> Result<Option<Tokenizer>> {
     let path = path.as_ref();
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("open GGUF file {}", path.display()))?;
-    let ct = Content::read(&mut file)
+    let mmap = crate::quantized::gguf_file::mmap_gguf_file(path)
+        .with_context(|| format!("open GGUF file {}", path.display()))?;
+    let (ct, _) = crate::quantized::extended_gguf::read_content(mmap.as_ref())
         .with_context(|| format!("parse GGUF header of {}", path.display()))?;
     if !gguf_has_embedded_tokenizer(&ct) {
         return Ok(None);

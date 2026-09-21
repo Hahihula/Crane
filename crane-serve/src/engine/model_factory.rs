@@ -464,8 +464,12 @@ fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
     if !is_gguf {
         return None;
     }
-    let mut file = std::fs::File::open(path).ok()?;
-    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).ok()?;
+    // Use Crane's extended parser here as well as in the model loader. A
+    // direct Candle parse rejects Prism's PTQ1_0/PQ2_0 tensor ids before we
+    // can read `general.architecture`, causing `--model-type auto` to route a
+    // Bonsai GGUF to the fallback backend.
+    let mmap = crane_core::quantized::gguf_file::mmap_gguf_file(path).ok()?;
+    let (ct, _) = crane_core::quantized::extended_gguf::read_content(mmap.as_ref()).ok()?;
     let arch = ct
         .metadata
         .get("general.architecture")?
@@ -797,6 +801,13 @@ pub fn create_asr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "needs a local Prism ternary GGUF (CRANE_TERNARY_GGUF)"]
+    fn detect_prism_ternary_gguf_from_extended_header() {
+        let path = std::env::var("CRANE_TERNARY_GGUF").expect("set CRANE_TERNARY_GGUF");
+        assert_eq!(detect_model_type(&path), ModelType::Qwen3_5);
+    }
 
     // ── ModelType::from_str ──
 

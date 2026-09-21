@@ -8,8 +8,12 @@
 use candle_core::quantized::{QTensor, gguf_file};
 use candle_core::{DType, Device, Result};
 use candle_nn::RmsNorm;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek};
 use std::sync::Arc;
+
+use super::extended_gguf::ExtendedGgufInfo;
+use super::ternary::{GdnPermutation, HadamardMode, TernaryLinear, TernaryWeight};
 
 /// Opens and memory-maps a GGUF file for zero-syscall tensor reads.
 ///
@@ -43,6 +47,16 @@ pub struct Gguf<R: Read + Seek> {
     /// their own internal dtype and the `LinearLayer` wrapper casts their
     /// output to the input's dtype.
     dtype: DType,
+    ternary: Option<TernaryContext>,
+}
+
+struct TernaryContext {
+    tensors: ExtendedGgufInfo,
+    block_size: usize,
+    forward: HashSet<String>,
+    inverse: HashSet<String>,
+    signs: HashMap<usize, Arc<Vec<f32>>>,
+    gdn_geometry: Option<(usize, usize)>,
 }
 
 impl<R: Read + Seek> Gguf<R> {
@@ -52,7 +66,26 @@ impl<R: Read + Seek> Gguf<R> {
             reader,
             device,
             dtype,
+            ternary: None,
         }
+    }
+
+    /// Construct a GGUF reader with Prism PTQ1_0/PQ2_0 tensor information.
+    pub fn new_extended(
+        ct: gguf_file::Content,
+        reader: R,
+        device: Device,
+        dtype: DType,
+        tensors: ExtendedGgufInfo,
+    ) -> Result<Self> {
+        let ternary = TernaryContext::from_metadata(&ct, tensors)?;
+        Ok(Self {
+            ct,
+            reader,
+            device,
+            dtype,
+            ternary: Some(ternary),
+        })
     }
 
     /// Load a quantized tensor and wrap as a `LinearLayer` (`QMatMul`).
@@ -61,9 +94,94 @@ impl<R: Read + Seek> Gguf<R> {
     ///
     /// Returns an error if the named tensor is missing or malformed.
     pub fn linear(&mut self, name: &str) -> Result<crate::ops::linear::LinearLayer> {
+        if self
+            .ternary
+            .as_ref()
+            .is_some_and(|ctx| ctx.tensors.tensors.contains_key(name))
+        {
+            let layer = self.ternary_linear(name)?;
+            return Ok(crate::ops::linear::LinearLayer::Ternary(layer));
+        }
         let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
         let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(ws))?;
         Ok(crate::ops::linear::LinearLayer::quantized(qmm))
+    }
+
+    fn ternary_linear(&mut self, name: &str) -> Result<TernaryLinear> {
+        let (weight, signs, mode, block_size) = self.ternary_weight(name)?;
+        let gdn_permutation = self
+            .ternary
+            .as_ref()
+            .and_then(|ctx| ctx.gdn_geometry)
+            .filter(|_| name.contains(".ssm_out."))
+            .map(|(value_heads, key_heads)| GdnPermutation {
+                head_dim: weight.cols() / value_heads,
+                key_heads,
+                repeats: value_heads / key_heads,
+            });
+        TernaryLinear::new(weight, signs, block_size, mode, gdn_permutation)
+    }
+
+    fn ternary_weight(
+        &mut self,
+        name: &str,
+    ) -> Result<(Arc<TernaryWeight>, Arc<Vec<f32>>, HadamardMode, usize)> {
+        let (info, mode, signs, block_size) = {
+            let ctx = self
+                .ternary
+                .as_ref()
+                .ok_or_else(|| candle_core::Error::Msg("ternary GGUF context is missing".into()))?;
+            let info = ctx
+                .tensors
+                .tensors
+                .get(name)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing ternary tensor {name}")))?
+                .clone();
+            let mode = if ctx.forward.contains(name) {
+                HadamardMode::Forward
+            } else if ctx.inverse.contains(name) {
+                HadamardMode::Inverse
+            } else {
+                HadamardMode::None
+            };
+            let cols = *info.shape.get(1).unwrap_or(&0);
+            let signs = if mode == HadamardMode::None {
+                Arc::new(vec![1.0; cols])
+            } else {
+                ctx.signs.get(&cols).cloned().ok_or_else(|| {
+                    candle_core::Error::Msg(format!("missing Hadamard signs for width {cols}"))
+                })?
+            };
+            (info, mode, signs, ctx.block_size)
+        };
+        if info.shape.len() != 2 {
+            candle_core::bail!("ternary linear {name} must be rank 2, got {:?}", info.shape)
+        }
+        let (rows, cols) = (info.shape[0], info.shape[1]);
+        let bytes = rows
+            .checked_mul(cols / 128)
+            .and_then(|n| n.checked_mul(info.encoding.block_bytes()))
+            .ok_or_else(|| {
+                candle_core::Error::Msg(format!("ternary tensor {name} size overflow"))
+            })?;
+        let absolute = self
+            .ct
+            .tensor_data_offset
+            .checked_add(info.offset)
+            .ok_or_else(|| {
+                candle_core::Error::Msg(format!("ternary tensor {name} offset overflow"))
+            })?;
+        self.reader.seek(std::io::SeekFrom::Start(absolute))?;
+        let mut packed = vec![0u8; bytes];
+        self.reader.read_exact(&mut packed)?;
+        let weight = Arc::new(TernaryWeight::new(
+            info.encoding,
+            packed,
+            rows,
+            cols,
+            &self.device,
+        )?);
+        Ok((weight, signs, mode, block_size))
     }
 
     /// Load a tensor, dequantize, and create an `RmsNorm`.
@@ -92,6 +210,21 @@ impl<R: Read + Seek> Gguf<R> {
         name: &str,
         hidden_size: usize,
     ) -> Result<crate::models::modules::embedding::EmbeddingLayer> {
+        if self
+            .ternary
+            .as_ref()
+            .is_some_and(|ctx| ctx.tensors.tensors.contains_key(name))
+        {
+            let (weight, signs, mode, block_size) = self.ternary_weight(name)?;
+            if mode != HadamardMode::Inverse {
+                candle_core::bail!("ternary embedding {name} must use inverse Hadamard metadata")
+            }
+            return Ok(
+                crate::models::modules::embedding::EmbeddingLayer::from_ternary(
+                    weight, signs, block_size, self.dtype,
+                ),
+            );
+        }
         let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
         crate::models::modules::embedding::EmbeddingLayer::from_qtensor(ws, hidden_size, self.dtype)
     }
@@ -137,6 +270,115 @@ impl<R: Read + Seek> Gguf<R> {
     /// Access GGUF metadata.
     pub fn metadata(&self) -> &std::collections::HashMap<String, gguf_file::Value> {
         &self.ct.metadata
+    }
+}
+
+impl TernaryContext {
+    fn from_metadata(ct: &gguf_file::Content, tensors: ExtendedGgufInfo) -> Result<Self> {
+        let u32_value = |key: &str| -> Result<usize> {
+            ct.metadata
+                .get(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing GGUF metadata {key}")))?
+                .to_u32()
+                .map(|v| v as usize)
+        };
+        let string_value = |key: &str| -> Result<String> {
+            ct.metadata
+                .get(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing GGUF metadata {key}")))?
+                .to_string()
+                .cloned()
+        };
+        if u32_value("prism.hadamard.version")? != 1 {
+            candle_core::bail!("unsupported prism.hadamard.version")
+        }
+        let block_size = u32_value("prism.hadamard.block_size")?;
+        if !block_size.is_power_of_two()
+            || string_value("prism.hadamard.transform")? != "normalized-sylvester-walsh-hadamard"
+            || string_value("prism.hadamard.axis")? != "input-last-dimension"
+        {
+            candle_core::bail!("unsupported Prism Hadamard configuration")
+        }
+        let strings = |key: &str| -> Result<HashSet<String>> {
+            let values = ct
+                .metadata
+                .get(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing GGUF metadata {key}")))?
+                .to_vec()?;
+            values
+                .iter()
+                .map(|v| v.to_string().cloned())
+                .collect::<Result<HashSet<_>>>()
+        };
+        let forward = strings("prism.hadamard.weight_names")?;
+        let inverse = strings("prism.hadamard.inverse_weight_names")?;
+        let widths = ct
+            .metadata
+            .get("prism.hadamard.sign_widths")
+            .ok_or_else(|| candle_core::Error::Msg("missing prism.hadamard.sign_widths".into()))?
+            .to_vec()?;
+        let values = ct
+            .metadata
+            .get("prism.hadamard.sign_values")
+            .ok_or_else(|| candle_core::Error::Msg("missing prism.hadamard.sign_values".into()))?
+            .to_vec()?;
+        let mut offset = 0usize;
+        let mut signs = HashMap::new();
+        for width in widths {
+            let width = width.to_i32()? as usize;
+            let end = offset + width;
+            if width % block_size != 0 || end > values.len() {
+                candle_core::bail!("invalid Prism Hadamard sign table")
+            }
+            let row = values[offset..end]
+                .iter()
+                .map(|v| v.to_i32().map(|x| x as f32))
+                .collect::<Result<Vec<_>>>()?;
+            if row.iter().any(|&v| v != -1.0 && v != 1.0) {
+                candle_core::bail!("Prism Hadamard signs must be +/-1")
+            }
+            signs.insert(width, Arc::new(row));
+            offset = end;
+        }
+        if offset != values.len() {
+            candle_core::bail!("Prism Hadamard sign table length mismatch")
+        }
+        let gdn_grouped = matches!(
+            ct.metadata.get("prism.hadamard.gdn_v_grouped"),
+            Some(gguf_file::Value::Bool(true))
+        );
+        let gdn_geometry = if gdn_grouped {
+            let arch = ct
+                .metadata
+                .get("general.architecture")
+                .and_then(|v| v.to_string().ok())
+                .ok_or_else(|| candle_core::Error::Msg("missing GGUF architecture".into()))?;
+            let metadata_usize = |suffix: &str| -> Result<usize> {
+                ct.metadata
+                    .get(&format!("{arch}.{suffix}"))
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg(format!("missing GGUF metadata {arch}.{suffix}"))
+                    })?
+                    .to_u32()
+                    .map(|v| v as usize)
+            };
+            let value_heads = metadata_usize("ssm.time_step_rank")?;
+            let key_heads = metadata_usize("ssm.group_count")?;
+            if key_heads == 0 || value_heads == 0 || value_heads % key_heads != 0 {
+                candle_core::bail!("invalid Prism GDN head geometry")
+            }
+            Some((value_heads, key_heads))
+        } else {
+            None
+        };
+        Ok(Self {
+            tensors,
+            block_size,
+            forward,
+            inverse,
+            signs,
+            gdn_geometry,
+        })
     }
 }
 

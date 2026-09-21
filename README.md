@@ -18,12 +18,19 @@
 **Crane (🦩)** - **C**andle-based **R**ust **A**ccelerated **N**eural **E**ngine
 A high-performance inference framework leveraging Rust's Candle for maximum speed on CPU/GPU.
 
+> **🚀 Heavyweight release: Bonsai 2 Ternary 27B is now natively supported!**
+> Crane loads the original Prism GGUF directly, automatically detects
+> **PTQ1_0 / PQ2_0**, and runs it on **CPU or NVIDIA CUDA** through the modular
+> `TernaryLinear` backend—without patching or forking Candle. Both `chat_cli`
+> and the OpenAI-compatible `crane-serve` work with the same `.gguf` file.
+
 **Supported Models**:
 
 - [ ] more to come....
 - [ ] Qwen3.5-VLA, Qwen3.5-GR00T, Pi0.5;
 - [ ] Audio8-TTS;
 - [x] PaddleOCR-v6;
+- [x] **[Bonsai 2 Ternary 27B](https://modelscope.cn/models/prism-ml/Ternary-Bonsai-2-27B-gguf)** (native Prism PTQ1_0 + PQ2_0 GGUF, automatic detection, CPU/CUDA, `chat_cli` + `crane-serve`)
 - [x] Qwen 3.6 / Qwen 3.8 (27B dense, text + vision, thinking control) — same architecture as Qwen 3.5, scaled up
 - [x] Qwen 3.5 (0.8B; hybrid Gated Delta Net + softmax attention, CPU/CUDA/Metal) + Ornith-1.0-9B (agentic, tool calling)
 - [x] Hunyuan Dense
@@ -72,6 +79,7 @@ We include:
 - VAD;
 - .... (Any AI ability you want power with AI.)
 
+![Qwen3.5 27B support runing local with 16GB mem!](data/assets/qwen3.5-27b.png)
 
 ![](data/aa.gif)
 
@@ -80,6 +88,7 @@ We include:
 
 ## 🔥 Updates
 
+- **`2026.09.21`**: 🌳 **Heavyweight support for Bonsai 2 Ternary 27B!** Crane now loads Prism's PTQ1_0 (GGUF type 143) and PQ2_0 (type 142) files directly, auto-detects the ternary format, and routes only the affected weights through a modular `TernaryLinear` backend. Native CPU and CUDA kernels cover ternary matvec, normalized blockwise Hadamard transforms, and Qwen 3.5 GDN value-head regrouping; ordinary GGUF models continue through the existing Candle path. No Candle fork or dependency patch is required. The same GGUF works in `chat_cli` and the OpenAI/SGLang-compatible `crane-serve`.
 - **`2026.09.15`**: 🍎 **KugelAudio Metal support verified + Q4_0 in-situ quantization for low-VRAM/low-RAM.** Metal was already wired up at the device-selection level; added Metal-specific regression tests (conv tokenizer encoder/decoder, decoder backbone, diffusion head, DPM-Solver++ scheduler) confirming no CUDA-only code paths anywhere in the port. New `--quant q4_0` (any `GgmlDType`, or `CRANE_ISQ`) in-situ-quantizes the ~7B-parameter Qwen2 decoder's Q/K/V/O and MLP projections as they load — `quantize_linear_onto` reads each tensor from a CPU-scoped `VarBuilder` and quantizes it directly onto the target device, so the transient bf16/f16 weight never occupies target-device (GPU/unified) memory, only the much smaller quantized buffer does. `embed_tokens`/`lm_head` (untied, ~1 GB each in F16) stay dense — candle's `QTensor::quantize` on their 152064-row shape was observed to spike memory disproportionately. Covered by 32 unit tests (CPU + Metal, synthetic weights) including a numeric quantized-vs-unquantized sanity check; **loading the real ~18.7GB checkpoint end-to-end has not been verified on a memory-constrained machine** — see `example/kugelaudio_simple.rs`'s doc comment.
 - **`2026.08.16`**: 🧠 **Qwen 3.8 / Qwen 3.6 (27B) support + flexible thinking control.** Both declare `model_type: "qwen3_5"` and convert to GGUF as `qwen35`, so they are the Qwen 3.5 architecture scaled up (64 layers, 24 q / 4 KV heads, 48 GDN value heads, untied `lm_head`) and need **no new modeling code** — every difference is a config value. Thinking is now controllable per request via `chat_template_kwargs: {"enable_thinking": …, "reasoning_effort": "low|medium|xhigh"}` (or OpenAI's top-level `reasoning_effort`), and the `<think>` scratchpad is separated out of `content` into **`reasoning_content`**, streaming included. 🗜️ GGUF embedding tables now stay quantized and dequantize only the rows a forward pass gathers, instead of expanding all 248320 of them at load: **1772 MiB saved** on Qwen 3.8-27B Q4_K_M (peak 22007 → 20235 MiB), bit-exact on untied checkpoints (prefill logits cosine `1.000000000`). Qwen 3.8-27B Q4_K_M runs text-only on a single 24 GB RTX 3090.
 - **`2026.08.15`**: 🎼 **MuScriptor support** — automatic music transcription, audio → multi-track Standard MIDI File. Decoder-only transformer with a mel-spectrogram prefix conditioner (small/medium/large, [MuScriptor org on HuggingFace](https://huggingface.co/MuScriptor)); transcribes audio of any length by chunking into 5 s windows with tie-prologue forcing across chunk boundaries so notes sustained across a boundary keep the right instrument. Greedy or sampled (temperature/top-k/top-p) decoding, plus `--dtype f16|bf16` and `--quant q4k|q8_0|…` in-situ quantization (conditioners always stay F32) — `large` goes **7.1 GB → 2.2 GB** peak VRAM at f16+q4k on an RTX 3090 (trades wall-clock for it; `--dtype f16` alone is smaller *and* a bit faster with none of that tradeoff). See [the MuScriptor section](#muscriptor-automatic-music-transcription) below.

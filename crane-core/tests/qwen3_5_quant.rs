@@ -250,6 +250,31 @@ fn greedy_gguf() {
     run_greedy(&mut model, "gguf");
 }
 
+#[test]
+#[ignore = "needs a local Prism ternary GGUF (CRANE_TERNARY_GGUF)"]
+fn ternary_gguf_loads_without_candle_patch() {
+    let path = std::env::var("CRANE_TERNARY_GGUF").expect("set CRANE_TERNARY_GGUF to a .gguf file");
+    let mut model =
+        Model::new_with_options(&path, &Device::Cpu, &DType::F32, ModelFormat::Auto, None)
+            .expect("load Prism PTQ1_0/PQ2_0 GGUF");
+    assert!(model.device.is_cpu());
+    let logits = model
+        .forward_step(&[1], 0)
+        .expect("run one ternary CPU decode step");
+    assert_eq!(logits.rank(), 2);
+    assert!(logits.dims()[1] > 0);
+    assert!(
+        logits
+            .flatten_all()
+            .expect("flatten logits")
+            .to_vec1::<f32>()
+            .expect("read logits")
+            .iter()
+            .all(|value| value.is_finite()),
+        "ternary forward produced non-finite logits"
+    );
+}
+
 /// Loads the GGUF from a fresh tempdir that has NO sibling `tokenizer.json` /
 /// `chat_template.jinja` / `tokenizer_config.json`. Regression test for the
 /// GGUF-embedded-tokenizer path; if `Model::from_gguf_file` regresses to

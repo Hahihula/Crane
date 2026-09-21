@@ -36,6 +36,12 @@ pub enum EmbeddingLayer {
         /// Compute dtype; the gather kernels always produce F32.
         dtype: DType,
     },
+    Ternary {
+        weight: Arc<crate::quantized::ternary::TernaryWeight>,
+        signs: Arc<Vec<f32>>,
+        block_size: usize,
+        dtype: DType,
+    },
 }
 
 impl EmbeddingLayer {
@@ -90,11 +96,31 @@ impl EmbeddingLayer {
         Self::Dense(candle_nn::Embedding::new(weight, hidden_size))
     }
 
+    pub fn from_ternary(
+        weight: Arc<crate::quantized::ternary::TernaryWeight>,
+        signs: Arc<Vec<f32>>,
+        block_size: usize,
+        dtype: DType,
+    ) -> Self {
+        Self::Ternary {
+            weight,
+            signs,
+            block_size,
+            dtype,
+        }
+    }
+
     /// Gather rows for `ids`, in the compute dtype.
     pub fn forward(&self, ids: &Tensor) -> Result<Tensor> {
         match self {
             Self::Dense(e) => e.forward(ids),
             Self::Quantized { weight, dtype } => weight.embedding(ids)?.to_dtype(*dtype),
+            Self::Ternary {
+                weight,
+                signs,
+                block_size,
+                dtype,
+            } => weight.embedding(ids, *dtype, signs, *block_size),
         }
     }
 
@@ -119,6 +145,20 @@ impl EmbeddingLayer {
             Self::Quantized { weight, .. } => {
                 Ok(LinearLayer::quantized(QMatMul::from_arc(weight.clone())?))
             },
+            Self::Ternary {
+                weight,
+                signs,
+                block_size,
+                ..
+            } => Ok(LinearLayer::Ternary(
+                crate::quantized::ternary::TernaryLinear::new(
+                    weight.clone(),
+                    signs.clone(),
+                    *block_size,
+                    crate::quantized::ternary::HadamardMode::Forward,
+                    None,
+                )?,
+            )),
         }
     }
 
@@ -145,6 +185,7 @@ impl EmbeddingLayer {
         match self {
             Self::Dense(e) => Some(e.embeddings()),
             Self::Quantized { .. } => None,
+            Self::Ternary { .. } => None,
         }
     }
 
@@ -154,6 +195,7 @@ impl EmbeddingLayer {
         match self {
             Self::Dense(e) => e.embeddings().device().clone(),
             Self::Quantized { weight, .. } => weight.device(),
+            Self::Ternary { weight, .. } => weight.device(),
         }
     }
 
@@ -170,6 +212,7 @@ impl EmbeddingLayer {
         match self {
             Self::Dense(e) => e.embeddings().dims()[0],
             Self::Quantized { weight, .. } => weight.shape().dims()[0],
+            Self::Ternary { weight, .. } => weight.rows(),
         }
     }
 
@@ -178,11 +221,12 @@ impl EmbeddingLayer {
         match self {
             Self::Dense(e) => e.embeddings().elem_count() * e.embeddings().dtype().size_in_bytes(),
             Self::Quantized { weight, .. } => weight.storage_size_in_bytes(),
+            Self::Ternary { weight, .. } => weight.size_in_bytes(),
         }
     }
 
     pub fn is_quantized(&self) -> bool {
-        matches!(self, Self::Quantized { .. })
+        matches!(self, Self::Quantized { .. } | Self::Ternary { .. })
     }
 }
 
@@ -302,6 +346,7 @@ mod tests {
         match layer.tied_output_upcast_f16(DType::F16)? {
             LinearLayer::Standard(l) => assert_eq!(l.weight().dtype(), DType::F32),
             LinearLayer::Quantized(_) => panic!("dense table must not become quantized"),
+            LinearLayer::Ternary(_) => panic!("dense table must not become ternary"),
         }
         Ok(())
     }
@@ -318,6 +363,7 @@ mod tests {
         match layer.tied_output_upcast_f16(DType::BF16)? {
             LinearLayer::Standard(l) => assert_eq!(l.weight().dtype(), DType::BF16),
             LinearLayer::Quantized(_) => panic!("dense table must not become quantized"),
+            LinearLayer::Ternary(_) => panic!("dense table must not become ternary"),
         }
         Ok(())
     }

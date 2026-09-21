@@ -66,6 +66,7 @@ impl QuantizedLinear {
 pub enum LinearLayer {
     Standard(Linear),
     Quantized(QuantizedLinear),
+    Ternary(crate::quantized::ternary::TernaryLinear),
 }
 
 impl LinearLayer {
@@ -88,6 +89,7 @@ impl Module for LinearLayer {
         match self {
             Self::Standard(l) => l.forward(xs),
             Self::Quantized(q) => q.forward(xs),
+            Self::Ternary(t) => t.forward(xs),
         }
     }
 }
@@ -126,6 +128,7 @@ impl LinearLayer {
             // QMatMul already dequantizes and computes in F32 internally;
             // with F32 input the matmul runs natively, no cast needed.
             Self::Quantized(q) => q.forward(&xs_f32),
+            Self::Ternary(t) => t.forward_f32(&xs_f32),
         }
     }
 

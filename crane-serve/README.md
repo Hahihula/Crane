@@ -7,7 +7,7 @@ An OpenAI & SGLang compatible inference API server built on the [Crane](../READM
 - **OpenAI-compatible API** — Chat Completions, Text Completions, Text-to-Speech, Models, Tokenize/Detokenize
 - **SGLang native API** — `/generate`, `/model_info`, `/server_info` and related endpoints
 - **Continuous batching** — Dedicated inference thread with prefill-priority scheduling, dynamic KV memory budget, and automatic sequence eviction/recovery
-- **Multi-model support** — Auto-detects and loads Hunyuan Dense, Qwen 2.5, Qwen 3, Qwen 3.5 (hybrid GDN + softmax), Qwen3-TTS, Voxtral TTS
+- **Multi-model support** — Auto-detects and loads Hunyuan Dense, Qwen 2.5, Qwen 3, Qwen 3.5 (hybrid GDN + softmax), **Bonsai 2 Ternary 27B (PTQ1_0/PQ2_0 GGUF)**, Qwen3-TTS, Voxtral TTS
 - **Qwen3-TTS** — Full two-level TTS inference (Talker + Code Predictor) with native Candle speech-tokenizer decoder (ONNX optional fallback); exposes OpenAI-compatible `/v1/audio/speech`
 - **Voxtral TTS** — 4B-parameter Mistral-based TTS with 20 multilingual voice embeddings, flow-matching acoustic model, and codec decoder; exposes OpenAI-compatible `/v1/audio/speech`
 - **Tool / function calling** — OpenAI-shaped `tools`, `tool_calls` and `finish_reason: "tool_calls"`, streaming included; the prompt syntax comes from the model's own chat template
@@ -41,6 +41,11 @@ crane --model-path /path/to/Qwen2.5-7B-Instruct \
 # GGUF weights
 crane --model-path /path/to/model.gguf \
     --format gguf
+
+# Bonsai 2 Ternary 27B — architecture and PTQ1_0/PQ2_0 are auto-detected
+./target/release/crane-serve \
+    --model-path checkpoints/Ternary-Bonsai-2-27B-gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf \
+    --port 8000
 
 # Force CPU
 crane --model-path /path/to/model --cpu
