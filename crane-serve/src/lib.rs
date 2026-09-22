@@ -192,16 +192,6 @@ pub fn now_epoch() -> u64 {
         .as_secs()
 }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1 << 30 {
-        format!("{:.1}G", bytes as f64 / (1u64 << 30) as f64)
-    } else if bytes >= 1 << 20 {
-        format!("{:.0}M", bytes as f64 / (1u64 << 20) as f64)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
 /// Human-readable device label (e.g. `cuda:0`, `metal:0`, `cpu`) instead of
 /// the Rust `Debug` repr of the underlying candle device handle.
 fn format_device_name(device: &candle_core::Device) -> String {
@@ -329,7 +319,7 @@ fn encode_tts_audio(
         audio_f32.elem_count()
     );
     let samples = audio_f32.to_vec1::<f32>().map_err(|e| e.to_string())?;
-    tracing::info!("TTS writing {} samples", samples.len());
+    tracing::debug!("TTS writing {} samples", samples.len());
     match format {
         openai_api::AudioResponseFormat::Wav => {
             tracing::debug!("TTS encode: building WAV container");
@@ -787,7 +777,6 @@ pub async fn run(mut args: Args) -> Result<()> {
 
     let device_name = format_device_name(&device);
     let dtype_name = format!("{:?}", dtype);
-    info!("Device: {}, dtype: {}", device_name, dtype_name);
 
     // The memory gate lives in the LLM engine's scheduler; the one-shot
     // TTS/ASR/VLM/duplex paths have no admission point to enforce it at yet.
@@ -1369,21 +1358,6 @@ pub async fn run(mut args: Args) -> Result<()> {
         let mut memory_config =
             MemoryConfig::parse(args.max_seq_len, args.gpu_memory_limit.as_deref(), &device);
         memory_config.record_baseline(&device);
-        let baseline_gpu = memory_config.baseline_gpu_bytes;
-        info!(
-            "Memory config: max_seq_len={}, gpu_limit={}, baseline_gpu={}",
-            if memory_config.max_seq_len == 0 {
-                "unlimited".to_string()
-            } else {
-                memory_config.max_seq_len.to_string()
-            },
-            if memory_config.gpu_memory_limit_bytes == 0 {
-                "unlimited".to_string()
-            } else {
-                format_bytes(memory_config.gpu_memory_limit_bytes)
-            },
-            format_bytes(baseline_gpu)
-        );
         let (engine, handle) = InferenceEngine::new(
             backend,
             args.max_concurrent,
@@ -1395,10 +1369,6 @@ pub async fn run(mut args: Args) -> Result<()> {
             .name("inference-engine".into())
             .spawn(move || engine.run())
             .expect("Failed to spawn engine thread");
-        info!(
-            "Inference engine started (max_concurrent={}, decode_tokens_per_seq={})",
-            args.max_concurrent, args.decode_tokens_per_seq
-        );
         (
             Some(handle),
             tokenizer,
