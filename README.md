@@ -79,7 +79,7 @@ We include:
 - VAD;
 - .... (Any AI ability you want power with AI.)
 
-![Qwen3.5 27B support runing local with 16GB mem!](data/assets/qwen3.5-27b.png)
+![Qwen3.8 27B support runing local with 16GB mem!](data/assets/qwen3.8-27b.png)
 
 ![](data/aa.gif)
 
