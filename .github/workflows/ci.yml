@@ -76,3 +76,31 @@ jobs:
           # No GPU on this runner, so candle-kernels' build script can't
           # call nvidia-smi to auto-detect the compute capability.
           CUDA_COMPUTE_CAP: "80"
+
+  build-rocm:
+    # ROCm's apt repo only ships packages for jammy/noble; jammy is the
+    # combination documented and exercised in practice (see README's
+    # "AMD / ROCm" section) so pin it explicitly rather than ubuntu-latest.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc and ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libasound2-dev libclang-dev
+      - name: Install ROCm (userspace libs only, no kernel driver)
+        run: |
+          wget https://repo.radeon.com/amdgpu-install/7.2.4/ubuntu/jammy/amdgpu-install_7.2.4.70204-1_all.deb
+          sudo apt install -y ./amdgpu-install_7.2.4.70204-1_all.deb
+          sudo apt update
+          # This runner has no AMD GPU, so skip amdgpu-dkms: we only need
+          # the HIP/ROCm userspace headers and libraries to link against.
+          # miopen-hip-dev/rocrand-dev aren't pulled in by rocm-hip-sdk but
+          # rocm-rs's build.rs unconditionally bindgens their headers too.
+          sudo apt install -y rocm-hip-sdk miopen-hip-dev rocrand-dev
+      - name: Build (ROCm)
+        run: cargo build --release --no-default-features --features "rocm,onnx"
+        env:
+          ROCM_PATH: /opt/rocm
+          HIP_PATH: /opt/rocm
+          LD_LIBRARY_PATH: /opt/rocm/lib
