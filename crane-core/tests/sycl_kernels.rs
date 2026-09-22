@@ -3,7 +3,7 @@
 //! Needs an Intel GPU + oneAPI. Run inside the `contrib/sycl` container:
 //!   cargo test -p crane-core --release --features sycl --test sycl_kernels
 #![cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
-use crane_core::candle_core;
+use crane_core::{candle_core, candle_nn};
 
 use candle_core::{DType, Device, Result, Tensor};
 use crane_core::ops::gdn::{gated_delta_rule_recurrence, gdn_recurrence_sycl};

@@ -777,7 +777,7 @@ impl HunYuanDenseV1 {
         // Determine compute dtype early so Gguf can dequantize to it.
         let dtype = if device.is_cuda() {
             DType::BF16
-        } else if device.is_metal() || device.is_rocm() {
+        } else if device.is_metal() || device.is_rocm() || device.is_sycl() {
             DType::F16
         } else {
             DType::F32

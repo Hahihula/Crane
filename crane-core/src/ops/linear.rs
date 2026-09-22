@@ -11,8 +11,6 @@ use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{Linear, VarBuilder, linear_no_bias};
 use std::sync::Arc;
 
-use crate::utils::DeviceExt;
-
 /// A `QMatMul` with an optional bias. `QMatMul` itself has no bias — Qwen2's
 /// Q/K/V projections need this wrapper to be quantizable at all.
 #[derive(Clone)]
@@ -45,7 +43,9 @@ impl QuantizedLinear {
         // SYCL's quantized matmul takes an F16 activation directly and returns
         // the same dtype, so both casts are wasted kernel launches. Only when
         // the weight is still quantized: a dequantized `QMatMul` is a plain F32
-        // `matmul` and does need the cast.
+        // `matmul` and does need the cast. `QMatMul::is_quantized` only exists
+        // on the SYCL candle fork, hence the feature gate.
+        #[cfg(feature = "sycl")]
         if xs.device().is_sycl() && input_dtype == DType::F16 && self.matmul.is_quantized() {
             let out = self.matmul.forward(xs)?;
             return match &self.bias {
