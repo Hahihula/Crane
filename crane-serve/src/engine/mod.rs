@@ -30,7 +30,7 @@
 
 pub mod backend;
 pub mod grammar;
-mod memory;
+pub(crate) mod memory;
 pub mod model_factory;
 pub mod sampling;
 pub mod scheduler;

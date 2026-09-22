@@ -1,4 +1,5 @@
 pub mod auth;
+use crane_core::candle_core;
 use crane_core::{D, DType, Tensor, softmax_last_dim};
 
 pub mod chat_template;
@@ -199,6 +200,80 @@ fn format_device_name(device: &candle_core::Device) -> String {
         candle_core::DeviceLocation::Cpu => "cpu".to_string(),
         candle_core::DeviceLocation::Cuda { gpu_id } => format!("cuda:{gpu_id}"),
         candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
+    }
+}
+
+/// Best-effort CPU model name and physical/logical core counts, read from
+/// `/proc/cpuinfo` on Linux. Physical cores are counted as the number of
+/// unique (physical id, core id) pairs; platforms without that file (e.g.
+/// macOS) or without those fields (some VMs) fall back to the logical count
+/// for both, and "unknown" for the name.
+fn cpu_info() -> (String, usize, usize) {
+    let logical = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+
+    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
+        return ("unknown".to_string(), logical, logical);
+    };
+
+    let mut name = None;
+    let mut cores: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut cur_physical_id = None;
+    let mut cur_core_id = None;
+    for line in cpuinfo.lines() {
+        match line.split_once(':') {
+            Some((key, value)) => match key.trim() {
+                "model name" if name.is_none() => name = Some(value.trim().to_string()),
+                "physical id" => cur_physical_id = Some(value.trim().to_string()),
+                "core id" => cur_core_id = Some(value.trim().to_string()),
+                _ => {},
+            },
+            None if line.trim().is_empty() => {
+                if let (Some(p), Some(c)) = (cur_physical_id.take(), cur_core_id.take()) {
+                    cores.insert((p, c));
+                }
+            },
+            None => {},
+        }
+    }
+    if let (Some(p), Some(c)) = (cur_physical_id, cur_core_id) {
+        cores.insert((p, c));
+    }
+
+    let physical = if cores.is_empty() {
+        logical
+    } else {
+        cores.len()
+    };
+    (
+        name.unwrap_or_else(|| "unknown".to_string()),
+        physical,
+        logical,
+    )
+}
+
+/// Logs CPU (model name, physical/logical core count, candle thread pool
+/// size) and, when running on a GPU device, total VRAM once at startup.
+fn log_hardware_info(device: &candle_core::Device, device_name: &str) {
+    let (cpu_name, physical_cores, logical_cores) = cpu_info();
+    info!(
+        cpu = %cpu_name,
+        physical_cores,
+        logical_cores,
+        thread_pool_size = candle_core::utils::get_num_threads(),
+        "hardware: cpu"
+    );
+
+    if !matches!(device.location(), candle_core::DeviceLocation::Cpu) {
+        let (_, vram_total) = engine::memory::query_gpu_memory_usage(device);
+        if vram_total > 0 {
+            info!(
+                device = %device_name,
+                vram_total = %engine::memory::format_bytes_engine(vram_total),
+                "hardware: gpu"
+            );
+        } else {
+            info!(device = %device_name, "hardware: gpu (VRAM query unavailable)");
+        }
     }
 }
 
@@ -777,6 +852,7 @@ pub async fn run(mut args: Args) -> Result<()> {
 
     let device_name = format_device_name(&device);
     let dtype_name = format!("{:?}", dtype);
+    log_hardware_info(&device, &device_name);
 
     // The memory gate lives in the LLM engine's scheduler; the one-shot
     // TTS/ASR/VLM/duplex paths have no admission point to enforce it at yet.
