@@ -665,6 +665,8 @@ Currently crane-serve runs on a single CUDA device (device 0). Multi-GPU tensor 
 | `--max-seq-len` | `0` | Max sequence length (prompt + generation); `0` = unlimited |
 | `--gpu-memory-limit` | *(none)* | VRAM cap: absolute (`5G`, `8G`, `5120M`) or fractional (`0.7` = 70% of total) |
 | `--text-only` | `false` | Qwen 3.5-VL / Ornith only: opt out of the vision tower and load the same checkpoint as a plain text model (skips the ~600M-param ViT entirely — no extra VRAM — and unlocks `--quant`, which the VLM path doesn't support). Vision-capable checkpoints load with vision by default; this flag is the opt-out. |
+| `--api-key` | *(none)* | API key required for non-exempt endpoints; repeatable to configure multiple valid keys. Pass with no value (`--api-key`) to generate a random key printed to stdout at startup. Also settable via `CRANE_API_KEY` (always requires a value there). Unset means open access. |
+| `--api-key-file` | *(none)* | File with one API key per line (`#`-prefixed lines are comments); combines with `--api-key`. Also settable via `CRANE_API_KEY_FILE`. |
 
 ### Parameter tuning guide
 
@@ -674,6 +676,41 @@ Currently crane-serve runs on a single CUDA device (device 0). Multi-GPU tensor 
 | Maximum throughput | Increase `--decode-tokens-per-seq` to `32` to reduce scheduling round-trips |
 | Lowest time-to-first-token | Decrease `--decode-tokens-per-seq` to `4–8` so prefill slots in sooner |
 | Long context generation | Set `--max-seq-len` to avoid unbounded KV growth |
+
+### Authentication
+
+Disabled by default (open access). Configure `--api-key` (repeatable) and/or
+`--api-key-file` to require a valid key on every request:
+
+```bash
+crane-serve --model-path /path/to/model --api-key sk-mysecretkey
+
+# Generate a random key at startup instead of choosing one
+crane-serve --model-path /path/to/model --api-key
+```
+
+Once at least one key is configured, requests must present it via either
+header:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-mysecretkey" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen2.5-7B-Instruct", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# or
+curl http://localhost:8080/v1/chat/completions \
+  -H "X-Api-Key: sk-mysecretkey" \
+  ...
+```
+
+A missing or invalid key returns `401` with an OpenAI-shaped error body.
+`/health`, `/v1/stats`, `/` and `/ui/*` stay reachable without a key so
+monitoring and the browser UI shell keep working — note the UI's own API
+calls still require one, so `--ui` combined with `--api-key` isn't usable
+from the browser today. Binding `--host 0.0.0.0` with an API key configured
+logs a startup warning, since keys travel in cleartext without TLS in front
+of the server.
 
 ## API Reference
 
@@ -1073,7 +1110,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="not-needed",  # crane-serve does not require an API key
+    api_key="not-needed",  # only checked if --api-key/--api-key-file is configured
 )
 
 response = client.chat.completions.create(
@@ -1354,7 +1391,7 @@ Tool calling and reasoning control are **template-driven**, not model-type-drive
 
 ## Notes
 
-- **No API key required** — crane-serve does not authenticate requests.
+- **API key authentication is opt-in** — unset by default (open access); see [Authentication](#authentication) for `--api-key`/`--api-key-file`.
 - **Single CUDA device** — The server uses CUDA device 0. Multi-GPU tensor parallelism is not yet supported.
 - **KV eviction is lossless** — Evicted sequences preserve their full state and resume automatically; in-flight requests are not dropped or errored.
 - **`--max-seq-len 0`** means no limit. On constrained hardware, always set an explicit value to avoid runaway memory growth.
