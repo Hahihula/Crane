@@ -63,6 +63,10 @@ impl CustomOp2 for SnakeOp {
             (T::to_cpu_storage_owned(dst), l_x.shape().clone())
         }
 
+        if l_x.shape() != l_alpha.shape() {
+            candle_core::bail!("snake: x and alpha must have the same shape");
+        }
+
         match (s_x, s_alpha) {
             (CpuStorage::BF16(x), CpuStorage::BF16(alpha)) => Ok(inner(x, l_x, alpha, l_alpha)),
             (CpuStorage::F16(x), CpuStorage::F16(alpha)) => Ok(inner(x, l_x, alpha, l_alpha)),
