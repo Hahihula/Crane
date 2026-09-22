@@ -1683,14 +1683,24 @@ impl InferenceEngine {
             };
             let decode_tok_s = seq.decode_tokens_per_sec();
             let ttft_ms = seq.ttft_ms();
+            let total_secs = seq.created_at.elapsed().as_secs_f64();
+            // total_tokens is bounded by prompt_len + max_tokens, far below 2^53.
+            #[allow(clippy::cast_precision_loss)]
+            let total_tok_s = if total_secs > 0.0 {
+                (seq.prompt_len + completion_tokens) as f64 / total_secs
+            } else {
+                0.0
+            };
 
             info!(
                 id = %seq_id,
                 prompt_tokens = seq.prompt_len,
                 completion_tokens,
                 finish_reason = %finish_reason,
-                decode_tok_s = format!("{:.1}", decode_tok_s),
-                ttft_ms,
+                decode_tok_s = format!("{decode_tok_s:.1} tok/s"),
+                ttft_ms = ttft_ms.map(|v| format!("{v} ms")),
+                total_time = format!("{:.0} ms", total_secs * 1000.0),
+                total_tok_s = format!("{total_tok_s:.1} tok/s"),
                 "Sequence finished",
             );
 
