@@ -147,7 +147,7 @@ By simply run:
 ./target/release/crane-serve --model-path checkpoints/Ternary-Bonsai-2-27B-gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf --ui
 ```
 
-![Qwen3.5 27B support runing local with 16GB mem!](data/assets/qwen3.5-27b.png)
+![Qwen3.8 27B support runing local with 16GB mem!](data/assets/qwen3.8-27b.png)
 
 
 
