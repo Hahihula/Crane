@@ -104,8 +104,7 @@ struct Args {
 const SAMPLE_RATE: u32 = 24_000;
 
 fn main() -> anyhow::Result<()> {
-    use candle_core::{DType, Device, Tensor};
-    use crane_core::candle_core;
+    use crane_core::candle_core::{DType, Device, Tensor};
     use crane_core::models::kugelaudio::{
         KugelAudioGenerationConfig, KugelAudioModel, build_prompt,
     };

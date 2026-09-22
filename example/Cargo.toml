@@ -4,9 +4,12 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
-crane = { package = "crane-ai", version = "26.9.0", path = "../crane" }
-crane-core = { version = "26.9.0", path = "../crane-core" }
-candle-core = "0.11"
+# default-features = false on both, plus crane-core/candle-default below:
+# see crane-serve/Cargo.toml's comment on the same pattern. Without it,
+# `--no-default-features --features rocm` (or `sycl`) would still pull in
+# the plain candle-core backend through these edges alongside the fork.
+crane = { package = "crane-ai", version = "26.9.0", path = "../crane", default-features = false }
+crane-core = { version = "26.9.0", path = "../crane-core", default-features = false }
 anyhow = "1.0.100"
 image = "0.25.9"
 rustyline = "14.0.0"
@@ -110,7 +113,7 @@ name = "kugelaudio_simple"
 path = "src/kugelaudio_simple.rs"
 
 [features]
-default = []
+default = ["crane-core/candle-default"]
 onnx = ["crane/onnx", "crane-core/onnx"]
 metal = ["crane/metal", "crane-core/metal"]
 accelerate = ["crane/accelerate", "crane-core/accelerate"]
