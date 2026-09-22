@@ -37,14 +37,26 @@ use openai_api::ErrorResponse;
 #[derive(Parser, Debug, Clone)]
 #[command(about = "OpenAI & SGLang compatible API server with continuous batching")]
 pub struct Args {
+    /// Path to a downloaded model directory or a single `.gguf` file.
     #[arg(short = 'm', long)]
     pub model_path: String,
+    /// Model architecture. Usually auto-detected from the model's
+    /// `config.json`; set this only if auto-detection picks the wrong one.
+    /// Known values: `auto`, `gemma4`, `gemma4_vl`, `hunyuan`, `minicpm5`,
+    /// `minicpmv46`, `minicpmo`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`,
+    /// `qwen3_tts`, `voxtral_tts`, `kokoro`, `voxcpm2`, `paddleocr_vl`,
+    /// `qwen3_asr`.
     #[arg(long, default_value = "auto")]
     pub model_type: String,
+    /// Display name reported by `/v1/models`. Defaults to the directory name
+    /// of `--model-path` when unset.
     #[arg(long)]
     pub model_name: Option<String>,
+    /// Listen address. Default `0.0.0.0` (all interfaces). Use `127.0.0.1`
+    /// to restrict to localhost.
     #[arg(long, default_value = "0.0.0.0")]
     pub host: String,
+    /// Listen port. Default `8080`.
     #[arg(short = 'p', long, default_value_t = 8080)]
     pub port: u16,
     /// Serve HTTP/1.1 over a Unix domain socket at this path instead of TCP.
@@ -56,12 +68,21 @@ pub struct Args {
     /// Serve Crane's built-in browser UI at `/`. Disabled by default.
     #[arg(long)]
     pub ui: bool,
+    /// Force CPU-only inference, ignoring any available GPU.
     #[arg(long)]
     pub cpu: bool,
+    /// Maximum number of requests that can be processed at the same time.
+    /// Default `16`. Increase for higher throughput; decrease if you are
+    /// running out of memory.
     #[arg(short = 'c', long, default_value_t = 16)]
     pub max_concurrent: usize,
+    /// How many tokens each request generates before yielding to other
+    /// requests in the batch. Default `16`. Higher values let individual
+    /// requests finish faster but slow down other concurrent requests.
     #[arg(long, default_value_t = 16)]
     pub decode_tokens_per_seq: usize,
+    /// Weight format: `auto`, `safetensors`, or `gguf`. Default `auto`
+    /// (detected from files in the model directory).
     #[arg(long, default_value = "auto")]
     pub format: String,
     /// In-situ quantization level for safetensors checkpoints (e.g. q4k,
@@ -72,6 +93,8 @@ pub struct Args {
     /// F16 on ROCm and Metal, and F32 on CPU.
     #[arg(long)]
     pub dtype: Option<String>,
+    /// Maximum sequence length in tokens. Default `0` (unlimited). See
+    /// `--context` for a human-readable alternative (e.g. `128K`).
     #[arg(long, default_value_t = 0)]
     pub max_seq_len: usize,
     /// Maximum context length as a human-readable token count. Accepts K
