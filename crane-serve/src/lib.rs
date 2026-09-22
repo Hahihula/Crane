@@ -36,7 +36,10 @@ use handlers::vlm::{Gemma4VlmRequest, MinicpmVVlmRequest, Qwen3_5VlmRequest, Vlm
 use openai_api::ErrorResponse;
 
 #[derive(Parser, Debug, Clone)]
-#[command(about = "OpenAI & SGLang compatible API server with continuous batching")]
+#[command(
+    about = "OpenAI & SGLang compatible API server with continuous batching",
+    version
+)]
 pub struct Args {
     /// Path to a downloaded model directory or a single `.gguf` file.
     #[arg(short = 'm', long, help_heading = "Model")]
