@@ -1588,7 +1588,16 @@ pub async fn run(mut args: Args) -> Result<()> {
             )
         },
         None => {
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    anyhow::anyhow!(
+                        "Failed to bind {addr}: port already in use. Try --port {}.",
+                        args.port.wrapping_add(1)
+                    )
+                } else {
+                    anyhow::anyhow!("Failed to bind {addr}: {e}")
+                }
+            })?;
             let local_addr = listener.local_addr()?;
             (
                 local_addr.to_string(),
@@ -1607,7 +1616,16 @@ pub async fn run(mut args: Args) -> Result<()> {
         String,
         std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>,
     ) = {
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "Failed to bind {addr}: port already in use. Try --port {}.",
+                    args.port.wrapping_add(1)
+                )
+            } else {
+                anyhow::anyhow!("Failed to bind {addr}: {e}")
+            }
+        })?;
         let local_addr = listener.local_addr()?;
         (
             local_addr.to_string(),
