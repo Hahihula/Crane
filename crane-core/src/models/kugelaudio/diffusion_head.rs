@@ -92,9 +92,10 @@ impl FeedForwardNetwork {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(x)?.silu()?;
+        let gate = self.gate_proj.forward(x)?;
         let up = self.up_proj.forward(x)?;
-        self.down_proj.forward(&(gate * up)?)
+        self.down_proj
+            .forward(&crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?)
     }
 }
 
