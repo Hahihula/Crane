@@ -106,6 +106,22 @@ We include:
 - **`2025.03.19`**: 🔥 project initialized;
 
 
+## Quickly Start
+
+Just a single command:
+
+```
+# clone this repo
+git clone https://github.com/lucasjinreal/Crane
+
+./install.sh
+
+# start the server and into UI
+./target/release/crane-serve --model-path checkpoints/Ternary-Bonsai-2-27B-gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf --ui
+```
+
+You will get a **extremly** clever AI portable!
+
 
 ## AI Abilities Use out-of-box
 
@@ -121,6 +137,17 @@ Multi-language support, extremly fast speed compare with pytorch and other frame
 ![](data/assets/image.png)
 
 Runs almost real-time on my old mac, just try it! serve any app.
+
+
+**3. Qwen3.8 27B with 16GB mem only**
+
+By simply run: 
+
+```
+./target/release/crane-serve --model-path checkpoints/Ternary-Bonsai-2-27B-gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf --ui
+```
+
+![Qwen3.5 27B support runing local with 16GB mem!](data/assets/qwen3.5-27b.png)
 
 
 
