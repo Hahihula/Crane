@@ -1,60 +1,221 @@
-import { FormEvent, useRef, useState } from 'react'
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { type ChatMessage, useChatHistory } from '../chat-history'
 import type { UiConfig } from '../main'
+import { useI18n } from '../i18n'
+import { ConversationSidebar } from './ConversationSidebar'
+import { Attachment, AttachmentList } from './ui/attachment'
+import { Bubble, BubbleContent } from './ui/bubble'
+import { Marker } from './ui/marker'
+import { Message, MessageActions, MessageContent } from './ui/message'
+import { MessageScroller } from './ui/message-scroller'
 
-type Message = { role: 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>; image?: string; reasoning?: string }
+const id = () => globalThis.crypto?.randomUUID?.() ?? `message-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+const textOf = (content: ChatMessage['content']) => typeof content === 'string' ? content : content.filter(part => part.type === 'text').map(part => part.text ?? '').join('\n')
 
-function splitThink(text: string) {
-  const start = text.indexOf('<think>')
-  if (start < 0) return { content: text, reasoning: '', active: false }
-  const end = text.indexOf('</think>', start)
-  return { content: text.slice(0, start) + (end < 0 ? '' : text.slice(end + 8)), reasoning: text.slice(start + 7, end < 0 ? undefined : end), active: end < 0 }
+function Thinking({ text, active, labels }: { text: string; active: boolean; labels: { thinking: string; thought: string } }) {
+  const [expanded, setExpanded] = useState(active)
+  useEffect(() => { setExpanded(active) }, [active])
+  if (!text && !active) return null
+  // Keep the reasoning panel bounded without freezing the visible stream once it grows.
+  // While generating, the latest tokens are what the user needs to see.
+  const preview = text.length > 480
+    ? active ? `…${text.slice(-480).trimStart()}` : `${text.slice(0, 480).trimEnd()}…`
+    : text
+  return <div className="mb-2 text-sm leading-6 text-zinc-400">
+    <button type="button" className="flex items-center gap-2 text-left transition hover:text-zinc-700" onClick={() => !active && setExpanded(value => !value)}>
+      {!active && <span className="text-zinc-400">{expanded ? '⌄' : '›'}</span>}
+      <span className={active ? 'thinking-shimmer font-medium' : ''}>{active ? labels.thinking : labels.thought}</span>
+    </button>
+    {expanded && text && <div aria-live={active ? 'polite' : undefined} className="mt-1.5 max-w-2xl border-l border-zinc-200 pl-3 text-zinc-400">{preview}</div>}
+  </div>
 }
 
-function Thinking({ text, open }: { text: string; open: boolean }) {
-  const [expanded, setExpanded] = useState(open)
-  const visible = open || expanded
-  if (!text && !open) return null
-  return <div className="mb-3 text-sm text-zinc-500"><button type="button" className="flex items-center gap-1.5 text-zinc-500 hover:text-zinc-800" onClick={() => setExpanded(value => !value)}><span className="text-xs">{visible ? '⌄' : '›'}</span>{open ? '正在思考…' : '已完成思考'}</button>{visible && <div className="mt-2 border-l border-zinc-200 pl-3 leading-6 text-zinc-500">{text || '…'}</div>}</div>
+function SettingsPanel({ open, onClose, temperature, setTemperature, topP, setTopP, maxTokens, setMaxTokens, t, config }: {
+  open: boolean; onClose: () => void; temperature: number; setTemperature: (value: number) => void; topP: number; setTopP: (value: number) => void; maxTokens: string; setMaxTokens: (value: string) => void; t: ReturnType<typeof useI18n>['t']; config: UiConfig
+}) {
+  if (!open) return null
+  return <><button type="button" aria-label={t.closeSettings} onClick={onClose} className="fixed inset-0 z-40 cursor-default" /><section role="dialog" aria-label={t.settings} className="absolute right-3 top-11 z-50 w-[min(22rem,calc(100vw-1.5rem))] rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl sm:right-6">
+    <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold text-zinc-900">{t.settings}</h2><button type="button" onClick={onClose} aria-label={t.closeSettings} className="grid h-7 w-7 place-items-center rounded-md text-zinc-400 hover:bg-zinc-100 hover:text-zinc-800">×</button></div>
+    <div className="space-y-4 text-sm"><label className="block text-zinc-600"><span className="flex justify-between"><span>{t.temperature}</span><output className="tabular-nums text-zinc-400">{temperature.toFixed(1)}</output></span><input className="mt-2 w-full accent-zinc-900" type="range" min="0" max="2" step="0.1" value={temperature} onChange={event => setTemperature(Number(event.target.value))} /></label><label className="block text-zinc-600"><span className="flex justify-between"><span>{t.topP}</span><output className="tabular-nums text-zinc-400">{topP.toFixed(2)}</output></span><input className="mt-2 w-full accent-zinc-900" type="range" min="0.05" max="1" step="0.05" value={topP} onChange={event => setTopP(Number(event.target.value))} /></label><label className="block text-zinc-600"><span>{t.maxTokens} <span className="text-zinc-400">({t.unlimited})</span></span><input inputMode="numeric" className="mt-2 h-9 w-full rounded-lg border border-zinc-200 px-2 text-zinc-900 outline-none focus:border-zinc-500" placeholder={t.unlimited} value={maxTokens} onChange={event => setMaxTokens(event.target.value.replace(/[^0-9]/g, ''))} /></label><p className="border-t border-zinc-100 pt-3 text-xs text-zinc-400"><span>{t.model}: </span>{config.model_name}</p></div>
+  </section></>
 }
 
 function Markdown({ children }: { children: string }) {
-  return <div className="break-words [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-zinc-300 [&_blockquote]:pl-3 [&_blockquote]:text-zinc-600 [&_code]:rounded [&_code]:bg-zinc-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[13px] [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-5 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-4 [&_h3]:font-semibold [&_li]:ml-5 [&_li]:list-disc [&_ol]:my-3 [&_ol]:list-decimal [&_p]:mb-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-zinc-900 [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-zinc-100 [&_table]:my-4 [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-zinc-200 [&_td]:px-3 [&_td]:py-1.5 [&_th]:border [&_th]:border-zinc-200 [&_th]:bg-zinc-50 [&_th]:px-3 [&_th]:py-1.5 [&_ul]:my-3"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>
+  return <div className="chat-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>
+}
+
+function IconButton({ label, onClick, children }: { label: string; onClick: () => void; children: string }) {
+  return <button type="button" onClick={onClick} aria-label={label} title={label} className="grid h-7 min-w-7 place-items-center rounded-md px-1.5 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900">{children}</button>
 }
 
 export function ChatView({ config }: { config: UiConfig }) {
-  const [messages, setMessages] = useState<Message[]>([]), [input, setInput] = useState(''), [image, setImage] = useState<string | null>(null), [busy, setBusy] = useState(false)
+  const { locale, t, toggle } = useI18n()
+  const { sessions, activeSession, messages, setMessages, createSession, selectSession, deleteSession } = useChatHistory()
+  const [input, setInput] = useState('')
+  const [image, setImage] = useState<string | null>(null)
+  const [imageName, setImageName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [temperature, setTemperature] = useState(0.7)
+  const [topP, setTopP] = useState(0.95)
+  const [maxTokens, setMaxTokens] = useState('')
   const file = useRef<HTMLInputElement>(null)
-  const submit = async (event: FormEvent) => {
-    event.preventDefault(); const text = input.trim(); if (busy || (!text && !image)) return
-    const content = image ? [...(text ? [{ type: 'text', text }] : []), { type: 'image_url', image_url: { url: image } }] : text
-    const user: Message = { role: 'user', content, image: image ?? undefined }; const next = [...messages, user]
-    setMessages([...next, { role: 'assistant', content: '' }]); setInput(''); setImage(null); setBusy(true)
+  const textarea = useRef<HTMLTextAreaElement>(null)
+  const controller = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    const node = textarea.current
+    if (!node) return
+    node.style.height = '0px'
+    node.style.height = `${Math.min(node.scrollHeight, 180)}px`
+  }, [input])
+
+  const updateAssistant = (messageId: string, patch: Partial<ChatMessage>) => {
+    setMessages(current => current.map(message => message.id === messageId ? { ...message, ...patch } : message))
+  }
+
+  const generate = async (conversation: ChatMessage[]) => {
+    const assistantId = id()
+    setMessages([...conversation, { id: assistantId, role: 'assistant', content: '', reasoning: '', status: 'streaming' }])
+    setBusy(true)
+    const abort = new AbortController()
+    controller.current = abort
+    let answer = '', reasoning = '', finishReason = ''
     try {
-      const response = await fetch('/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: config.model_name, messages: next.map(({ role, content }) => ({ role, content })), max_tokens: 1024, stream: true }) })
-      if (!response.ok) { const data = await response.json(); throw new Error(data?.error?.message ?? '请求失败') }
-      // Some VLM routes currently return a normal JSON response. Accept it as
-      // a compatibility fallback; all streaming-capable models use SSE below.
+      const response = await fetch('/v1/chat/completions', {
+        method: 'POST', signal: abort.signal, headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: config.model_name, messages: conversation.map(({ role, content }) => ({ role, content })), stream: true, temperature, top_p: topP, ...(maxTokens ? { max_tokens: Number(maxTokens) } : {}) }),
+      })
+      if (!response.ok) { const data = await response.json(); throw new Error(data?.error?.message ?? t.requestFailed) }
       if (!response.headers.get('content-type')?.includes('text/event-stream')) {
-        const data = await response.json(); setMessages([...next, { role: 'assistant', content: data.choices?.[0]?.message?.content || '（模型未返回文本）' }]); return
+        const data = await response.json()
+        answer = data.choices?.[0]?.message?.content || ''
+        finishReason = data.choices?.[0]?.finish_reason || 'stop'
+        updateAssistant(assistantId, { content: answer || `（${t.empty}）`, status: 'complete', finishReason })
+        return
       }
-      const reader = response.body?.getReader(); if (!reader) throw new Error('浏览器不支持流式响应')
-      const decoder = new TextDecoder(); let pending = '', answer = '', reasoning = ''
-      const update = () => setMessages([...next, { role: 'assistant', content: answer, reasoning }])
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error(t.browserStream)
+      const decoder = new TextDecoder()
+      let pending = ''
       while (true) {
-        const { done, value } = await reader.read(); pending += decoder.decode(value ?? new Uint8Array(), { stream: !done })
+        const { done, value } = await reader.read()
+        pending += decoder.decode(value ?? new Uint8Array(), { stream: !done })
         const lines = pending.split('\n'); pending = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.startsWith('data:')) continue
-          const payload = line.slice(5).trim(); if (!payload || payload === '[DONE]') continue
-          const chunk = JSON.parse(payload); const delta = chunk.choices?.[0]?.delta ?? {}; answer += delta.content ?? ''; reasoning += delta.reasoning_content ?? ''; update()
+          const payload = line.slice(5).trim()
+          if (!payload || payload === '[DONE]') continue
+          const chunk = JSON.parse(payload)
+          if (chunk.error) throw new Error(chunk.error.message || t.requestFailed)
+          const choice = chunk.choices?.[0]
+          const delta = choice?.delta ?? {}
+          answer += delta.content ?? ''
+          reasoning += delta.reasoning_content ?? ''
+          finishReason = choice?.finish_reason ?? finishReason
+          updateAssistant(assistantId, { content: answer, reasoning, status: 'streaming', finishReason })
         }
         if (done) break
       }
-      if (!answer) setMessages([...next, { role: 'assistant', content: '（模型未返回文本）', reasoning }])
-    } catch (error) { setMessages([...next, { role: 'assistant', content: `错误：${error instanceof Error ? error.message : '请求失败'}` }]) } finally { setBusy(false) }
+      updateAssistant(assistantId, { content: answer || `（${t.empty}）`, reasoning, status: 'complete', finishReason: finishReason || 'stop' })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        updateAssistant(assistantId, { content: answer, reasoning, status: 'stopped', finishReason: 'cancelled' })
+      } else {
+        updateAssistant(assistantId, { content: answer || `${t.failed}：${error instanceof Error ? error.message : t.requestFailed}`, reasoning, status: 'error' })
+      }
+    } finally {
+      if (controller.current === abort) controller.current = null
+      setBusy(false)
+    }
   }
-  const chooseImage = (selected?: File) => { if (!selected?.type.startsWith('image/')) return; const reader = new FileReader(); reader.onload = () => setImage(String(reader.result)); reader.readAsDataURL(selected) }
-  return <section className="flex h-[calc(100vh-56px)] min-h-[560px] flex-col bg-white"><div className="flex-1 overflow-y-auto px-5 pb-44 pt-10 md:px-[max(24px,calc((100vw-760px)/2))]">{messages.length === 0 && <div className="mx-auto mt-[18vh] max-w-xl text-center"><h1 className="text-3xl font-semibold tracking-tight text-zinc-900">有什么可以帮你的？</h1><p className="mt-2 text-sm text-zinc-500">{config.multimodal ? '支持文字对话，也可以在需要时添加图片。' : '向模型发送一条消息，开始对话。'}</p></div>}{messages.map((message, index) => { const raw = typeof message.content === 'string' ? message.content : message.content.filter(p => p.type === 'text').map(p => p.text).join(''); const thought = splitThink(raw); const thinking = message.reasoning || thought.reasoning; const thinkingOpen = busy && index === messages.length - 1 && (Boolean(thinking) || thought.active); return <article className="mx-auto mb-7 flex max-w-[760px] gap-3.5" key={index}><span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md text-xs font-semibold ${message.role === 'assistant' ? 'bg-zinc-900 text-white' : 'bg-zinc-100 text-zinc-600'}`}>{message.role === 'assistant' ? '⌁' : '你'}</span><div className="min-w-0 flex-1 break-words pt-0.5 text-[15px] leading-7 text-zinc-800">{message.image && <img className="mb-2.5 block max-h-[270px] w-full max-w-[340px] rounded-md border border-zinc-200 object-contain" src={message.image} alt="已上传的图片" />}{message.role === 'assistant' && <Thinking text={thinking} open={thinkingOpen} />}{raw || thinking ? <Markdown>{message.role === 'assistant' ? thought.content : raw}</Markdown> : <span className="text-sm text-zinc-400">正在思考…</span>}</div></article>})}</div><form className="fixed bottom-0 left-1/2 z-10 w-[calc(100%-24px)] max-w-[760px] -translate-x-1/2 bg-gradient-to-b from-transparent from-0% via-white via-30% to-white pt-3 pb-3 md:w-[calc(100%-32px)] md:pb-5" onSubmit={submit}>{image && <div className="flex items-center gap-2 py-1.5 text-xs text-zinc-500"><img className="h-6 w-6 rounded object-cover" src={image} alt="图片预览"/><span>已添加图片</span><button className="text-lg leading-none text-zinc-500 hover:text-zinc-900" type="button" onClick={() => setImage(null)}>×</button></div>}<div className="flex items-end gap-2 rounded-xl border border-zinc-300 bg-white px-3 py-2 shadow-[0_2px_10px_rgb(0_0_0_/_0.05)] focus-within:border-zinc-400">{config.multimodal && <><button className="grid h-7 w-7 place-items-center rounded-md text-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900" type="button" aria-label="添加图片" onClick={() => file.current?.click()}>⌑</button><input hidden ref={file} type="file" accept="image/*" onChange={e => chooseImage(e.target.files?.[0])}/></>}<textarea className="min-h-6 flex-1 resize-none border-0 bg-transparent py-0.5 text-sm leading-6 text-zinc-900 outline-none placeholder:text-zinc-400" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }} placeholder={`给 ${config.model_name} 发送消息`} rows={1}/><button className="grid h-7 w-7 place-items-center rounded-md bg-zinc-900 text-base text-white disabled:bg-zinc-300" disabled={busy || (!input.trim() && !image)} aria-label="发送" type="submit">↑</button></div><p className="mt-1.5 text-center text-[11px] text-zinc-400">Crane 本地推理 · Enter 发送，Shift + Enter 换行</p></form></section>
+
+  const submit = async (event?: FormEvent) => {
+    event?.preventDefault()
+    const text = input.trim()
+    if (busy || (!text && !image)) return
+    const content: ChatMessage['content'] = image ? [...(text ? [{ type: 'text', text }] : []), { type: 'image_url', image_url: { url: image } }] : text
+    const user: ChatMessage = { id: id(), role: 'user', content, image: image ?? undefined }
+    const next = [...messages.filter(message => message.status !== 'error' || textOf(message.content)), user]
+    setInput(''); setImage(null); setImageName('')
+    await generate(next)
+  }
+
+  const stop = () => controller.current?.abort()
+  const newConversation = () => {
+    if (busy) stop()
+    if (messages.length === 0) return
+    createSession(); setInput(''); setImage(null); setImageName('')
+  }
+  const retry = async (assistantId: string) => {
+    if (busy) return
+    const index = messages.findIndex(message => message.id === assistantId)
+    if (index < 0) return
+    await generate(messages.slice(0, index).filter(message => message.role === 'user' || message.status === 'complete'))
+  }
+  const copy = async (message: ChatMessage) => {
+    await navigator.clipboard.writeText(textOf(message.content))
+    setCopied(message.id); window.setTimeout(() => setCopied(null), 1400)
+  }
+  const chooseImage = (selected?: File) => {
+    if (!selected?.type.startsWith('image/')) return
+    const reader = new FileReader(); reader.onload = () => { setImage(String(reader.result)); setImageName(selected.name) }; reader.readAsDataURL(selected)
+  }
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() }
+  }
+
+  const last = messages.at(-1)
+  return <div className="flex min-h-0 flex-1 bg-white" lang={locale}>
+    <ConversationSidebar sessions={sessions} activeId={activeSession?.id} open={historyOpen} desktopOpen={sidebarOpen} t={t} onClose={() => setHistoryOpen(false)} onNew={() => { newConversation(); setHistoryOpen(false) }} onSelect={id => { if (busy) stop(); selectSession(id) }} onDelete={id => { if (busy && id === activeSession?.id) stop(); deleteSession(id) }} />
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div className="relative flex h-12 shrink-0 items-center justify-between px-3 sm:px-6">
+        <div className="flex min-w-0 items-center gap-1"><button type="button" onClick={() => { setHistoryOpen(true); setSidebarOpen(true) }} aria-label={t.history} className="grid h-8 w-8 place-items-center rounded-lg text-lg text-zinc-600 hover:bg-zinc-100 md:hidden">☰</button><button type="button" onClick={() => setSidebarOpen(value => !value)} aria-label={sidebarOpen ? t.collapseSidebar : t.expandSidebar} title={sidebarOpen ? t.collapseSidebar : t.expandSidebar} className="hidden h-8 w-8 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-100 md:grid">☰</button><span className="truncate text-sm text-zinc-400">{activeSession?.title || t.untitled}</span></div>
+        <div className="flex items-center gap-1"><button type="button" onClick={() => setSettingsOpen(value => !value)} aria-label={t.settings} title={t.settings} className="grid h-8 w-8 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950">⚙</button><button type="button" onClick={toggle} aria-label={t.language} className="rounded-lg px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950">{t.language}</button></div>
+        <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} temperature={temperature} setTemperature={setTemperature} topP={topP} setTopP={setTopP} maxTokens={maxTokens} setMaxTokens={setMaxTokens} t={t} config={config} />
+      </div>
+
+    <MessageScroller dependency={`${messages.length}:${textOf(last?.content ?? '').length}:${last?.reasoning?.length ?? 0}`} scrollLabel={t.latest}>
+      <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-3 py-8 sm:px-6">
+        {messages.length === 0 ? <div className="grid flex-1 place-items-center py-20 text-center">
+          <div><div className="mx-auto mb-5 grid h-12 w-12 place-items-center rounded-2xl bg-zinc-950 text-lg font-semibold text-white shadow-lg">C</div><h1 className="text-2xl font-semibold tracking-tight text-zinc-950">{t.emptyTitle}</h1><p className="mt-2 text-sm text-zinc-500">{t.emptyHint}</p></div>
+        </div> : <div className="space-y-7">
+          {messages.map(message => <Message key={message.id} from={message.role} className="gap-0">
+            <MessageContent className={message.role === 'user' ? 'order-first' : ''}>
+              {message.image && <AttachmentList><Attachment preview={message.image} name={t.image} /></AttachmentList>}
+              <Bubble className={message.role === 'user' ? 'rounded-[1.6rem] !px-3 !py-2 bg-zinc-900 text-white shadow-sm' : 'px-0 py-0 text-zinc-800'}>
+                <BubbleContent>
+                  {message.role === 'assistant' && <Thinking text={message.reasoning ?? ''} active={message.status === 'streaming' && !message.content} labels={t} />}
+                  {textOf(message.content) ? <Markdown>{textOf(message.content)}</Markdown> : null}
+                </BubbleContent>
+              </Bubble>
+              {message.role === 'assistant' && message.status !== 'streaming' && <>
+                {message.status === 'stopped' && <Marker>{t.interrupted}</Marker>}
+                {message.finishReason === 'length' && <Marker tone="danger">{t.lengthStop}</Marker>}
+                <MessageActions><IconButton label={copied === message.id ? t.copied : t.copy} onClick={() => void copy(message)}>{copied === message.id ? '✓' : '⧉'}</IconButton><IconButton label={t.retry} onClick={() => void retry(message.id)}>↻</IconButton></MessageActions>
+              </>}
+            </MessageContent>
+          </Message>)}
+        </div>}
+      </div>
+    </MessageScroller>
+
+      <div className="shrink-0 bg-gradient-to-t from-white via-white to-white/0 px-3 pb-3 pt-5 sm:px-6 sm:pb-5">
+      <form onSubmit={submit} className="mx-auto max-w-3xl">
+        {image && <AttachmentList><Attachment preview={image} name={imageName} onRemove={() => { setImage(null); setImageName('') }} removeLabel={t.removeAttachment} /></AttachmentList>}
+        <div className="flex items-center gap-1 rounded-[1.75rem] border border-zinc-200 bg-white p-1.5 shadow-[0_8px_30px_rgb(0_0_0_/_0.08)] transition focus-within:border-zinc-400 focus-within:shadow-[0_10px_35px_rgb(0_0_0_/_0.11)]">
+          {config.multimodal && <><button className="grid h-8 w-8 shrink-0 place-items-center rounded-xl text-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900" type="button" aria-label={t.attach} title={t.attach} onClick={() => file.current?.click()}>＋</button><input hidden ref={file} type="file" accept="image/*" onChange={event => chooseImage(event.target.files?.[0])} /></>}
+          <textarea ref={textarea} rows={1} className="max-h-36 min-h-8 flex-1 resize-none border-0 bg-transparent px-2 py-1.5 text-[15px] leading-6 text-zinc-900 outline-none placeholder:text-zinc-400" value={input} onChange={event => setInput(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={t.placeholder} disabled={busy} />
+          {busy ? <button type="button" onClick={stop} aria-label={t.stop} title={t.stop} className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-zinc-950 text-white hover:bg-zinc-800"><span className="h-2.5 w-2.5 rounded-sm bg-white" /></button> : <button type="submit" disabled={!input.trim() && !image} aria-label={t.send} title={t.send} className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-zinc-950 text-base text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400">↑</button>}
+        </div>
+        <div className="mt-2 flex items-center justify-between px-1 text-[11px] text-zinc-400"><span className="hidden sm:inline">{t.enterHint}</span><span className="mx-auto sm:mx-0">{t.disclaimer}</span></div>
+      </form>
+      </div>
+    </div>
+  </div>
 }

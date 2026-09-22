@@ -1,1 +1,39 @@
 @import "tailwindcss";
+
+@layer base {
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: white; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  button, textarea { font: inherit; }
+  button { cursor: pointer; }
+}
+
+@layer components {
+  .thinking-shimmer { background: linear-gradient(110deg, #a1a1aa 25%, #18181b 45%, #a1a1aa 65%); background-size: 220% 100%; background-clip: text; -webkit-background-clip: text; color: transparent; animation: thinking-shimmer 1.7s linear infinite; }
+  .chat-markdown > :first-child { margin-top: 0; }
+  .chat-markdown > :last-child { margin-bottom: 0; }
+  .chat-markdown p { margin: 0 0 0.75rem; }
+  .chat-markdown h1 { margin: 1.25rem 0 0.65rem; font-size: 1.5rem; font-weight: 650; line-height: 1.3; }
+  .chat-markdown h2 { margin: 1.15rem 0 0.55rem; font-size: 1.25rem; font-weight: 650; line-height: 1.35; }
+  .chat-markdown h3 { margin: 1rem 0 0.45rem; font-size: 1.05rem; font-weight: 650; }
+  .chat-markdown ul, .chat-markdown ol { margin: 0.75rem 0; padding-left: 1.4rem; }
+  .chat-markdown ul { list-style: disc; }
+  .chat-markdown ol { list-style: decimal; }
+  .chat-markdown li { margin: 0.2rem 0; padding-left: 0.15rem; }
+  .chat-markdown blockquote { margin: 0.85rem 0; border-left: 2px solid #d4d4d8; padding-left: 0.9rem; color: #52525b; }
+  .chat-markdown a { color: #2563eb; text-decoration: underline; text-underline-offset: 2px; }
+  .chat-markdown code { border-radius: 0.3rem; background: #f4f4f5; padding: 0.12rem 0.3rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; }
+  .chat-markdown pre { margin: 0.9rem 0; overflow-x: auto; border-radius: 0.75rem; background: #18181b; padding: 0.9rem 1rem; color: #f4f4f5; }
+  .chat-markdown pre code { background: transparent; padding: 0; color: inherit; }
+  .chat-markdown table { margin: 1rem 0; width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .chat-markdown th, .chat-markdown td { border: 1px solid #e4e4e7; padding: 0.4rem 0.65rem; text-align: left; }
+  .chat-markdown th { background: #fafafa; font-weight: 600; }
+  [data-role="user"] .chat-markdown code { background: rgb(255 255 255 / 0.14); }
+  [data-role="user"] .chat-markdown a { color: #bfdbfe; }
+}
+
+@keyframes thinking-shimmer { to { background-position: -220% 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+}
