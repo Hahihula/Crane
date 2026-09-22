@@ -202,6 +202,16 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Human-readable device label (e.g. `cuda:0`, `metal:0`, `cpu`) instead of
+/// the Rust `Debug` repr of the underlying candle device handle.
+fn format_device_name(device: &candle_core::Device) -> String {
+    match device.location() {
+        candle_core::DeviceLocation::Cpu => "cpu".to_string(),
+        candle_core::DeviceLocation::Cuda { gpu_id } => format!("cuda:{gpu_id}"),
+        candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
+    }
+}
+
 pub fn make_error(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         status,
@@ -775,7 +785,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         info!("TTS on Metal: using F32 for numerically stable sampling");
     }
 
-    let device_name = format!("{:?}", device);
+    let device_name = format_device_name(&device);
     let dtype_name = format!("{:?}", dtype);
     info!("Device: {}, dtype: {}", device_name, dtype_name);
 
@@ -1345,8 +1355,9 @@ pub async fn run(mut args: Args) -> Result<()> {
             args.quant.as_deref(),
         )?;
         info!(
-            "Model loaded successfully (type: {:?}, format: {:?})",
-            resolved_type, format
+            "Model loaded successfully (type: {}, format: {:?})",
+            resolved_type.display_name(),
+            format
         );
         // Install candle's affinity-pinned rayon pool so warmup's forward passes run on warm threads.
         device.with_context(|| backend.warmup());

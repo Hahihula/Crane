@@ -1690,7 +1690,7 @@ impl InferenceEngine {
                 completion_tokens,
                 finish_reason = %finish_reason,
                 decode_tok_s = format!("{:.1}", decode_tok_s),
-                ttft_ms = ?ttft_ms,
+                ttft_ms,
                 "Sequence finished",
             );
 
