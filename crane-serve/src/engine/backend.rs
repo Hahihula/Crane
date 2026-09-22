@@ -12,7 +12,7 @@
 //! | Batch decode      | No       | Sequences decoded sequentially per step        |
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use crane_core::{DType, Device, Tensor, bail};
 
 /// Per-layer KV cache for one sequence: `(K, V)` per layer, or `None` for
 /// layers with no cached state yet.
@@ -107,8 +107,8 @@ pub trait ModelBackend: Send + 'static {
         &mut self,
         _seq_kv_caches: &[SequenceKvCaches],
         _extra_room: usize,
-    ) -> candle_core::Result<(Vec<usize>, usize)> {
-        candle_core::bail!("Batch decode not supported by this backend")
+    ) -> crane_core::Result<(Vec<usize>, usize)> {
+        bail!("Batch decode not supported by this backend")
     }
 
     /// Run one batched decode step.
@@ -122,8 +122,8 @@ pub trait ModelBackend: Send + 'static {
         _positions: &[usize],
         _attention_mask: Option<&Tensor>,
         _batch_kv_info: Option<(&[usize], usize)>,
-    ) -> candle_core::Result<Tensor> {
-        candle_core::bail!("Batch decode not supported by this backend")
+    ) -> crane_core::Result<Tensor> {
+        bail!("Batch decode not supported by this backend")
     }
 
     /// Extract per-sequence KV caches from batched state.
@@ -136,8 +136,8 @@ pub trait ModelBackend: Send + 'static {
         _kv_lens: &[usize],
         _original_max_kv: usize,
         _rounds_done: usize,
-    ) -> candle_core::Result<Vec<SequenceKvCaches>> {
-        candle_core::bail!("Batch decode not supported by this backend")
+    ) -> crane_core::Result<Vec<SequenceKvCaches>> {
+        bail!("Batch decode not supported by this backend")
     }
 
     /// Build attention mask for batched decoding.
@@ -150,8 +150,8 @@ pub trait ModelBackend: Send + 'static {
         _kv_lens: &[usize],
         _original_max_kv: usize,
         _max_total_width: usize,
-    ) -> candle_core::Result<Option<Tensor>> {
-        candle_core::bail!("Batch decode not supported by this backend")
+    ) -> crane_core::Result<Option<Tensor>> {
+        bail!("Batch decode not supported by this backend")
     }
 }
 
@@ -318,7 +318,7 @@ impl ModelBackend for HunyuanBackend {
         &mut self,
         seq_kv_caches: &[Vec<Option<(Tensor, Tensor)>>],
         extra_room: usize,
-    ) -> candle_core::Result<(Vec<usize>, usize)> {
+    ) -> crane_core::Result<(Vec<usize>, usize)> {
         self.model.setup_batch_decode(seq_kv_caches, extra_room)
     }
 
@@ -328,7 +328,7 @@ impl ModelBackend for HunyuanBackend {
         positions: &[usize],
         attention_mask: Option<&Tensor>,
         batch_kv_info: Option<(&[usize], usize)>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> crane_core::Result<Tensor> {
         self.model.step_batch_decode_with_input_ids(
             input_ids,
             positions,
@@ -342,7 +342,7 @@ impl ModelBackend for HunyuanBackend {
         kv_lens: &[usize],
         original_max_kv: usize,
         rounds_done: usize,
-    ) -> candle_core::Result<Vec<Vec<Option<(Tensor, Tensor)>>>> {
+    ) -> crane_core::Result<Vec<Vec<Option<(Tensor, Tensor)>>>> {
         self.model
             .extract_batch_kv(kv_lens, original_max_kv, rounds_done)
     }
@@ -352,7 +352,7 @@ impl ModelBackend for HunyuanBackend {
         kv_lens: &[usize],
         original_max_kv: usize,
         max_total_width: usize,
-    ) -> candle_core::Result<Option<Tensor>> {
+    ) -> crane_core::Result<Option<Tensor>> {
         crane_core::models::hunyuan_dense::modeling::build_batch_decode_mask(
             kv_lens,
             original_max_kv,
@@ -538,7 +538,7 @@ impl Qwen3_5Backend {
         device: &Device,
         dtype: &DType,
         format: crane_core::models::qwen3_5::ModelFormat,
-        quant: Option<candle_core::quantized::GgmlDType>,
+        quant: Option<crane_core::GgmlDType>,
     ) -> Result<Self> {
         let model = match quant {
             Some(dt) => crane_core::models::qwen3_5::Model::new_with_options(
@@ -715,7 +715,7 @@ impl ModelBackend for Qwen3Backend {
         &mut self,
         seq_kv_caches: &[Vec<Option<(Tensor, Tensor)>>],
         extra_room: usize,
-    ) -> candle_core::Result<(Vec<usize>, usize)> {
+    ) -> crane_core::Result<(Vec<usize>, usize)> {
         self.model.setup_batch_decode(seq_kv_caches, extra_room)
     }
 
@@ -725,7 +725,7 @@ impl ModelBackend for Qwen3Backend {
         positions: &[usize],
         attention_mask: Option<&Tensor>,
         batch_kv_info: Option<(&[usize], usize)>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> crane_core::Result<Tensor> {
         self.model.step_batch_decode_with_input_ids(
             input_ids,
             positions,
@@ -739,7 +739,7 @@ impl ModelBackend for Qwen3Backend {
         kv_lens: &[usize],
         original_max_kv: usize,
         rounds_done: usize,
-    ) -> candle_core::Result<Vec<Vec<Option<(Tensor, Tensor)>>>> {
+    ) -> crane_core::Result<Vec<Vec<Option<(Tensor, Tensor)>>>> {
         self.model
             .extract_batch_kv(kv_lens, original_max_kv, rounds_done)
     }
@@ -749,7 +749,7 @@ impl ModelBackend for Qwen3Backend {
         kv_lens: &[usize],
         original_max_kv: usize,
         max_total_width: usize,
-    ) -> candle_core::Result<Option<Tensor>> {
+    ) -> crane_core::Result<Option<Tensor>> {
         crane_core::models::qwen3::modeling::build_batch_decode_mask(
             kv_lens,
             original_max_kv,

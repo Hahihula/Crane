@@ -12,7 +12,7 @@
 
 pub mod tool_call_skeleton;
 
-use candle_core::Tensor;
+use crane_core::{D, Tensor};
 
 /// What the sampler is allowed to produce for the next token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +131,7 @@ impl VocabByteTable {
 ///
 /// # Errors
 /// Returns an error if a tensor operation fails.
-pub fn apply_grammar_mask(logits: &Tensor, mask: &TokenMask) -> candle_core::Result<Tensor> {
+pub fn apply_grammar_mask(logits: &Tensor, mask: &TokenMask) -> crane_core::Result<Tensor> {
     let TokenMask::AllowOnly(allowed_ids) = mask else {
         return Ok(logits.clone());
     };
@@ -140,9 +140,9 @@ pub fn apply_grammar_mask(logits: &Tensor, mask: &TokenMask) -> candle_core::Res
     }
     let vocab = logits.dim(0)?;
     let idx = Tensor::new(allowed_ids.as_slice(), logits.device())?;
-    let saved = logits.gather(&idx, candle_core::D::Minus1)?;
+    let saved = logits.gather(&idx, D::Minus1)?;
     let masked = Tensor::full(-1e9f32, vocab, logits.device())?;
-    masked.scatter_set(&idx, &saved, candle_core::D::Minus1)?;
+    masked.scatter_set(&idx, &saved, D::Minus1)?;
     Ok(masked)
 }
 
@@ -152,18 +152,18 @@ pub fn apply_grammar_mask(logits: &Tensor, mask: &TokenMask) -> candle_core::Res
 ///
 /// # Errors
 /// Returns an error if a tensor operation fails.
-pub fn suppress_eos_inplace(logits: &Tensor, eos_token_id: &[u32]) -> candle_core::Result<()> {
+pub fn suppress_eos_inplace(logits: &Tensor, eos_token_id: &[u32]) -> crane_core::Result<()> {
     if eos_token_id.is_empty() {
         return Ok(());
     }
     let idx = Tensor::new(eos_token_id, logits.device())?;
     let neg = Tensor::full(-1e9f32, eos_token_id.len(), logits.device())?;
-    logits.scatter_set(&idx, &neg, candle_core::D::Minus1)
+    logits.scatter_set(&idx, &neg, D::Minus1)
 }
 
 #[cfg(test)]
 mod tests {
-    use candle_core::Device;
+    use crane_core::Device;
 
     use super::*;
 

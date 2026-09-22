@@ -4,7 +4,7 @@
 //! file cap) — this is the one section of that file with no dependency on
 //! `InferenceEngine` itself, so it lifts out cleanly.
 
-use candle_core::Device;
+use crane_core::Device;
 
 // ─────────────────────────────────────────────────────────────
 //  Memory configuration
@@ -111,51 +111,15 @@ impl MemoryConfig {
     }
 
     /// Query total GPU memory (bytes). Returns 0 if unavailable.
-    fn query_total_gpu_memory(_device: &Device) -> u64 {
-        #[cfg(feature = "cuda")]
-        {
-            if let Device::Cuda(_) = _device {
-                if let Ok((_free, total)) =
-                    candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-                {
-                    return total as u64;
-                }
-            }
-        }
-        #[cfg(feature = "rocm")]
-        {
-            if let Device::Rocm(_) = _device
-                && let Ok(info) = candle_core::rocm_backend::rocm_rs::hip::memory_info()
-            {
-                return info.total as u64;
-            }
-        }
-        0
+    fn query_total_gpu_memory(device: &Device) -> u64 {
+        crane_core::device_memory_info(device).map_or(0, |(_free, total)| total)
     }
 }
 
 /// Query current GPU memory usage. Returns (`used_bytes`, `total_bytes`).
 /// Returns (0, 0) if the device is neither CUDA nor ROCm (or the query fails).
-pub(super) fn query_gpu_memory_usage(_device: &Device) -> (u64, u64) {
-    #[cfg(feature = "cuda")]
-    {
-        if let Device::Cuda(_) = _device {
-            if let Ok((free, total)) =
-                candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            {
-                return ((total - free) as u64, total as u64);
-            }
-        }
-    }
-    #[cfg(feature = "rocm")]
-    {
-        if let Device::Rocm(_) = _device
-            && let Ok(info) = candle_core::rocm_backend::rocm_rs::hip::memory_info()
-        {
-            return ((info.total - info.free) as u64, info.total as u64);
-        }
-    }
-    (0, 0)
+pub(super) fn query_gpu_memory_usage(device: &Device) -> (u64, u64) {
+    crane_core::device_memory_info(device).map_or((0, 0), |(free, total)| (total - free, total))
 }
 
 /// Raise a KV budget to fit at least one full `max_seq_len` sequence.

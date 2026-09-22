@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use crane_core::{D, DType, Device, Tensor, bail, softmax_last_dim};
 use tracing::debug;
 
 use super::grammar::{TokenMask, apply_grammar_mask, suppress_eos_inplace};
@@ -79,7 +79,7 @@ impl SamplingBuffers {
     /// # Errors
     ///
     /// Returns an error if tensor allocation on `device` fails.
-    pub fn get_topk_neg_vec(&mut self, k: usize, device: &Device) -> candle_core::Result<Tensor> {
+    pub fn get_topk_neg_vec(&mut self, k: usize, device: &Device) -> crane_core::Result<Tensor> {
         if let Some(t) = self.topk_neg_vecs.get(&k)
             && t.device().same_device(device)
         {
@@ -93,14 +93,14 @@ impl SamplingBuffers {
     /// # Errors
     ///
     /// Returns an error if `k <= 1` or tensor allocation on `device` fails.
-    pub fn get_topk_shift_idx(&mut self, k: usize, device: &Device) -> candle_core::Result<Tensor> {
+    pub fn get_topk_shift_idx(&mut self, k: usize, device: &Device) -> crane_core::Result<Tensor> {
         if let Some(t) = self.topk_shift_idxs.get(&k)
             && t.device().same_device(device)
         {
             return Ok(t.clone());
         }
         if k <= 1 {
-            candle_core::bail!("get_topk_shift_idx expects k > 1")
+            bail!("get_topk_shift_idx expects k > 1")
         }
         #[allow(clippy::cast_possible_truncation)]
         let t = Tensor::arange(1u32, k as u32, device)?;
@@ -116,7 +116,7 @@ impl SamplingBuffers {
         k: usize,
         device: &Device,
         dtype: DType,
-    ) -> candle_core::Result<Tensor> {
+    ) -> crane_core::Result<Tensor> {
         if let Some(t) = self.topk_shift_bufs.get(&k)
             && t.device().same_device(device)
             && t.dtype() == dtype
@@ -131,11 +131,7 @@ impl SamplingBuffers {
     /// # Errors
     ///
     /// Returns an error if tensor allocation on `device` fails.
-    pub fn get_topk_cumsum_mat(
-        &mut self,
-        k: usize,
-        device: &Device,
-    ) -> candle_core::Result<Tensor> {
+    pub fn get_topk_cumsum_mat(&mut self, k: usize, device: &Device) -> crane_core::Result<Tensor> {
         if let Some(t) = self.topk_cumsum_mats.get(&k)
             && t.device().same_device(device)
         {
@@ -251,9 +247,7 @@ pub fn sample(
                 }
                 if super::grammar_trace_enabled() {
                     let idx = Tensor::new(ids.as_slice(), logits.device())?;
-                    let vals = logits
-                        .gather(&idx, candle_core::D::Minus1)?
-                        .to_vec1::<f32>()?;
+                    let vals = logits.gather(&idx, D::Minus1)?.to_vec1::<f32>()?;
                     let pairs: Vec<String> = ids
                         .iter()
                         .zip(vals.iter())
@@ -313,7 +307,7 @@ pub fn sample(
         if top_k > 0 && top_k < vocab {
             let topk_idx =
                 crane_core::ops::topk_indices(&logits, top_k).map_err(anyhow::Error::from)?;
-            let topk_logits = logits.gather(&topk_idx, candle_core::D::Minus1)?;
+            let topk_logits = logits.gather(&topk_idx, D::Minus1)?;
             let t_after_topk = Instant::now();
 
             if std::env::var("CRANE_TOPK_SAMPLE_ON_CPU").ok().as_deref() == Some("1") {
@@ -353,7 +347,7 @@ pub fn sample(
 
             if top_p_active {
                 let scaled = (&topk_logits / temperature)?;
-                let probs = candle_nn::ops::softmax_last_dim(&scaled)?;
+                let probs = softmax_last_dim(&scaled)?;
                 let cumsum_mat = buffers.get_topk_cumsum_mat(top_k, logits.device())?;
                 let cumsum = probs
                     .reshape((1, top_k))?
@@ -365,8 +359,8 @@ pub fn sample(
                 shift.zero_set()?;
                 if top_k > 1 {
                     let idx = buffers.get_topk_shift_idx(top_k, logits.device())?;
-                    let src = mask_le.narrow(candle_core::D::Minus1, 0, top_k - 1)?;
-                    shift.scatter_set(&idx, &src, candle_core::D::Minus1)?;
+                    let src = mask_le.narrow(D::Minus1, 0, top_k - 1)?;
+                    shift.scatter_set(&idx, &src, D::Minus1)?;
                 }
                 let mask = (&mask_le + &shift)?.gt(0f64)?;
 
@@ -376,7 +370,7 @@ pub fn sample(
                 if pos.rank() == 0 {
                     pos = pos.unsqueeze(0)?;
                 }
-                let token = topk_idx.gather(&pos, candle_core::D::Minus1)?;
+                let token = topk_idx.gather(&pos, D::Minus1)?;
                 let token = token.squeeze(0)?.to_scalar::<u32>()?;
                 if trace {
                     trace_sample(seq_id, "gpu_topk_topp", seq, top_k, t0);
@@ -388,7 +382,7 @@ pub fn sample(
             if pos.rank() == 0 {
                 pos = pos.unsqueeze(0)?;
             }
-            let token = topk_idx.gather(&pos, candle_core::D::Minus1)?;
+            let token = topk_idx.gather(&pos, D::Minus1)?;
             let token = token.squeeze(0)?.to_scalar::<u32>()?;
             if trace {
                 trace_sample(seq_id, "gpu_topk", seq, top_k, t0);
@@ -422,15 +416,15 @@ pub fn sample(
 /// Returns an error if a tensor operation fails.
 // `temperature == 1.0` is the exact "no scaling" sentinel, not a computed value.
 #[allow(clippy::float_cmp)]
-pub fn sample_gumbel_max_idx(logits: &Tensor, temperature: f64) -> candle_core::Result<Tensor> {
+pub fn sample_gumbel_max_idx(logits: &Tensor, temperature: f64) -> crane_core::Result<Tensor> {
     if temperature <= 0.0 {
-        return logits.argmax(candle_core::D::Minus1);
+        return logits.argmax(D::Minus1);
     }
     let minus_g = logits.rand_like(1e-7, 0.999)?.log()?.neg()?.log()?;
     if temperature == 1.0 {
-        (logits - minus_g)?.argmax(candle_core::D::Minus1)
+        (logits - minus_g)?.argmax(D::Minus1)
     } else {
-        ((logits / temperature)? - minus_g)?.argmax(candle_core::D::Minus1)
+        ((logits / temperature)? - minus_g)?.argmax(D::Minus1)
     }
 }
 
@@ -468,7 +462,7 @@ pub fn apply_penalties_inplace(
     frequency_penalty: f32,
     presence_penalty: f32,
     context: &[u32],
-) -> candle_core::Result<()> {
+) -> crane_core::Result<()> {
     // `repetition_penalty`/`frequency_penalty`/`presence_penalty` are each
     // compared against their exact "disabled" sentinel, not a computed
     // float, so strict equality is correct.
@@ -489,7 +483,7 @@ pub fn apply_penalties_inplace(
     token_ids.sort_unstable();
 
     let idx = Tensor::new(token_ids.as_slice(), logits.device())?;
-    let selected = logits.gather(&idx, candle_core::D::Minus1)?;
+    let selected = logits.gather(&idx, D::Minus1)?;
 
     let selected = if repetition_active {
         let mask = selected.ge(0f64)?;
@@ -517,7 +511,7 @@ pub fn apply_penalties_inplace(
         selected
     };
 
-    logits.scatter_set(&idx, &updated, candle_core::D::Minus1)
+    logits.scatter_set(&idx, &updated, D::Minus1)
 }
 
 /// Generate a random seed from system time.

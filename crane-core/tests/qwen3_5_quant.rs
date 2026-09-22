@@ -25,21 +25,23 @@
 //! byte-comparable, which is how the LinearLayer refactor and the quantized
 //! paths are validated against the bf16 baseline.
 
-use candle_core::quantized::GgmlDType;
-use candle_core::{DType, Device};
+use crane_core::candle_core;
+#[cfg(feature = "cuda")]
+use crane_core::cuda_is_available;
 use crane_core::generation::GenerationConfig;
 use crane_core::generation::based::ModelForCausalLM;
 use crane_core::models::qwen3_5::{Model, ModelFormat};
+use crane_core::{DType, Device, GgmlDType, metal_is_available};
 
 const PROMPT: &str = "<|im_start|>user\nBriefly explain what a crane (the bird) looks like.<|im_end|>\n<|im_start|>assistant\n";
 const MAX_NEW_TOKENS: usize = 48;
 
 fn device_and_dtype() -> (Device, DType) {
     #[cfg(feature = "cuda")]
-    if candle_core::utils::cuda_is_available() {
+    if cuda_is_available() {
         return (Device::new_cuda(0).unwrap(), DType::F16);
     }
-    if candle_core::utils::metal_is_available() {
+    if metal_is_available() {
         return (Device::new_metal(0).unwrap(), DType::F16);
     }
     (Device::Cpu, DType::F32)

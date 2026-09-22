@@ -21,6 +21,8 @@ fn main() -> anyhow::Result<()> {
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use candle_core::{Device, Tensor};
 #[cfg(any(feature = "cuda", feature = "rocm"))]
+use crane_core::candle_core;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use std::time::Instant;
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]

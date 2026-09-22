@@ -16,6 +16,8 @@ fn main() -> anyhow::Result<()> {
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use candle_core::{DType, Device, Tensor};
 #[cfg(any(feature = "cuda", feature = "rocm"))]
+use crane_core::{candle_core, candle_nn};
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use std::time::Instant;
 
 #[cfg(feature = "cuda")]

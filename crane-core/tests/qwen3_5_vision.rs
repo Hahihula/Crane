@@ -6,6 +6,7 @@
 //! regressions when the vision module's shape conventions change.
 
 use candle_core::Device;
+use crane_core::{candle_core, candle_nn};
 
 #[test]
 #[ignore = "needs a local Qwen3.5 multimodal checkpoint (CRANE_QWEN35_VL_DIR)"]

@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
+use crane_core::candle_core;
 
 use crane_core::generation::SpeechOptions;
 

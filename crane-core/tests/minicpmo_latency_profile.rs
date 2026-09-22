@@ -16,6 +16,8 @@
 //!
 //! Gated by `CRANE_MINICPMO_DIR`.
 
+use crane_core::{candle_core, candle_nn};
+
 #[test]
 #[ignore = "needs a local MiniCPM-o-4.5 checkpoint (CRANE_MINICPMO_DIR); profiling only, no assertions"]
 fn minicpmo_profile_llm_and_tts_latency() {
