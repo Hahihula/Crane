@@ -76,21 +76,24 @@ pub struct Args {
     /// running out of memory.
     #[arg(short = 'c', long, default_value_t = 16, help_heading = "Scheduler")]
     pub max_concurrent: usize,
-    /// How many tokens each request generates before yielding to other
-    /// requests in the batch. Default `16`. Higher values let individual
-    /// requests finish faster but slow down other concurrent requests.
+    /// Tokens generated per request before switching to the next one.
+    /// Default `16`. Higher values speed up individual requests but slow
+    /// down others running at the same time.
     #[arg(long, default_value_t = 16, help_heading = "Scheduler")]
     pub decode_tokens_per_seq: usize,
-    /// Weight format: `auto`, `safetensors`, or `gguf`. Default `auto`
+    /// Model file format: `auto`, `safetensors`, or `gguf`. Default `auto`
     /// (detected from files in the model directory).
     #[arg(long, default_value = "auto", help_heading = "Model")]
     pub format: String,
-    /// In-situ quantization level for safetensors checkpoints (e.g. q4k,
-    /// q8_0). Currently supported for qwen3_5 only. Overrides `CRANE_ISQ`.
+    /// Quantize the model on load to reduce memory usage (e.g. `q4k`,
+    /// `q8_0`). Only supported for Qwen 3.5 models with safetensors
+    /// weights. Overrides `CRANE_ISQ`.
     #[arg(long, help_heading = "Model")]
     pub quant: Option<String>,
-    /// Compute dtype: f16, bf16 or f32. Defaults per device: BF16 on CUDA,
-    /// F16 on ROCm and Metal, and F32 on CPU.
+    /// Floating-point precision for inference: `f16` (half), `bf16`
+    /// (bfloat16), or `f32` (full). Lower precision uses less memory and
+    /// is faster. Default: `bf16` on NVIDIA GPUs, `f16` on AMD/Apple GPUs,
+    /// `f32` on CPU.
     #[arg(long, help_heading = "Model")]
     pub dtype: Option<String>,
     /// Maximum sequence length in tokens. Default `0` (unlimited). See
@@ -108,23 +111,15 @@ pub struct Args {
     /// engine mode (not TTS/ASR/VLM/duplex).
     #[arg(long, help_heading = "Memory")]
     pub gpu_memory_limit: Option<String>,
-    /// MiniCPM-o duplex only: load the LLM tower from a standalone
-    /// quantized GGUF file (e.g. a llama.cpp-style Qwen3 conversion like
-    /// `MiniCPM-o-4_5-Q8_0.gguf`) instead of the checkpoint's own bf16
-    /// safetensors weights, cutting the LLM's VRAM footprint roughly in
-    /// half — the other five towers still load from `-m`'s checkpoint
-    /// directory as usual. `-m` must still point at a real checkpoint
-    /// directory (tokenizer/config and the other towers are read from
-    /// there regardless).
+    /// MiniCPM-o duplex only: load the language model from a quantized
+    /// GGUF file (e.g. `MiniCPM-o-4_5-Q8_0.gguf`) to cut its memory usage
+    /// roughly in half. The other model components still load from the
+    /// directory given by `-m`.
     #[arg(long, help_heading = "Model")]
     pub llm_gguf: Option<String>,
-    /// Qwen 3.5-VL / Ornith only: load the checkpoint as a plain text model
-    /// instead of a VLM, even though `config.json` declares a `vision_config`
-    /// (and `--model-type` is `auto` or `qwen3_5_vl`). The vision tower's
-    /// weights are simply never read — same checkpoint directory, no extra
-    /// VRAM for the ~600M-param ViT — and this path also unlocks `--quant`,
-    /// which the VLM load path does not support. Models are vision-capable by
-    /// default; this is an opt-out, not the default.
+    /// Qwen 3.5-VL / Ornith only: disable the vision component and load
+    /// only the text model. Saves ~600M parameters worth of GPU memory and
+    /// enables `--quant`, which the vision-capable path does not support.
     #[arg(long, help_heading = "Model")]
     pub text_only: bool,
     /// API key required to access non-exempt endpoints (`/health`,
