@@ -38,7 +38,7 @@ use openai_api::ErrorResponse;
 #[command(about = "OpenAI & SGLang compatible API server with continuous batching")]
 pub struct Args {
     /// Path to a downloaded model directory or a single `.gguf` file.
-    #[arg(short = 'm', long)]
+    #[arg(short = 'm', long, help_heading = "Model")]
     pub model_path: String,
     /// Model architecture. Usually auto-detected from the model's
     /// `config.json`; set this only if auto-detection picks the wrong one.
@@ -46,67 +46,67 @@ pub struct Args {
     /// `minicpmv46`, `minicpmo`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`,
     /// `qwen3_tts`, `voxtral_tts`, `kokoro`, `voxcpm2`, `paddleocr_vl`,
     /// `qwen3_asr`.
-    #[arg(long, default_value = "auto")]
+    #[arg(long, default_value = "auto", help_heading = "Model")]
     pub model_type: String,
     /// Display name reported by `/v1/models`. Defaults to the directory name
     /// of `--model-path` when unset.
-    #[arg(long)]
+    #[arg(long, help_heading = "Model")]
     pub model_name: Option<String>,
     /// Listen address. Default `0.0.0.0` (all interfaces). Use `127.0.0.1`
     /// to restrict to localhost.
-    #[arg(long, default_value = "0.0.0.0")]
+    #[arg(long, default_value = "0.0.0.0", help_heading = "Server")]
     pub host: String,
     /// Listen port. Default `8080`.
-    #[arg(short = 'p', long, default_value_t = 8080)]
+    #[arg(short = 'p', long, default_value_t = 8080, help_heading = "Server")]
     pub port: u16,
     /// Serve HTTP/1.1 over a Unix domain socket at this path instead of TCP.
     /// A stale socket file left by a crashed run is removed before binding,
     /// and the new socket is created with 0600 permissions. Unix only.
     #[cfg(unix)]
-    #[arg(long)]
+    #[arg(long, help_heading = "Server")]
     pub unix_socket: Option<std::path::PathBuf>,
     /// Serve Crane's built-in browser UI at `/`. Disabled by default.
-    #[arg(long)]
+    #[arg(long, help_heading = "Server")]
     pub ui: bool,
     /// Force CPU-only inference, ignoring any available GPU.
-    #[arg(long)]
+    #[arg(long, help_heading = "Memory")]
     pub cpu: bool,
     /// Maximum number of requests that can be processed at the same time.
     /// Default `16`. Increase for higher throughput; decrease if you are
     /// running out of memory.
-    #[arg(short = 'c', long, default_value_t = 16)]
+    #[arg(short = 'c', long, default_value_t = 16, help_heading = "Scheduler")]
     pub max_concurrent: usize,
     /// How many tokens each request generates before yielding to other
     /// requests in the batch. Default `16`. Higher values let individual
     /// requests finish faster but slow down other concurrent requests.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 16, help_heading = "Scheduler")]
     pub decode_tokens_per_seq: usize,
     /// Weight format: `auto`, `safetensors`, or `gguf`. Default `auto`
     /// (detected from files in the model directory).
-    #[arg(long, default_value = "auto")]
+    #[arg(long, default_value = "auto", help_heading = "Model")]
     pub format: String,
     /// In-situ quantization level for safetensors checkpoints (e.g. q4k,
     /// q8_0). Currently supported for qwen3_5 only. Overrides `CRANE_ISQ`.
-    #[arg(long)]
+    #[arg(long, help_heading = "Model")]
     pub quant: Option<String>,
     /// Compute dtype: f16, bf16 or f32. Defaults per device: BF16 on CUDA,
     /// F16 on ROCm and Metal, and F32 on CPU.
-    #[arg(long)]
+    #[arg(long, help_heading = "Model")]
     pub dtype: Option<String>,
     /// Maximum sequence length in tokens. Default `0` (unlimited). See
     /// `--context` for a human-readable alternative (e.g. `128K`).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, help_heading = "Scheduler")]
     pub max_seq_len: usize,
     /// Maximum context length as a human-readable token count. Accepts K
     /// (x1024) and M (x1024^2) suffixes, e.g. `128K` = 131072 tokens.
     /// Mutually exclusive with `--max-seq-len`.
-    #[arg(long, conflicts_with = "max_seq_len")]
+    #[arg(long, conflicts_with = "max_seq_len", help_heading = "Scheduler")]
     pub context: Option<String>,
     /// GPU memory budget: either a fraction of total VRAM (`0.9`), an absolute
     /// size (`8G`, `8GB`, `8GiB`, `5120M`, `5120MiB` — all binary units), or a
     /// plain byte count. Unset or `0` means unlimited. Only enforced for LLM
     /// engine mode (not TTS/ASR/VLM/duplex).
-    #[arg(long)]
+    #[arg(long, help_heading = "Memory")]
     pub gpu_memory_limit: Option<String>,
     /// MiniCPM-o duplex only: load the LLM tower from a standalone
     /// quantized GGUF file (e.g. a llama.cpp-style Qwen3 conversion like
@@ -116,7 +116,7 @@ pub struct Args {
     /// directory as usual. `-m` must still point at a real checkpoint
     /// directory (tokenizer/config and the other towers are read from
     /// there regardless).
-    #[arg(long)]
+    #[arg(long, help_heading = "Model")]
     pub llm_gguf: Option<String>,
     /// Qwen 3.5-VL / Ornith only: load the checkpoint as a plain text model
     /// instead of a VLM, even though `config.json` declares a `vision_config`
@@ -125,7 +125,7 @@ pub struct Args {
     /// VRAM for the ~600M-param ViT — and this path also unlocks `--quant`,
     /// which the VLM load path does not support. Models are vision-capable by
     /// default; this is an opt-out, not the default.
-    #[arg(long)]
+    #[arg(long, help_heading = "Model")]
     pub text_only: bool,
     /// API key required to access non-exempt endpoints (`/health`,
     /// `/v1/stats`, `/`, and `/ui/*` excluded). Repeatable to configure
@@ -138,12 +138,13 @@ pub struct Args {
         env = "CRANE_API_KEY",
         num_args = 0..=1,
         default_missing_value = "",
-        action = clap::ArgAction::Append
+        action = clap::ArgAction::Append,
+        help_heading = "Authentication"
     )]
     pub api_key: Vec<String>,
     /// File with one API key per line; `#`-prefixed lines are comments.
     /// Combines with `--api-key`.
-    #[arg(long, env = "CRANE_API_KEY_FILE")]
+    #[arg(long, env = "CRANE_API_KEY_FILE", help_heading = "Authentication")]
     pub api_key_file: Option<String>,
 }
 
