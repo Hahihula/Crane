@@ -776,6 +776,22 @@ fn parse_context_size(s: &str) -> Result<usize> {
 }
 
 pub async fn run(mut args: Args) -> Result<()> {
+    let model_path = std::path::Path::new(&args.model_path);
+    if args.format.to_lowercase() == "gguf" || args.model_path.ends_with(".gguf") {
+        anyhow::ensure!(
+            model_path.is_file(),
+            "--model-path '{}' is not a file. GGUF format requires a path to a .gguf file.",
+            args.model_path
+        );
+    } else {
+        anyhow::ensure!(
+            model_path.is_dir(),
+            "--model-path '{}' is not a directory. Provide the path to a model directory \
+             (or use --format gguf for a single .gguf file).",
+            args.model_path
+        );
+    }
+
     info!("Loading model from: {}", args.model_path);
 
     if let Some(ref ctx) = args.context {
