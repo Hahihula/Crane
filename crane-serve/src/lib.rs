@@ -25,7 +25,7 @@ use axum::{
 };
 use clap::Parser;
 use crane_core::utils::DeviceExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use chat_template::ChatTemplateProcessor;
 use engine::model_factory::{ModelFormat, ModelType};
@@ -814,7 +814,23 @@ pub async fn run(mut args: Args) -> Result<()> {
     };
 
     let model_type = ModelType::from_str(&args.model_type);
+    if model_type == ModelType::Auto && args.model_type.to_lowercase() != "auto" {
+        warn!(
+            input = %args.model_type,
+            "Unrecognized --model-type, falling back to auto-detect. Known values: auto, \
+             gemma4, gemma4_vl, hunyuan, minicpm5, minicpmv46, minicpmo, qwen25, qwen3, \
+             qwen3_5, qwen3_5_vl, qwen3_tts, voxtral_tts, kokoro, voxcpm2, paddleocr_vl, \
+             qwen3_asr"
+        );
+    }
     let format = ModelFormat::from_str(&args.format);
+    if format == ModelFormat::Auto && args.format.to_lowercase() != "auto" {
+        warn!(
+            input = %args.format,
+            "Unrecognized --format, falling back to auto-detect. Known values: auto, \
+             safetensors, gguf"
+        );
+    }
 
     let resolved_type = if model_type == ModelType::Auto {
         engine::model_factory::detect_model_type(&args.model_path)
