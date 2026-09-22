@@ -177,6 +177,10 @@ pub struct AppState {
     pub duplex_lock: Arc<tokio::sync::Mutex<()>>,
     pub model_path: String,
     pub model_type_name: String,
+    /// Active serving mode: `"llm"`, `"vlm"`, `"tts"`, `"asr"`, or `"duplex"`.
+    /// Used to phrase error messages for endpoints unavailable in the
+    /// current mode.
+    pub mode: &'static str,
     pub dtype_name: String,
     pub device_name: String,
     pub host: String,
@@ -1506,6 +1510,17 @@ pub async fn run(mut args: Args) -> Result<()> {
         .clone()
         .unwrap_or_else(|| "unlimited".to_string());
     let api_keys = load_api_keys(&args.api_key, args.api_key_file.as_deref())?;
+    let mode = if is_vlm {
+        "vlm"
+    } else if is_tts {
+        "tts"
+    } else if is_asr {
+        "asr"
+    } else if is_duplex {
+        "duplex"
+    } else {
+        "llm"
+    };
     let state = Arc::new(AppState {
         engine: engine_handle,
         model_name: model_name.clone(),
@@ -1523,6 +1538,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         duplex_lock: Arc::new(tokio::sync::Mutex::new(())),
         model_path: args.model_path.clone(),
         model_type_name: resolved_type.display_name().to_string(),
+        mode,
         dtype_name,
         device_name,
         host: args.host.clone(),
@@ -1838,6 +1854,7 @@ mod auth_middleware_tests {
             duplex_lock: Arc::new(tokio::sync::Mutex::new(())),
             model_path: "test".to_string(),
             model_type_name: "test".to_string(),
+            mode: "llm",
             dtype_name: "f32".to_string(),
             device_name: "cpu".to_string(),
             host: "127.0.0.1".to_string(),
