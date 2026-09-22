@@ -12,8 +12,8 @@ name = "crane_serve"
 path = "src/lib.rs"
 
 [dependencies]
-crane-core = { version = "26.9.0", path = "../crane-core" }
-crane = { package = "crane-ai", version = "26.9.0", path = "../crane" }
+crane-core = { version = "26.9.0", path = "../crane-core", default-features = false }
+crane = { package = "crane-ai", version = "26.9.0", path = "../crane", default-features = false }
 anyhow = "1.0"
 axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 tokio = { version = "1", features = ["full"] }
@@ -37,6 +37,11 @@ base64 = "0.23"
 subtle = "2"
 
 [features]
+# See `crane-core/Cargo.toml`'s `candle-default` comment: both `crane-core`
+# and `crane`'s own defaults are disabled above so `rocm` (built with
+# `--no-default-features`) doesn't drag in the plain candle backend
+# alongside the fork.
+default = ["crane-core/candle-default"]
 metal = [
     "crane-core/metal",
     "crane/metal",
