@@ -668,11 +668,10 @@ impl Mlp {
     ///
     /// Returns an error if the underlying tensor operations fail.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = candle_nn::ops::silu(&self.gate.forward(x)?)?;
+        let gate = self.gate.forward(x)?;
         let up = self.up.forward(x)?;
-        let h = gate.broadcast_mul(&up)?;
-        let out = self.down.forward(&h)?;
-        Ok(out)
+        let h = crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?;
+        self.down.forward(&h)
     }
 }
 
