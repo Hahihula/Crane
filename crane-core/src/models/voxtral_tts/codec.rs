@@ -19,7 +19,7 @@
 
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{
-    Activation, Conv1d as CandleConv1d, Conv1dConfig, ConvTranspose1d as CandleConvTranspose1d,
+    Conv1d as CandleConv1d, Conv1dConfig, ConvTranspose1d as CandleConvTranspose1d,
     ConvTranspose1dConfig, Linear, VarBuilder, linear_no_bias,
 };
 
@@ -375,9 +375,9 @@ impl CodecFfn {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = x.apply(&self.w1)?.apply(&Activation::Silu)?;
+        let gate = x.apply(&self.w1)?;
         let up = x.apply(&self.w3)?;
-        (gate * up)?.apply(&self.w2)
+        crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?.apply(&self.w2)
     }
 }
 
