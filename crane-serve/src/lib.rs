@@ -13,7 +13,7 @@ pub mod ui;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -68,6 +68,12 @@ pub struct Args {
     /// Serve Crane's built-in browser UI at `/`. Disabled by default.
     #[arg(long, help_heading = "Server")]
     pub ui: bool,
+    /// Log verbosity filter. Accepts a bare level (`debug`, `info`, `warn`)
+    /// or comma-separated per-target filters (`info,crane_core=debug`).
+    /// Crate names use underscores, not hyphens. Overrides `RUST_LOG` when
+    /// both are set. Default: `RUST_LOG`, or `info` if that is also unset.
+    #[arg(long, help_heading = "Server")]
+    pub log_level: Option<String>,
     /// Force CPU-only inference, ignoring any available GPU.
     #[arg(long, help_heading = "Memory")]
     pub cpu: bool,
@@ -269,9 +275,13 @@ fn mask_api_key(key: &str) -> String {
     }
 }
 
-pub fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+pub fn init_logging(log_level: Option<&str>) -> Result<()> {
+    let filter = match log_level {
+        Some(level) => tracing_subscriber::EnvFilter::try_new(level)
+            .with_context(|| format!("invalid --log-level filter: {level}"))?,
+        None => tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -281,11 +291,13 @@ pub fn init_logging() {
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
+    Ok(())
 }
 
 pub async fn cli_main() -> Result<()> {
-    init_logging();
-    run(Args::parse()).await
+    let args = Args::parse();
+    init_logging(args.log_level.as_deref())?;
+    run(args).await
 }
 
 fn encode_tts_audio(
