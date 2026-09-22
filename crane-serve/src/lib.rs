@@ -490,15 +490,15 @@ fn run_tts_loop(
     info!("{model_name} engine thread started");
     let audio_info = tts.audio_info();
     while let Some(mut req) = tts_rx.blocking_recv() {
-        tracing::debug!(
-            "TTS request received: language={}, voice={:?}, input_len={}, stream={}",
-            req.language,
-            req.voice,
-            req.input.chars().count(),
-            matches!(
+        info!(
+            language = %req.language,
+            voice = ?req.voice,
+            input_len = req.input.chars().count(),
+            stream = matches!(
                 req.responder,
                 Some(handlers::tts::TtsResponder::Stream { .. })
             ),
+            "TTS request received",
         );
         match req.responder.take().expect("responder set on the wire") {
             handlers::tts::TtsResponder::Whole(tx) => {
