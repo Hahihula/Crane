@@ -285,12 +285,17 @@ fn log_hardware_info(device: &candle_core::Device, device_name: &str) {
 }
 
 pub fn make_error(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    let error_type = if status.is_server_error() {
+        "server_error"
+    } else {
+        "invalid_request_error"
+    };
     (
         status,
         Json(ErrorResponse {
             error: openai_api::ErrorDetail {
                 message: msg.to_string(),
-                r#type: "invalid_request_error".into(),
+                r#type: error_type.into(),
                 code: None,
             },
         }),
