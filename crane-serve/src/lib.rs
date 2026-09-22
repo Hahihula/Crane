@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod chat_template;
 pub mod engine;
 pub mod handlers;
@@ -15,6 +16,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::StatusCode,
+    middleware,
     response::Json,
     routing::{get, post},
 };
@@ -100,6 +102,24 @@ pub struct Args {
     /// default; this is an opt-out, not the default.
     #[arg(long)]
     pub text_only: bool,
+    /// API key required to access non-exempt endpoints (`/health`,
+    /// `/v1/stats`, `/`, and `/ui/*` excluded). Repeatable to configure
+    /// multiple valid keys. Pass with no value (`--api-key`) to generate a
+    /// random key printed to stdout at startup. The `CRANE_API_KEY` env var
+    /// always requires a value — key generation is CLI-only. Unset means
+    /// open access (default).
+    #[arg(
+        long,
+        env = "CRANE_API_KEY",
+        num_args = 0..=1,
+        default_missing_value = "",
+        action = clap::ArgAction::Append
+    )]
+    pub api_key: Vec<String>,
+    /// File with one API key per line; `#`-prefixed lines are comments.
+    /// Combines with `--api-key`.
+    #[arg(long, env = "CRANE_API_KEY_FILE")]
+    pub api_key_file: Option<String>,
 }
 
 pub struct AppState {
@@ -134,6 +154,8 @@ pub struct AppState {
     pub decode_tokens_per_seq: usize,
     pub max_seq_len: usize,
     pub gpu_memory_limit: String,
+    /// Valid API keys. Empty means auth is disabled (open access).
+    pub api_keys: Vec<String>,
 }
 
 pub fn now_epoch() -> u64 {
@@ -164,6 +186,66 @@ pub fn make_error(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorRespo
             },
         }),
     )
+}
+
+/// Generate a random API key. Uses a UUID v4, which packs 122 bits of
+/// randomness — far beyond what's brute-forceable — into a copy-pasteable
+/// string.
+fn generate_api_key() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Merge CLI keys and key-file keys into a deduplicated list, preserving
+/// first-seen order. Empty strings (from a bare `--api-key`) generate a
+/// random key, printed to stdout so the operator can copy it.
+fn load_api_keys(cli_keys: &[String], key_file: Option<&str>) -> Result<Vec<String>> {
+    let mut keys: Vec<String> = Vec::new();
+
+    for key in cli_keys {
+        let resolved = if key.is_empty() {
+            let generated = generate_api_key();
+            // Deliberately bypasses `tracing`/`RUST_LOG`: this is the one
+            // chance the operator has to capture the generated key, so it
+            // must print unconditionally rather than depend on the active
+            // log level.
+            println!("Generated API key: {generated}");
+            generated
+        } else {
+            key.clone()
+        };
+        if !keys.iter().any(|k| k == &resolved) {
+            keys.push(resolved);
+        }
+    }
+
+    if let Some(path) = key_file {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read API key file {path}: {e}"))?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !keys.iter().any(|k| k == trimmed)
+            {
+                keys.push(trimmed.to_string());
+            }
+        }
+    }
+
+    Ok(keys)
+}
+
+/// Mask all but the last 4 characters of an API key for safe logging, e.g.
+/// `sk-mysecretkey` becomes `****tkey`. Keys of 4 chars or fewer are fully
+/// masked.
+fn mask_api_key(key: &str) -> String {
+    let len = key.chars().count();
+    if len <= 4 {
+        "*".repeat(len)
+    } else {
+        let visible: String = key.chars().skip(len - 4).collect();
+        format!("****{visible}")
+    }
 }
 
 pub fn init_logging() {
@@ -1299,6 +1381,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         .gpu_memory_limit
         .clone()
         .unwrap_or_else(|| "unlimited".to_string());
+    let api_keys = load_api_keys(&args.api_key, args.api_key_file.as_deref())?;
     let state = Arc::new(AppState {
         engine: engine_handle,
         model_name: model_name.clone(),
@@ -1324,6 +1407,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         decode_tokens_per_seq: args.decode_tokens_per_seq,
         max_seq_len: args.max_seq_len,
         gpu_memory_limit: gpu_memory_limit_display,
+        api_keys: api_keys.clone(),
     });
     let app = build_router_with_ui(state.clone(), args.ui);
     let addr = format!("{}:{}", args.host, args.port);
@@ -1420,6 +1504,21 @@ pub async fn run(mut args: Args) -> Result<()> {
     if args.ui {
         info!(ui = %format!("http://{local_addr}/"), "browser UI enabled");
     }
+    match api_keys.as_slice() {
+        [] => {},
+        [key] => info!(key = %mask_api_key(key), "API key authentication enabled"),
+        keys => info!(count = keys.len(), "API key authentication enabled"),
+    }
+    if !api_keys.is_empty() && args.host == "0.0.0.0" {
+        tracing::warn!(
+            "API key configured but server binds 0.0.0.0 without TLS — keys are sent in cleartext over the network"
+        );
+    }
+    if !api_keys.is_empty() && args.ui {
+        tracing::warn!(
+            "API key configured with --ui enabled — the built-in browser UI does not send an API key, so its requests will be rejected with 401"
+        );
+    }
     serve.await?;
     Ok(())
 }
@@ -1481,7 +1580,226 @@ pub fn build_router_with_ui(state: Arc<AppState>, ui_enabled: bool) -> Router {
         app
     };
 
-    app.with_state(state)
+    app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_api_key,
+    ))
+    .with_state(state)
+}
+
+#[cfg(test)]
+mod auth_config_tests {
+    use super::*;
+
+    // Verifies CLI keys and key-file keys are merged, comments/blank lines
+    // in the file are skipped, and duplicates across both sources are
+    // removed while preserving first-seen order.
+    #[test]
+    fn load_api_keys_merges_and_dedups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.txt");
+        std::fs::write(&path, "# comment\n\nkey2\nkey3\nkey1\n").unwrap();
+
+        let cli_keys = vec!["key1".to_string(), "key1".to_string()];
+        let keys = load_api_keys(&cli_keys, Some(path.to_str().unwrap())).unwrap();
+
+        assert_eq!(keys, vec!["key1", "key2", "key3"]);
+    }
+
+    // Verifies a bare `--api-key` (empty string) generates a random key
+    // instead of being silently dropped.
+    #[test]
+    fn load_api_keys_generates_for_empty_string() {
+        let keys = load_api_keys(&[String::new()], None).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(uuid::Uuid::parse_str(&keys[0]).is_ok());
+    }
+
+    #[test]
+    fn generate_api_key_is_a_valid_uuid() {
+        let key = generate_api_key();
+        assert!(uuid::Uuid::parse_str(&key).is_ok());
+    }
+
+    #[test]
+    fn generate_api_key_is_unique_per_call() {
+        assert_ne!(generate_api_key(), generate_api_key());
+    }
+
+    // Verifies an empty CLI key list with no key file yields no keys (open access).
+    #[test]
+    fn load_api_keys_empty_when_unconfigured() {
+        let keys = load_api_keys(&[], None).unwrap();
+        assert!(keys.is_empty());
+    }
+
+    // Verifies a missing key file surfaces an error instead of silently
+    // producing no keys.
+    #[test]
+    fn load_api_keys_errors_on_missing_file() {
+        assert!(load_api_keys(&[], Some("/nonexistent/path/keys.txt")).is_err());
+    }
+
+    #[test]
+    fn mask_api_key_keeps_last_four_chars() {
+        assert_eq!(mask_api_key("sk-mysecretkey"), "****tkey");
+    }
+
+    #[test]
+    fn mask_api_key_fully_masks_short_keys() {
+        assert_eq!(mask_api_key("abc"), "***");
+        assert_eq!(mask_api_key(""), "");
+    }
+
+    // `--api-key` combines `num_args = 0..=1` with `ArgAction::Append`, an
+    // unusual pairing — this pins down that repeated flags accumulate, a
+    // bare flag yields one empty string (the generation trigger), and an
+    // absent flag yields an empty vec (open access).
+    #[test]
+    fn api_key_flag_parses_repeat_bare_and_absent_forms() {
+        let repeated = Args::parse_from([
+            "crane-serve",
+            "-m",
+            "x",
+            "--api-key",
+            "k1",
+            "--api-key",
+            "k2",
+        ]);
+        assert_eq!(repeated.api_key, vec!["k1", "k2"]);
+
+        let bare = Args::parse_from(["crane-serve", "-m", "x", "--api-key"]);
+        assert_eq!(bare.api_key, vec![""]);
+
+        let absent = Args::parse_from(["crane-serve", "-m", "x"]);
+        assert!(absent.api_key.is_empty());
+    }
+}
+
+/// Exercises `auth::require_api_key` wired into a real router via
+/// [`build_router_with_ui`]'s own layering pattern, rather than just the
+/// pure helper functions in `auth.rs` — this is what would catch a
+/// regression like the layer being applied before routes are merged, or a
+/// route being added without updating `auth::EXEMPT_PATHS`.
+#[cfg(test)]
+mod auth_middleware_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    struct StubChatTemplate;
+
+    impl ChatTemplateProcessor for StubChatTemplate {
+        fn apply(&self, _messages: &[openai_api::ChatMessage]) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    fn test_app_state(api_keys: Vec<String>) -> Arc<AppState> {
+        Arc::new(AppState {
+            engine: None,
+            model_name: "test-model".to_string(),
+            tokenizer: tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default()),
+            chat_template: Box::new(StubChatTemplate),
+            eos_token_id: vec![0],
+            server_start_time: now_epoch(),
+            vlm_tx: None,
+            gemma4_vlm_tx: None,
+            qwen3_5_vlm_tx: None,
+            minicpm_v_vlm_tx: None,
+            tts_tx: None,
+            asr_tx: None,
+            duplex_tx: None,
+            duplex_lock: Arc::new(tokio::sync::Mutex::new(())),
+            model_path: "test".to_string(),
+            model_type_name: "test".to_string(),
+            dtype_name: "f32".to_string(),
+            device_name: "cpu".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            max_concurrent: 1,
+            decode_tokens_per_seq: 1,
+            max_seq_len: 0,
+            gpu_memory_limit: "unlimited".to_string(),
+            api_keys,
+        })
+    }
+
+    async fn ok() -> StatusCode {
+        StatusCode::OK
+    }
+
+    // Mirrors `build_router_with_ui`'s own `.layer(...).with_state(...)`
+    // pattern with a handful of representative routes, instead of the full
+    // production router, to keep the fixture independent of every handler's
+    // dependencies.
+    fn test_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/health", get(ok))
+            .route("/v1/stats", get(ok))
+            .route("/v1/chat/completions", post(ok))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_api_key,
+            ))
+            .with_state(state)
+    }
+
+    async fn send(
+        router: Router,
+        method: &str,
+        path: &str,
+        auth_header: Option<(&str, &str)>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some((name, value)) = auth_header {
+            builder = builder.header(name, value);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        router.oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn middleware_allows_exempt_paths_with_keys_configured() {
+        let router = test_router(test_app_state(vec!["secret".to_string()]));
+        assert_eq!(
+            send(router.clone(), "GET", "/health", None).await,
+            StatusCode::OK
+        );
+        assert_eq!(send(router, "GET", "/v1/stats", None).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_rejects_non_exempt_without_key() {
+        let router = test_router(test_app_state(vec!["secret".to_string()]));
+        assert_eq!(
+            send(router, "POST", "/v1/chat/completions", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_accepts_valid_bearer() {
+        let router = test_router(test_app_state(vec!["secret".to_string()]));
+        let status = send(
+            router,
+            "POST",
+            "/v1/chat/completions",
+            Some(("authorization", "Bearer secret")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_passes_through_when_no_keys_configured() {
+        let router = test_router(test_app_state(vec![]));
+        assert_eq!(
+            send(router, "POST", "/v1/chat/completions", None).await,
+            StatusCode::OK
+        );
+    }
 }
 
 #[cfg(test)]
