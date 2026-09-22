@@ -22,9 +22,11 @@
 //! - [`snake`] — fused Snake periodic activation
 //! - [`atan2`] — fused two-argument arctangent
 //! - [`topk_moe`] — fused top-K `MoE` routing (softmax + top-K + normalize)
+//! - [`swiglu`] — fused `SwiGLU` activation (silu(gate) * up)
 
 pub mod atan2;
 pub mod snake;
+pub mod swiglu;
 pub mod topk_moe;
 
 #[cfg(feature = "cuda")]

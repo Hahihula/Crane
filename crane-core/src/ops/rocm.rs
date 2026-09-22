@@ -169,9 +169,10 @@ impl RocmElem for f32 {
 /// T*, uint32_t n)`, allocating the `T`-typed output buffer and wrapping it
 /// into a [`RocmStorageSlice`].
 ///
-/// Shared by the `rocm_fwd` of every fused binary elementwise op (`swiglu`,
-/// `snake`, `atan2`): each only differs by dtype, kernel/module name, source
-/// and operand pointers, all supplied here.
+/// Currently used by `swiglu`'s `rocm_fwd`; other binary elementwise ops
+/// (`snake`, `atan2`) can adopt it when they gain ROCm support, since each
+/// only differs by dtype, kernel/module name, source and operand pointers,
+/// all supplied here.
 ///
 /// # Safety
 ///
