@@ -1,19 +1,40 @@
 # crane-serve
 
-An OpenAI & SGLang compatible inference API server built on the [Crane](../README.md) framework, with continuous batching support.
+crane-serve runs AI models locally on your own machine: large language
+models, vision-language models, text-to-speech, and speech recognition. No
+cloud account, no per-token billing, no data leaving your hardware.
+
+It exposes an OpenAI-compatible API and an SGLang-compatible API, so
+existing OpenAI SDK clients, chat UIs, and tooling work against it
+unmodified. It runs on [Crane](../README.md), a Rust inference framework
+built on Candle. A continuous-batching scheduler serves multiple requests
+concurrently on CPU, NVIDIA CUDA, or Apple Metal, with no Python runtime
+required.
 
 ## Features
 
-- **OpenAI-compatible API** — Chat Completions, Text Completions, Text-to-Speech, Models, Tokenize/Detokenize
-- **SGLang native API** — `/generate`, `/model_info`, `/server_info` and related endpoints
-- **Continuous batching** — Dedicated inference thread with prefill-priority scheduling, dynamic KV memory budget, and automatic sequence eviction/recovery
-- **Multi-model support** — Auto-detects and loads Hunyuan Dense, Qwen 2.5, Qwen 3, Qwen 3.5 (hybrid GDN + softmax), **Bonsai 2 Ternary 27B (PTQ1_0/PQ2_0 GGUF)**, Qwen3-TTS, Voxtral TTS
-- **Qwen3-TTS** — Full two-level TTS inference (Talker + Code Predictor) with native Candle speech-tokenizer decoder (ONNX optional fallback); exposes OpenAI-compatible `/v1/audio/speech`
-- **Voxtral TTS** — 4B-parameter Mistral-based TTS with 20 multilingual voice embeddings, flow-matching acoustic model, and codec decoder; exposes OpenAI-compatible `/v1/audio/speech`
-- **Tool / function calling** — OpenAI-shaped `tools`, `tool_calls` and `finish_reason: "tool_calls"`, streaming included; the prompt syntax comes from the model's own chat template
-- **Reasoning control** — `enable_thinking` / `reasoning_effort` per request, with the `<think>` scratchpad separated out of `content` into `reasoning_content`
+- **OpenAI-compatible API** — Chat Completions, Text Completions,
+  Text-to-Speech, Speech Recognition, Models, Tokenize/Detokenize
+- **SGLang native API** — `/generate`, `/model_info`, `/server_info` and
+  related endpoints
+- **Continuous batching** — Dedicated inference thread with prefill-priority
+  scheduling, dynamic KV memory budget, and automatic sequence
+  eviction/recovery
+- **Multi-model support** — Auto-detects and loads Hunyuan Dense, Qwen 2.5,
+  Qwen 3, Qwen 3.5 (hybrid GDN + softmax), **Bonsai 2 Ternary 27B (PTQ1_0/PQ2_0
+  GGUF)**
+- **Text-to-Speech & speech recognition** — Qwen3-TTS and Voxtral TTS for
+  synthesis, Qwen3-ASR for transcription, all through OpenAI-compatible
+  endpoints
+- **Tool / function calling** — OpenAI-shaped `tools`, `tool_calls` and
+  `finish_reason: "tool_calls"`, streaming included; the prompt syntax comes
+  from the model's own chat template
+- **Reasoning control** — `enable_thinking` / `reasoning_effort` per request,
+  with the `<think>` scratchpad separated out of `content` into
+  `reasoning_content`
 - **Streaming** — SSE (Server-Sent Events) token streaming
-- **Cross-platform acceleration** — CPU / CUDA / Apple Metal, selected automatically
+- **Cross-platform acceleration** — CPU / CUDA / Apple Metal, selected
+  automatically
 
 ## Quick Start
 
@@ -89,17 +110,24 @@ quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--model-path` | *(required)* | Path to model directory or GGUF file |
-| `--model-type` | `auto` | Architecture: `auto`, `hunyuan`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`, `qwen3_tts`, `voxtral_tts` (aliases: `voxtral`, `voxtral-tts`, `voxtral_4b`) |
+| `--model-type` | `auto` | Architecture: `auto`, `hunyuan`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`, `qwen3_tts`, `voxtral_tts` (aliases: `voxtral`, `voxtral-tts`, `voxtral_4b`), `qwen3_asr` (alias: `asr`) |
 | `--model-name` | directory name | Model name shown in API responses |
 | `--host` | `0.0.0.0` | Bind address |
 | `--port` | `8080` | Bind port |
+| `--unix-socket` | *(none)* | Serve over a Unix domain socket at this path instead of TCP (Unix only); a stale socket file is removed and the new one created with `0600` permissions |
+| `--ui` | `false` | Serve Crane's built-in browser UI at `/` |
+| `--log-level` | *(none)* | Log verbosity filter: a bare level (`debug`, `info`, `warn`) or per-target filters (`info,crane_core=debug`). Overrides `RUST_LOG` when both are set |
 | `--cpu` | `false` | Force CPU even when a GPU is available |
 | `--max-concurrent` | `16` | Hard cap on concurrently decoding sequences. Actual concurrency may be lower when `--gpu-memory-limit` is active. |
 | `--decode-tokens-per-seq` | `16` | Max decode rounds per scheduling step. Higher = less scheduling overhead, higher TTFT for queued requests. |
 | `--format` | `auto` | Weight format: `auto`, `safetensors`, `gguf` |
-| `--max-seq-len` | `0` | Max sequence length (prompt + generation); `0` = unlimited |
+| `--quant` | *(none)* | Quantize the model on load to reduce memory usage (e.g. `q4k`, `q8_0`). Qwen 3.5 safetensors only |
+| `--dtype` | *(auto)* | Inference precision: `f16`, `bf16`, or `f32`. Defaults to `bf16` on NVIDIA GPUs, `f16` on AMD/Apple GPUs, `f32` on CPU |
+| `--context` | *(none)* | Max context length (prompt + generation) as a human-readable size, e.g. `128K`, `1M`. Mutually exclusive with `--max-seq-len` |
+| `--max-seq-len` | `0` | Max context length as a raw token count; `0` = unlimited. Use `--context` for human-readable sizes instead |
 | `--gpu-memory-limit` | *(none)* | VRAM cap: absolute (`5G`, `8G`, `5120M`) or fractional (`0.7` = 70% of total) |
 | `--text-only` | `false` | Qwen 3.5-VL / Ornith only: opt out of the vision tower and load the same checkpoint as a plain text model (skips the ~600M-param ViT entirely — no extra VRAM — and unlocks `--quant`, which the VLM path doesn't support). Vision-capable checkpoints load with vision by default; this flag is the opt-out. |
+| `--llm-gguf` | *(none)* | MiniCPM-o duplex only: load the language model from a quantized GGUF file to cut its memory usage roughly in half. Other components still load from `--model-path` |
 | `--api-key` | *(none)* | API key required for non-exempt endpoints; repeatable to configure multiple valid keys. Pass with no value (`--api-key`) to generate a random key printed to stdout at startup. Also settable via `CRANE_API_KEY` (always requires a value there). Unset means open access. |
 | `--api-key-file` | *(none)* | File with one API key per line (`#`-prefixed lines are comments); combines with `--api-key`. Also settable via `CRANE_API_KEY_FILE`. |
 
@@ -110,7 +138,7 @@ quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 | Constrained VRAM (≤12 GB) | Set `--gpu-memory-limit`; use `--max-concurrent 4–8` as a safety ceiling |
 | Maximum throughput | Increase `--decode-tokens-per-seq` to `32` to reduce scheduling round-trips |
 | Lowest time-to-first-token | Decrease `--decode-tokens-per-seq` to `4–8` so prefill slots in sooner |
-| Long context generation | Set `--max-seq-len` to avoid unbounded KV growth |
+| Long context generation | Set `--context` (e.g. `128K`) to avoid unbounded KV growth |
 
 ### Authentication
 
@@ -175,6 +203,7 @@ crane-serve/src/
 │   ├── openai.rs        # OpenAI endpoint handlers
 │   ├── sglang.rs        # SGLang endpoint handlers
 │   ├── tts.rs           # /v1/audio/speech handler (Qwen3-TTS, Voxtral TTS)
+│   ├── asr.rs           # /v1/audio/transcriptions handler (Qwen3-ASR)
 │   ├── vlm.rs           # VLM handler (PaddleOCR-VL)
 │   └── sse.rs           # SSE stream builder
 └── engine/
@@ -198,6 +227,7 @@ crane-serve/src/
 | Qwen 2.5 | sequential | ❌ | Safetensors | — |
 | **Qwen3-TTS** | N/A | N/A | Safetensors (ONNX fallback optional) | Dedicated thread; no continuous batching; voice cloning supported |
 | **Voxtral TTS** | N/A | N/A | Safetensors | Dedicated thread; 37-codebook codec; no voice cloning |
+| **Qwen3-ASR** | N/A | N/A | Safetensors | Dedicated thread; no continuous batching |
 
 Model type is auto-detected from `config.json` / `params.json` (`model_type` / `architectures`), from a `.gguf` header's `general.architecture`, or can be set explicitly with `--model-type`.
 
@@ -218,13 +248,14 @@ GPU-specific environment variables (`CRANE_FORCE_GPU_TOPK`,
 
 ## Notes
 
-- **API key authentication is opt-in** — unset by default (open access); see [Authentication](#authentication) for `--api-key`/`--api-key-file`.
-- **KV eviction is lossless** — Evicted sequences preserve their full state and resume automatically; in-flight requests are not dropped or errored.
-- **`--max-seq-len 0`** means no limit. On constrained hardware, always set an explicit value to avoid runaway memory growth.
-- **`--decode-tokens-per-seq`** controls decode rounds per engine step, not per request. Requests always complete fully regardless of this value.
-- **Qwen3-TTS and Voxtral TTS run on a dedicated thread** — No continuous batching; each `/v1/audio/speech` request is processed sequentially. Concurrent requests are queued in an unbounded channel.
-- **Qwen3-TTS decoder backend** — The speech-tokenizer decoder (codes → waveform) uses native Candle by default. ONNX export is optional as a compatibility fallback.
-- **Voxtral TTS uses greedy decoding** — `temperature`, `top_p`, and `repetition_penalty` are accepted for API compatibility but do not affect the output.
+- **API key authentication is opt-in** — unset by default (open access); see
+  [Authentication](#authentication) for `--api-key`/`--api-key-file`.
+- **KV eviction is lossless** — Evicted sequences preserve their full state and
+  resume automatically; in-flight requests are not dropped or errored.
+- **No `--context` (or `--max-seq-len`)** means no limit. On constrained
+  hardware, always set an explicit value to avoid runaway memory growth.
+- **`--decode-tokens-per-seq`** controls decode rounds per engine step, not per
+  request. Requests always complete fully regardless of this value.
 
 ## Testing
 
