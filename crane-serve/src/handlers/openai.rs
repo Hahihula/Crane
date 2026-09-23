@@ -91,7 +91,7 @@ pub async fn chat_completions(
     let engine = state.engine.as_ref().ok_or_else(|| {
         make_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "Text engine not available (VLM model loaded)",
+            &format!("Text engine not available ({} model loaded)", state.mode),
         )
     })?;
 
@@ -198,7 +198,7 @@ pub async fn completions(
     let engine = state.engine.as_ref().ok_or_else(|| {
         make_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "Text engine not available (VLM model loaded)",
+            &format!("Text engine not available ({} model loaded)", state.mode),
         )
     })?;
 

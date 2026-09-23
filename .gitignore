@@ -14,4 +14,4 @@ outputs/
 /vendor
 __pycache__/
 output/
-docs/
+/docs/

@@ -118,7 +118,7 @@ impl MemoryConfig {
 
 /// Query current GPU memory usage. Returns (`used_bytes`, `total_bytes`).
 /// Returns (0, 0) if the device is neither CUDA nor ROCm (or the query fails).
-pub(super) fn query_gpu_memory_usage(device: &Device) -> (u64, u64) {
+pub(crate) fn query_gpu_memory_usage(device: &Device) -> (u64, u64) {
     crane_core::device_memory_info(device).map_or((0, 0), |(free, total)| (total - free, total))
 }
 
@@ -155,7 +155,7 @@ pub(super) fn floor_kv_budget(
 }
 
 /// Format a byte count as a human-readable string (used in engine log messages).
-pub(super) fn format_bytes_engine(bytes: u64) -> String {
+pub(crate) fn format_bytes_engine(bytes: u64) -> String {
     if bytes >= 1 << 30 {
         #[allow(clippy::cast_precision_loss)]
         return format!("{:.1}G", bytes as f64 / (1u64 << 30) as f64);

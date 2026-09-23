@@ -14,6 +14,7 @@ use axum::{
 };
 
 use crane_core::models::paddleocr_vl::OcrTask;
+use tracing::info;
 
 use crate::openai_api::*;
 use crate::sglang_api::*;
@@ -207,6 +208,7 @@ pub async fn vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let started = std::time::Instant::now();
     let vlm_tx = state
         .vlm_tx
         .as_ref()
@@ -223,6 +225,14 @@ pub async fn vlm_chat_completions(
     let task = detect_ocr_task(&text_prompt);
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    info!(
+        id = %request_id,
+        task = ?task,
+        prompt_len = text_prompt.chars().count(),
+        max_tokens,
+        stream = req.stream,
+        "VLM request accepted",
+    );
 
     if req.stream {
         // Streaming mode
@@ -265,7 +275,9 @@ pub async fn vlm_chat_completions(
             yield Ok::<_, std::convert::Infallible>(Event::default().json_data(&first_chunk).unwrap());
 
             // Stream tokens.
+            let mut total_chars = 0usize;
             while let Some(text) = rx.recv().await {
+                total_chars += text.chars().count();
                 let chunk = ChatCompletionChunk {
                     id: request_id.clone(),
                     object: "chat.completion.chunk".into(),
@@ -280,6 +292,12 @@ pub async fn vlm_chat_completions(
                 };
                 yield Ok(Event::default().json_data(&chunk).unwrap());
             }
+            info!(
+                id = %request_id,
+                output_len = total_chars,
+                total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+                "VLM stream completed",
+            );
 
             // Finish chunk.
             let finish_chunk = ChatCompletionChunk {
@@ -334,6 +352,13 @@ pub async fn vlm_chat_completions(
                 )
             })?;
 
+        info!(
+            id = %request_id,
+            output_len = result.chars().count(),
+            total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+            "VLM request completed",
+        );
+
         let response = ChatCompletionResponse {
             id: request_id,
             object: "chat.completion".into(),
@@ -363,6 +388,7 @@ pub async fn vlm_generate(
     state: Arc<AppState>,
     req: GenerateRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let started = std::time::Instant::now();
     let vlm_tx = state
         .vlm_tx
         .as_ref()
@@ -386,6 +412,14 @@ pub async fn vlm_generate(
     let request_id = req
         .rid
         .unwrap_or_else(|| format!("gen-{}", uuid::Uuid::new_v4()));
+    info!(
+        id = %request_id,
+        task = ?task,
+        prompt_len = text_prompt.chars().count(),
+        max_tokens,
+        stream = req.stream,
+        "VLM request accepted",
+    );
 
     if req.stream {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -409,13 +443,21 @@ pub async fn vlm_generate(
 
         let rid = request_id.clone();
         let stream = async_stream::stream! {
+            let mut total_chars = 0usize;
             while let Some(text) = rx.recv().await {
+                total_chars += text.chars().count();
                 let chunk = GenerateStreamChunk {
                     text,
                     meta_info: None,
                 };
                 yield Ok::<_, std::convert::Infallible>(Event::default().json_data(&chunk).unwrap());
             }
+            info!(
+                id = %rid,
+                output_len = total_chars,
+                total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+                "VLM stream completed",
+            );
 
             // Final chunk with meta.
             let final_chunk = GenerateStreamChunk {
@@ -466,6 +508,13 @@ pub async fn vlm_generate(
                 )
             })?;
 
+        info!(
+            id = %request_id,
+            output_len = result.chars().count(),
+            total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+            "VLM request completed",
+        );
+
         let response = GenerateResponse {
             text: result,
             meta_info: GenerateMetaInfo {
@@ -508,6 +557,7 @@ fn vlm_token_sse(
     model_name: String,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     temp_dir: Option<tempfile::TempDir>,
+    started: std::time::Instant,
 ) -> Response {
     let created = now_epoch();
     let stream = async_stream::stream! {
@@ -516,10 +566,18 @@ fn vlm_token_sse(
         let _temp_dir = temp_dir;
         let role = ChatCompletionChunk { id: request_id.clone(), object: "chat.completion.chunk".into(), created, model: model_name.clone(), choices: vec![ChunkChoice { index: 0, delta: ChunkDelta::role("assistant"), finish_reason: None }], usage: None };
         yield Ok::<_, std::convert::Infallible>(Event::default().json_data(&role).unwrap());
+        let mut total_chars = 0usize;
         while let Some(text) = rx.recv().await {
+            total_chars += text.chars().count();
             let chunk = ChatCompletionChunk { id: request_id.clone(), object: "chat.completion.chunk".into(), created, model: model_name.clone(), choices: vec![ChunkChoice { index: 0, delta: ChunkDelta::content(text), finish_reason: None }], usage: None };
             yield Ok(Event::default().json_data(&chunk).unwrap());
         }
+        info!(
+            id = %request_id,
+            output_len = total_chars,
+            total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+            "VLM stream completed",
+        );
         let finish = ChatCompletionChunk { id: request_id, object: "chat.completion.chunk".into(), created, model: model_name, choices: vec![ChunkChoice { index: 0, delta: ChunkDelta::empty(), finish_reason: Some("stop".into()) }], usage: None };
         yield Ok(Event::default().json_data(&finish).unwrap());
         yield Ok(Event::default().data("[DONE]"));
@@ -534,6 +592,7 @@ pub async fn qwen3_5_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let started = std::time::Instant::now();
     let q35vlm_tx = state.qwen3_5_vlm_tx.as_ref().ok_or_else(|| {
         make_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -554,6 +613,14 @@ pub async fn qwen3_5_vlm_chat_completions(
 
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    info!(
+        id = %request_id,
+        has_image = img_path.is_some(),
+        prompt_len = text_prompt.chars().count(),
+        max_tokens,
+        stream = req.stream,
+        "VLM request accepted",
+    );
 
     if req.stream {
         let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -577,6 +644,7 @@ pub async fn qwen3_5_vlm_chat_completions(
             state.model_name.clone(),
             token_rx,
             _temp_dir,
+            started,
         ));
     }
 
@@ -602,6 +670,13 @@ pub async fn qwen3_5_vlm_chat_completions(
         .map_err(|_| make_error(StatusCode::INTERNAL_SERVER_ERROR, "channel closed"))?;
 
     let text = result.map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    info!(
+        id = %request_id,
+        output_len = text.chars().count(),
+        total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+        "VLM request completed",
+    );
 
     let response = ChatCompletionResponse {
         id: request_id,
@@ -641,6 +716,7 @@ pub async fn minicpm_v_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let started = std::time::Instant::now();
     let mcpv_tx = state.minicpm_v_vlm_tx.as_ref().ok_or_else(|| {
         make_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -661,6 +737,14 @@ pub async fn minicpm_v_vlm_chat_completions(
 
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    info!(
+        id = %request_id,
+        has_image = img_path.is_some(),
+        prompt_len = text_prompt.chars().count(),
+        max_tokens,
+        stream = req.stream,
+        "VLM request accepted",
+    );
 
     if req.stream {
         let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -684,6 +768,7 @@ pub async fn minicpm_v_vlm_chat_completions(
             state.model_name.clone(),
             token_rx,
             _temp_dir,
+            started,
         ));
     }
 
@@ -710,6 +795,13 @@ pub async fn minicpm_v_vlm_chat_completions(
 
     let text = result.map_err(|e| make_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
 
+    info!(
+        id = %request_id,
+        output_len = text.chars().count(),
+        total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+        "VLM request completed",
+    );
+
     let response = ChatCompletionResponse {
         id: request_id,
         object: "chat.completion".into(),
@@ -734,6 +826,7 @@ pub async fn gemma4_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let started = std::time::Instant::now();
     let g4vlm_tx = state.gemma4_vlm_tx.as_ref().ok_or_else(|| {
         make_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -748,6 +841,12 @@ pub async fn gemma4_vlm_chat_completions(
 
     let max_tokens = req.max_tokens;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    info!(
+        id = %request_id,
+        prompt_len = text_prompt.chars().count(),
+        max_tokens,
+        "VLM request accepted",
+    );
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     if g4vlm_tx
@@ -779,6 +878,13 @@ pub async fn gemma4_vlm_chat_completions(
                 &format!("Gemma4 VLM inference failed: {e}"),
             )
         })?;
+
+    info!(
+        id = %request_id,
+        output_len = result.chars().count(),
+        total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+        "VLM request completed",
+    );
 
     let response = ChatCompletionResponse {
         id: request_id,

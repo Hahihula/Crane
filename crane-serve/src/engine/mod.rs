@@ -30,7 +30,7 @@
 
 pub mod backend;
 pub mod grammar;
-mod memory;
+pub(crate) mod memory;
 pub mod model_factory;
 pub mod sampling;
 pub mod scheduler;
@@ -188,7 +188,7 @@ impl InferenceEngine {
             // unconstrained (see `VocabByteTable::tokens_matching_prefix`'s
             // doc) — i.e. the grammar would never actually constrain anything
             // at that point, without erroring.
-            info!(
+            debug!(
                 wrapper_open_from_idle = table.tokens_matching_prefix("\n<function=", 0).len(),
                 call_close = table.tokens_matching_prefix("\n</tool_call>", 0).len(),
                 "Grammar vocab sanity check (0 = that literal can never be forced)",
@@ -726,17 +726,21 @@ impl InferenceEngine {
             id = %req.id,
             prompt_len,
             max_tokens = effective_max_tokens,
+            "New request accepted (queue: waiting={} running={})",
+            self.scheduler.waiting.len() + 1,
+            self.scheduler.running.len(),
+        );
+        debug!(
+            id = %req.id,
             temp = ?req.temperature,
             top_p = ?req.top_p,
             top_k = ?req.top_k,
-            rep_penalty = req.repetition_penalty,
+            rep_penalty = format!("{:.2}", req.repetition_penalty),
             freq_penalty = req.frequency_penalty,
             pres_penalty = req.presence_penalty,
             stop_sequences = ?req.stop,
             eos_token_ids = ?req.eos_token_id,
-            "New request accepted (queue: waiting={} running={})",
-            self.scheduler.waiting.len() + 1,
-            self.scheduler.running.len(),
+            "Sampling parameters",
         );
 
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -749,19 +753,31 @@ impl InferenceEngine {
         // reach the client. `None` when the request offers no tools, or when
         // the loaded model isn't Qwen3-Coder (`vocab_byte_table` is only
         // built for that format — see `InferenceEngine::new`).
-        info!(
-            id = %req.id,
-            tool_count = req.tool_names.len(),
-            tool_names = ?req.tool_names,
-            "Grammar constraint: {}",
-            if req.tool_names.is_empty() {
-                "no tools offered, none constructed"
-            } else if self.vocab_byte_table.is_none() {
-                "tools offered, but model doesn't use the XML tool-call format — none constructed"
-            } else {
-                "constructed"
-            },
-        );
+        let grammar_constructed = !req.tool_names.is_empty() && self.vocab_byte_table.is_some();
+        let grammar_status = if req.tool_names.is_empty() {
+            "no tools offered, none constructed"
+        } else if self.vocab_byte_table.is_none() {
+            "tools offered, but model doesn't use the XML tool-call format — none constructed"
+        } else {
+            "constructed"
+        };
+        if grammar_constructed {
+            info!(
+                id = %req.id,
+                tool_count = req.tool_names.len(),
+                tool_names = ?req.tool_names,
+                "Grammar constraint: {}",
+                grammar_status,
+            );
+        } else {
+            debug!(
+                id = %req.id,
+                tool_count = req.tool_names.len(),
+                tool_names = ?req.tool_names,
+                "Grammar constraint: {}",
+                grammar_status,
+            );
+        }
         let grammar: Option<Box<dyn grammar::GrammarConstraint>> = if req.tool_names.is_empty() {
             None
         } else {
@@ -1667,14 +1683,24 @@ impl InferenceEngine {
             };
             let decode_tok_s = seq.decode_tokens_per_sec();
             let ttft_ms = seq.ttft_ms();
+            let total_secs = seq.created_at.elapsed().as_secs_f64();
+            // total_tokens is bounded by prompt_len + max_tokens, far below 2^53.
+            #[allow(clippy::cast_precision_loss)]
+            let total_tok_s = if total_secs > 0.0 {
+                (seq.prompt_len + completion_tokens) as f64 / total_secs
+            } else {
+                0.0
+            };
 
             info!(
                 id = %seq_id,
                 prompt_tokens = seq.prompt_len,
                 completion_tokens,
                 finish_reason = %finish_reason,
-                decode_tok_s = format!("{:.1}", decode_tok_s),
-                ttft_ms = ?ttft_ms,
+                decode_tok_s = format!("{decode_tok_s:.1} tok/s"),
+                ttft_ms = ttft_ms.map(|v| format!("{v} ms")),
+                total_time = format!("{:.0} ms", total_secs * 1000.0),
+                total_tok_s = format!("{total_tok_s:.1} tok/s"),
                 "Sequence finished",
             );
 

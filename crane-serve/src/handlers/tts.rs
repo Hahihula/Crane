@@ -14,6 +14,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use tracing::info;
+
 use crate::openai_api::*;
 use crate::{AppState, make_error};
 
@@ -105,6 +107,14 @@ pub async fn speech(
     let temperature = req.temperature.unwrap_or(0.9);
     let repetition_penalty = req.repetition_penalty.unwrap_or(1.05);
     let language = req.language.clone().unwrap_or_else(|| "auto".to_string());
+    let started = std::time::Instant::now();
+    info!(
+        voice = ?req.voice,
+        language = %language,
+        input_len = req.input.chars().count(),
+        stream = req.stream,
+        "TTS request accepted",
+    );
 
     // Browser clients cannot expose a server-local file path. Accept a
     // base64 data URI for reference audio and keep the temporary WAV alive
@@ -218,15 +228,25 @@ pub async fn speech(
         };
 
         let body_stream = async_stream::stream! {
+            let mut total_bytes = 0usize;
             while let Some(item) = chunk_rx.recv().await {
                 match item {
-                    Ok(bytes) => yield Ok::<Vec<u8>, std::io::Error>(bytes),
+                    Ok(bytes) => {
+                        total_bytes += bytes.len();
+                        yield Ok::<Vec<u8>, std::io::Error>(bytes);
+                    },
                     Err(err) => {
                         tracing::error!("TTS stream aborted mid-generation: {err}");
                         break;
                     },
                 }
             }
+            info!(
+                sample_rate = format!("{sample_rate} Hz"),
+                samples = total_bytes / 2,
+                total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+                "TTS stream completed",
+            );
         };
 
         return Response::builder()
@@ -278,21 +298,34 @@ pub async fn speech(
     let outcome = rx.await;
     drop(reference_audio_temp);
     match outcome {
-        Ok(Ok(result)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, result.content_type)
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", result.file_name),
-            )
-            .body(axum::body::Body::from(result.audio_bytes))
-            .unwrap_or_else(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to build response",
+        Ok(Ok(result)) => {
+            let samples = if result.content_type == "audio/wav" {
+                result.audio_bytes.len().saturating_sub(44) / 2
+            } else {
+                result.audio_bytes.len() / 2
+            };
+            info!(
+                sample_rate = format!("{} Hz", result.sample_rate),
+                samples,
+                total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+                "TTS request completed",
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, result.content_type)
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", result.file_name),
                 )
-                    .into_response()
-            }),
+                .body(axum::body::Body::from(result.audio_bytes))
+                .unwrap_or_else(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to build response",
+                    )
+                        .into_response()
+                })
+        },
         Ok(Err(err)) => {
             let (status, json) = make_error(
                 StatusCode::INTERNAL_SERVER_ERROR,

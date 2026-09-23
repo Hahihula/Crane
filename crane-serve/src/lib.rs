@@ -1,4 +1,5 @@
 pub mod auth;
+use crane_core::candle_core;
 use crane_core::{D, DType, Tensor, softmax_last_dim};
 
 pub mod chat_template;
@@ -13,7 +14,7 @@ pub mod ui;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -24,7 +25,7 @@ use axum::{
 };
 use clap::Parser;
 use crane_core::utils::DeviceExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use chat_template::ChatTemplateProcessor;
 use engine::model_factory::{ModelFormat, ModelType};
@@ -35,74 +36,101 @@ use handlers::vlm::{Gemma4VlmRequest, MinicpmVVlmRequest, Qwen3_5VlmRequest, Vlm
 use openai_api::ErrorResponse;
 
 #[derive(Parser, Debug, Clone)]
-#[command(about = "OpenAI & SGLang compatible API server with continuous batching")]
+#[command(
+    about = "OpenAI & SGLang compatible API server with continuous batching",
+    version
+)]
 pub struct Args {
-    #[arg(short = 'm', long)]
+    /// Path to a downloaded model directory or a single `.gguf` file.
+    #[arg(short = 'm', long, help_heading = "Model")]
     pub model_path: String,
-    #[arg(long, default_value = "auto")]
+    /// Model architecture. Usually auto-detected from the model's
+    /// `config.json`; set this only if auto-detection picks the wrong one.
+    /// Known values: `auto`, `gemma4`, `gemma4_vl`, `hunyuan`, `minicpm5`,
+    /// `minicpmv46`, `minicpmo`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`,
+    /// `qwen3_tts`, `voxtral_tts`, `kokoro`, `voxcpm2`, `paddleocr_vl`,
+    /// `qwen3_asr`.
+    #[arg(long, default_value = "auto", help_heading = "Model")]
     pub model_type: String,
-    #[arg(long)]
+    /// Display name reported by `/v1/models`. Defaults to the directory name
+    /// of `--model-path` when unset.
+    #[arg(long, help_heading = "Model")]
     pub model_name: Option<String>,
-    #[arg(long, default_value = "0.0.0.0")]
+    /// Listen address. Default `0.0.0.0` (all interfaces). Use `127.0.0.1`
+    /// to restrict to localhost.
+    #[arg(long, default_value = "0.0.0.0", help_heading = "Server")]
     pub host: String,
-    #[arg(short = 'p', long, default_value_t = 8080)]
+    /// Listen port. Default `8080`.
+    #[arg(short = 'p', long, default_value_t = 8080, help_heading = "Server")]
     pub port: u16,
     /// Serve HTTP/1.1 over a Unix domain socket at this path instead of TCP.
     /// A stale socket file left by a crashed run is removed before binding,
     /// and the new socket is created with 0600 permissions. Unix only.
     #[cfg(unix)]
-    #[arg(long)]
+    #[arg(long, help_heading = "Server")]
     pub unix_socket: Option<std::path::PathBuf>,
     /// Serve Crane's built-in browser UI at `/`. Disabled by default.
-    #[arg(long)]
+    #[arg(long, help_heading = "Server")]
     pub ui: bool,
-    #[arg(long)]
+    /// Log verbosity filter. Accepts a bare level (`debug`, `info`, `warn`)
+    /// or comma-separated per-target filters (`info,crane_core=debug`).
+    /// Crate names use underscores, not hyphens. Overrides `RUST_LOG` when
+    /// both are set. Default: `RUST_LOG`, or `info` if that is also unset.
+    #[arg(long, help_heading = "Server")]
+    pub log_level: Option<String>,
+    /// Force CPU-only inference, ignoring any available GPU.
+    #[arg(long, help_heading = "Memory")]
     pub cpu: bool,
-    #[arg(short = 'c', long, default_value_t = 16)]
+    /// Maximum number of requests that can be processed at the same time.
+    /// Default `16`. Increase for higher throughput; decrease if you are
+    /// running out of memory.
+    #[arg(short = 'c', long, default_value_t = 16, help_heading = "Scheduler")]
     pub max_concurrent: usize,
-    #[arg(long, default_value_t = 16)]
+    /// Tokens generated per request before switching to the next one.
+    /// Default `16`. Higher values speed up individual requests but slow
+    /// down others running at the same time.
+    #[arg(long, default_value_t = 16, help_heading = "Scheduler")]
     pub decode_tokens_per_seq: usize,
-    #[arg(long, default_value = "auto")]
+    /// Model file format: `auto`, `safetensors`, or `gguf`. Default `auto`
+    /// (detected from files in the model directory).
+    #[arg(long, default_value = "auto", help_heading = "Model")]
     pub format: String,
-    /// In-situ quantization level for safetensors checkpoints (e.g. q4k,
-    /// q8_0). Currently supported for qwen3_5 only. Overrides `CRANE_ISQ`.
-    #[arg(long)]
+    /// Quantize the model on load to reduce memory usage (e.g. `q4k`,
+    /// `q8_0`). Only supported for Qwen 3.5 models with safetensors
+    /// weights. Overrides `CRANE_ISQ`.
+    #[arg(long, help_heading = "Model")]
     pub quant: Option<String>,
-    /// Compute dtype: f16, bf16 or f32. Defaults per device: BF16 on CUDA,
-    /// F16 on ROCm and Metal, and F32 on CPU.
-    #[arg(long)]
+    /// Floating-point precision for inference: `f16` (half), `bf16`
+    /// (bfloat16), or `f32` (full). Lower precision uses less memory and
+    /// is faster. Default: `bf16` on NVIDIA GPUs, `f16` on AMD/Apple GPUs,
+    /// `f32` on CPU.
+    #[arg(long, help_heading = "Model")]
     pub dtype: Option<String>,
-    #[arg(long, default_value_t = 0)]
+    /// Maximum sequence length in tokens. Default `0` (unlimited). See
+    /// `--context` for a human-readable alternative (e.g. `128K`).
+    #[arg(long, default_value_t = 0, help_heading = "Scheduler")]
     pub max_seq_len: usize,
     /// Maximum context length as a human-readable token count. Accepts K
     /// (x1024) and M (x1024^2) suffixes, e.g. `128K` = 131072 tokens.
     /// Mutually exclusive with `--max-seq-len`.
-    #[arg(long, conflicts_with = "max_seq_len")]
+    #[arg(long, conflicts_with = "max_seq_len", help_heading = "Scheduler")]
     pub context: Option<String>,
     /// GPU memory budget: either a fraction of total VRAM (`0.9`), an absolute
     /// size (`8G`, `8GB`, `8GiB`, `5120M`, `5120MiB` — all binary units), or a
     /// plain byte count. Unset or `0` means unlimited. Only enforced for LLM
     /// engine mode (not TTS/ASR/VLM/duplex).
-    #[arg(long)]
+    #[arg(long, help_heading = "Memory")]
     pub gpu_memory_limit: Option<String>,
-    /// MiniCPM-o duplex only: load the LLM tower from a standalone
-    /// quantized GGUF file (e.g. a llama.cpp-style Qwen3 conversion like
-    /// `MiniCPM-o-4_5-Q8_0.gguf`) instead of the checkpoint's own bf16
-    /// safetensors weights, cutting the LLM's VRAM footprint roughly in
-    /// half — the other five towers still load from `-m`'s checkpoint
-    /// directory as usual. `-m` must still point at a real checkpoint
-    /// directory (tokenizer/config and the other towers are read from
-    /// there regardless).
-    #[arg(long)]
+    /// MiniCPM-o duplex only: load the language model from a quantized
+    /// GGUF file (e.g. `MiniCPM-o-4_5-Q8_0.gguf`) to cut its memory usage
+    /// roughly in half. The other model components still load from the
+    /// directory given by `-m`.
+    #[arg(long, help_heading = "Model")]
     pub llm_gguf: Option<String>,
-    /// Qwen 3.5-VL / Ornith only: load the checkpoint as a plain text model
-    /// instead of a VLM, even though `config.json` declares a `vision_config`
-    /// (and `--model-type` is `auto` or `qwen3_5_vl`). The vision tower's
-    /// weights are simply never read — same checkpoint directory, no extra
-    /// VRAM for the ~600M-param ViT — and this path also unlocks `--quant`,
-    /// which the VLM load path does not support. Models are vision-capable by
-    /// default; this is an opt-out, not the default.
-    #[arg(long)]
+    /// Qwen 3.5-VL / Ornith only: disable the vision component and load
+    /// only the text model. Saves ~600M parameters worth of GPU memory and
+    /// enables `--quant`, which the vision-capable path does not support.
+    #[arg(long, help_heading = "Model")]
     pub text_only: bool,
     /// API key required to access non-exempt endpoints (`/health`,
     /// `/v1/stats`, `/`, and `/ui/*` excluded). Repeatable to configure
@@ -115,12 +143,13 @@ pub struct Args {
         env = "CRANE_API_KEY",
         num_args = 0..=1,
         default_missing_value = "",
-        action = clap::ArgAction::Append
+        action = clap::ArgAction::Append,
+        help_heading = "Authentication"
     )]
     pub api_key: Vec<String>,
     /// File with one API key per line; `#`-prefixed lines are comments.
     /// Combines with `--api-key`.
-    #[arg(long, env = "CRANE_API_KEY_FILE")]
+    #[arg(long, env = "CRANE_API_KEY_FILE", help_heading = "Authentication")]
     pub api_key_file: Option<String>,
 }
 
@@ -148,6 +177,10 @@ pub struct AppState {
     pub duplex_lock: Arc<tokio::sync::Mutex<()>>,
     pub model_path: String,
     pub model_type_name: String,
+    /// Active serving mode: `"llm"`, `"vlm"`, `"tts"`, `"asr"`, or `"duplex"`.
+    /// Used to phrase error messages for endpoints unavailable in the
+    /// current mode.
+    pub mode: &'static str,
     pub dtype_name: String,
     pub device_name: String,
     pub host: String,
@@ -167,23 +200,102 @@ pub fn now_epoch() -> u64 {
         .as_secs()
 }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1 << 30 {
-        format!("{:.1}G", bytes as f64 / (1u64 << 30) as f64)
-    } else if bytes >= 1 << 20 {
-        format!("{:.0}M", bytes as f64 / (1u64 << 20) as f64)
+/// Human-readable device label (e.g. `cuda:0`, `metal:0`, `cpu`) instead of
+/// the Rust `Debug` repr of the underlying candle device handle.
+fn format_device_name(device: &candle_core::Device) -> String {
+    match device.location() {
+        candle_core::DeviceLocation::Cpu => "cpu".to_string(),
+        candle_core::DeviceLocation::Cuda { gpu_id } => format!("cuda:{gpu_id}"),
+        candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
+    }
+}
+
+/// Best-effort CPU model name and physical/logical core counts, read from
+/// `/proc/cpuinfo` on Linux. Physical cores are counted as the number of
+/// unique (physical id, core id) pairs; platforms without that file (e.g.
+/// macOS) or without those fields (some VMs) fall back to the logical count
+/// for both, and "unknown" for the name.
+fn cpu_info() -> (String, usize, usize) {
+    let logical = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+
+    let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
+        return ("unknown".to_string(), logical, logical);
+    };
+
+    let mut name = None;
+    let mut cores: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut cur_physical_id = None;
+    let mut cur_core_id = None;
+    for line in cpuinfo.lines() {
+        match line.split_once(':') {
+            Some((key, value)) => match key.trim() {
+                "model name" if name.is_none() => name = Some(value.trim().to_string()),
+                "physical id" => cur_physical_id = Some(value.trim().to_string()),
+                "core id" => cur_core_id = Some(value.trim().to_string()),
+                _ => {},
+            },
+            None if line.trim().is_empty() => {
+                if let (Some(p), Some(c)) = (cur_physical_id.take(), cur_core_id.take()) {
+                    cores.insert((p, c));
+                }
+            },
+            None => {},
+        }
+    }
+    if let (Some(p), Some(c)) = (cur_physical_id, cur_core_id) {
+        cores.insert((p, c));
+    }
+
+    let physical = if cores.is_empty() {
+        logical
     } else {
-        format!("{}B", bytes)
+        cores.len()
+    };
+    (
+        name.unwrap_or_else(|| "unknown".to_string()),
+        physical,
+        logical,
+    )
+}
+
+/// Logs CPU (model name, physical/logical core count, candle thread pool
+/// size) and, when running on a GPU device, total VRAM once at startup.
+fn log_hardware_info(device: &candle_core::Device, device_name: &str) {
+    let (cpu_name, physical_cores, logical_cores) = cpu_info();
+    info!(
+        cpu = %cpu_name,
+        physical_cores,
+        logical_cores,
+        thread_pool_size = candle_core::utils::get_num_threads(),
+        "hardware: cpu"
+    );
+
+    if !matches!(device.location(), candle_core::DeviceLocation::Cpu) {
+        let (_, vram_total) = engine::memory::query_gpu_memory_usage(device);
+        if vram_total > 0 {
+            info!(
+                device = %device_name,
+                vram_total = %engine::memory::format_bytes_engine(vram_total),
+                "hardware: gpu"
+            );
+        } else {
+            info!(device = %device_name, "hardware: gpu (VRAM query unavailable)");
+        }
     }
 }
 
 pub fn make_error(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    let error_type = if status.is_server_error() {
+        "server_error"
+    } else {
+        "invalid_request_error"
+    };
     (
         status,
         Json(ErrorResponse {
             error: openai_api::ErrorDetail {
                 message: msg.to_string(),
-                r#type: "invalid_request_error".into(),
+                r#type: error_type.into(),
                 code: None,
             },
         }),
@@ -250,9 +362,13 @@ fn mask_api_key(key: &str) -> String {
     }
 }
 
-pub fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+pub fn init_logging(log_level: Option<&str>) -> Result<()> {
+    let filter = match log_level {
+        Some(level) => tracing_subscriber::EnvFilter::try_new(level)
+            .with_context(|| format!("invalid --log-level filter: {level}"))?,
+        None => tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -262,11 +378,13 @@ pub fn init_logging() {
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
+    Ok(())
 }
 
 pub async fn cli_main() -> Result<()> {
-    init_logging();
-    run(Args::parse()).await
+    let args = Args::parse();
+    init_logging(args.log_level.as_deref())?;
+    run(args).await
 }
 
 fn encode_tts_audio(
@@ -288,7 +406,7 @@ fn encode_tts_audio(
         audio_f32.elem_count()
     );
     let samples = audio_f32.to_vec1::<f32>().map_err(|e| e.to_string())?;
-    tracing::info!("TTS writing {} samples", samples.len());
+    tracing::debug!("TTS writing {} samples", samples.len());
     match format {
         openai_api::AudioResponseFormat::Wav => {
             tracing::debug!("TTS encode: building WAV container");
@@ -384,15 +502,15 @@ fn run_tts_loop(
     info!("{model_name} engine thread started");
     let audio_info = tts.audio_info();
     while let Some(mut req) = tts_rx.blocking_recv() {
-        tracing::debug!(
-            "TTS request received: language={}, voice={:?}, input_len={}, stream={}",
-            req.language,
-            req.voice,
-            req.input.chars().count(),
-            matches!(
+        info!(
+            language = %req.language,
+            voice = ?req.voice,
+            input_len = req.input.chars().count(),
+            stream = matches!(
                 req.responder,
                 Some(handlers::tts::TtsResponder::Stream { .. })
             ),
+            "TTS request received",
         );
         match req.responder.take().expect("responder set on the wire") {
             handlers::tts::TtsResponder::Whole(tx) => {
@@ -666,7 +784,101 @@ fn parse_context_size(s: &str) -> Result<usize> {
         .ok_or_else(|| anyhow::anyhow!("context size '{s}' overflows"))
 }
 
+/// Maximum time to wait for in-flight connections (including long-lived
+/// WebSocket/SSE sessions) to drain after the first shutdown signal before
+/// forcing exit.
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waits for Ctrl-C or (on Unix) `SIGTERM`, then logs and returns so
+/// `axum::serve`'s graceful shutdown can drain in-flight requests before exit.
+/// Once the first signal fires, a repeat signal or `SHUTDOWN_TIMEOUT` elapsing
+/// forces an immediate exit so a stuck connection can't hang the process.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!("failed to install Ctrl-C handler: {e}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            },
+            Err(e) => {
+                warn!("failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            },
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+
+    info!(
+        "Shutting down (repeat signal or wait {}s to force)...",
+        SHUTDOWN_TIMEOUT.as_secs()
+    );
+
+    tokio::spawn(async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                sig.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            () = ctrl_c => {
+                info!("Second signal received, forcing exit");
+            },
+            () = terminate => {
+                info!("Second signal received, forcing exit");
+            },
+            () = tokio::time::sleep(SHUTDOWN_TIMEOUT) => {
+                warn!(
+                    "Graceful shutdown timed out after {}s, forcing exit",
+                    SHUTDOWN_TIMEOUT.as_secs()
+                );
+            },
+        }
+        std::process::exit(1);
+    });
+}
+
 pub async fn run(mut args: Args) -> Result<()> {
+    let model_path = std::path::Path::new(&args.model_path);
+    if args.format.to_lowercase() == "gguf" || args.model_path.ends_with(".gguf") {
+        anyhow::ensure!(
+            model_path.is_file(),
+            "--model-path '{}' is not a file. GGUF format requires a path to a .gguf file.",
+            args.model_path
+        );
+    } else {
+        anyhow::ensure!(
+            model_path.is_dir(),
+            "--model-path '{}' is not a directory. Provide the path to a model directory \
+             (or use --format gguf for a single .gguf file).",
+            args.model_path
+        );
+    }
+
     info!("Loading model from: {}", args.model_path);
 
     if let Some(ref ctx) = args.context {
@@ -705,7 +917,23 @@ pub async fn run(mut args: Args) -> Result<()> {
     };
 
     let model_type = ModelType::from_str(&args.model_type);
+    if model_type == ModelType::Auto && args.model_type.to_lowercase() != "auto" {
+        warn!(
+            input = %args.model_type,
+            "Unrecognized --model-type, falling back to auto-detect. Known values: auto, \
+             gemma4, gemma4_vl, hunyuan, minicpm5, minicpmv46, minicpmo, qwen25, qwen3, \
+             qwen3_5, qwen3_5_vl, qwen3_tts, voxtral_tts, kokoro, voxcpm2, paddleocr_vl, \
+             qwen3_asr"
+        );
+    }
     let format = ModelFormat::from_str(&args.format);
+    if format == ModelFormat::Auto && args.format.to_lowercase() != "auto" {
+        warn!(
+            input = %args.format,
+            "Unrecognized --format, falling back to auto-detect. Known values: auto, \
+             safetensors, gguf"
+        );
+    }
 
     let resolved_type = if model_type == ModelType::Auto {
         engine::model_factory::detect_model_type(&args.model_path)
@@ -744,9 +972,9 @@ pub async fn run(mut args: Args) -> Result<()> {
         info!("TTS on Metal: using F32 for numerically stable sampling");
     }
 
-    let device_name = format!("{:?}", device);
+    let device_name = format_device_name(&device);
     let dtype_name = format!("{:?}", dtype);
-    info!("Device: {}, dtype: {}", device_name, dtype_name);
+    log_hardware_info(&device, &device_name);
 
     // The memory gate lives in the LLM engine's scheduler; the one-shot
     // TTS/ASR/VLM/duplex paths have no admission point to enforce it at yet.
@@ -1314,8 +1542,9 @@ pub async fn run(mut args: Args) -> Result<()> {
             args.quant.as_deref(),
         )?;
         info!(
-            "Model loaded successfully (type: {:?}, format: {:?})",
-            resolved_type, format
+            "Model loaded successfully (type: {}, format: {:?})",
+            resolved_type.display_name(),
+            format
         );
         // Install candle's affinity-pinned rayon pool so warmup's forward passes run on warm threads.
         device.with_context(|| backend.warmup());
@@ -1327,21 +1556,6 @@ pub async fn run(mut args: Args) -> Result<()> {
         let mut memory_config =
             MemoryConfig::parse(args.max_seq_len, args.gpu_memory_limit.as_deref(), &device);
         memory_config.record_baseline(&device);
-        let baseline_gpu = memory_config.baseline_gpu_bytes;
-        info!(
-            "Memory config: max_seq_len={}, gpu_limit={}, baseline_gpu={}",
-            if memory_config.max_seq_len == 0 {
-                "unlimited".to_string()
-            } else {
-                memory_config.max_seq_len.to_string()
-            },
-            if memory_config.gpu_memory_limit_bytes == 0 {
-                "unlimited".to_string()
-            } else {
-                format_bytes(memory_config.gpu_memory_limit_bytes)
-            },
-            format_bytes(baseline_gpu)
-        );
         let (engine, handle) = InferenceEngine::new(
             backend,
             args.max_concurrent,
@@ -1353,10 +1567,6 @@ pub async fn run(mut args: Args) -> Result<()> {
             .name("inference-engine".into())
             .spawn(move || engine.run())
             .expect("Failed to spawn engine thread");
-        info!(
-            "Inference engine started (max_concurrent={}, decode_tokens_per_seq={})",
-            args.max_concurrent, args.decode_tokens_per_seq
-        );
         (
             Some(handle),
             tokenizer,
@@ -1383,6 +1593,17 @@ pub async fn run(mut args: Args) -> Result<()> {
         .clone()
         .unwrap_or_else(|| "unlimited".to_string());
     let api_keys = load_api_keys(&args.api_key, args.api_key_file.as_deref())?;
+    let mode = if is_vlm {
+        "vlm"
+    } else if is_tts {
+        "tts"
+    } else if is_asr {
+        "asr"
+    } else if is_duplex {
+        "duplex"
+    } else {
+        "llm"
+    };
     let state = Arc::new(AppState {
         engine: engine_handle,
         model_name: model_name.clone(),
@@ -1400,6 +1621,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         duplex_lock: Arc::new(tokio::sync::Mutex::new(())),
         model_path: args.model_path.clone(),
         model_type_name: resolved_type.display_name().to_string(),
+        mode,
         dtype_name,
         device_name,
         host: args.host.clone(),
@@ -1438,19 +1660,30 @@ pub async fn run(mut args: Args) -> Result<()> {
                 format!("unix://{}", path.display()),
                 Box::pin(async move {
                     axum::serve(listener, app)
+                        .with_graceful_shutdown(shutdown_signal())
                         .await
                         .map_err(anyhow::Error::from)
                 }),
             )
         },
         None => {
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    anyhow::anyhow!(
+                        "Failed to bind {addr}: port already in use. Try --port {}.",
+                        args.port.wrapping_add(1)
+                    )
+                } else {
+                    anyhow::anyhow!("Failed to bind {addr}: {e}")
+                }
+            })?;
             let local_addr = listener.local_addr()?;
             (
                 local_addr.to_string(),
                 format!("http://{local_addr}"),
                 Box::pin(async move {
                     axum::serve(listener, app)
+                        .with_graceful_shutdown(shutdown_signal())
                         .await
                         .map_err(anyhow::Error::from)
                 }),
@@ -1463,13 +1696,23 @@ pub async fn run(mut args: Args) -> Result<()> {
         String,
         std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>,
     ) = {
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "Failed to bind {addr}: port already in use. Try --port {}.",
+                    args.port.wrapping_add(1)
+                )
+            } else {
+                anyhow::anyhow!("Failed to bind {addr}: {e}")
+            }
+        })?;
         let local_addr = listener.local_addr()?;
         (
             local_addr.to_string(),
             format!("http://{local_addr}"),
             Box::pin(async move {
                 axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
                     .await
                     .map_err(anyhow::Error::from)
             }),
@@ -1715,6 +1958,7 @@ mod auth_middleware_tests {
             duplex_lock: Arc::new(tokio::sync::Mutex::new(())),
             model_path: "test".to_string(),
             model_type_name: "test".to_string(),
+            mode: "llm",
             dtype_name: "f32".to_string(),
             device_name: "cpu".to_string(),
             host: "127.0.0.1".to_string(),

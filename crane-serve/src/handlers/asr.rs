@@ -13,6 +13,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use tracing::info;
+
+use crate::engine::memory::format_bytes_engine;
 use crate::openai_api::TranscriptionResponse;
 use crate::{AppState, make_error};
 
@@ -42,6 +45,7 @@ pub async fn transcriptions(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Response {
+    let started = std::time::Instant::now();
     // Validate that ASR is available.
     let Some(asr_tx) = &state.asr_tx else {
         let (status, json) = make_error(
@@ -130,6 +134,12 @@ pub async fn transcriptions(
         return (status, json).into_response();
     };
 
+    info!(
+        audio_bytes = %format_bytes_engine(audio_bytes.len() as u64),
+        language = ?language,
+        "ASR request accepted",
+    );
+
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     let asr_req = AsrTranscribeRequest {
@@ -148,7 +158,14 @@ pub async fn transcriptions(
     }
 
     match rx.await {
-        Ok(Ok(text)) => Json(TranscriptionResponse { text }).into_response(),
+        Ok(Ok(text)) => {
+            info!(
+                transcript_len = text.chars().count(),
+                total_time = format!("{:.0} ms", started.elapsed().as_secs_f64() * 1000.0),
+                "ASR request completed",
+            );
+            Json(TranscriptionResponse { text }).into_response()
+        },
         Ok(Err(err)) => {
             let (status, json) = make_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
