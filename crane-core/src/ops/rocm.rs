@@ -48,7 +48,22 @@ pub fn device_ptr(
     dtype: DType,
     what: &str,
 ) -> Result<*mut c_void> {
-    let slice = rocm_slice(storage, what)?;
+    slice_ptr(rocm_slice(storage, what)?, layout, dtype, what)
+}
+
+/// [`device_ptr`] for a slice already unwrapped from its `Storage`/`RocmStorage`
+/// wrapper — what `CustomOp2::rocm_fwd` implementations receive directly.
+///
+/// # Errors
+///
+/// Returns an error if `layout` is not contiguous, or if `slice`'s dtype is not
+/// `dtype`.
+pub fn slice_ptr(
+    slice: &RocmStorageSlice,
+    layout: &Layout,
+    dtype: DType,
+    what: &str,
+) -> Result<*mut c_void> {
     if !layout.is_contiguous() {
         candle_core::bail!("{what} must be contiguous");
     }
@@ -121,6 +136,77 @@ pub unsafe fn launch(
         args,
     )
     .map_err(|e| candle_core::Error::Msg(format!("{kernel} launch failed: {e}")))
+}
+
+/// A dtype whose device buffer can be wrapped straight into a
+/// [`RocmStorageSlice`], so [`launch_binary_elementwise`] can allocate,
+/// launch and wrap generically instead of once per dtype.
+pub trait RocmElem: Sized {
+    /// Wrap a freshly-allocated buffer of `Self` as the matching
+    /// `RocmStorageSlice` variant.
+    fn wrap_slice(buf: SendSyncDeviceMemory<Self>) -> RocmStorageSlice;
+}
+
+impl RocmElem for half::bf16 {
+    fn wrap_slice(buf: SendSyncDeviceMemory<Self>) -> RocmStorageSlice {
+        RocmStorageSlice::BF16(buf)
+    }
+}
+
+impl RocmElem for half::f16 {
+    fn wrap_slice(buf: SendSyncDeviceMemory<Self>) -> RocmStorageSlice {
+        RocmStorageSlice::F16(buf)
+    }
+}
+
+impl RocmElem for f32 {
+    fn wrap_slice(buf: SendSyncDeviceMemory<Self>) -> RocmStorageSlice {
+        RocmStorageSlice::F32(buf)
+    }
+}
+
+/// Launch a flat binary elementwise kernel of signature `(const T*, const T*,
+/// T*, uint32_t n)`, allocating the `T`-typed output buffer and wrapping it
+/// into a [`RocmStorageSlice`].
+///
+/// Shared by the `rocm_fwd` of every fused binary elementwise op (`swiglu`,
+/// `snake`, `atan2`): each only differs by dtype, kernel/module name, source
+/// and operand pointers, all supplied here.
+///
+/// # Safety
+///
+/// `kernel` (found in `source`) must have exactly the signature described
+/// above for dtype `T`. `a_ptr` and `b_ptr` must be valid ROCm device
+/// pointers on `dev`, of dtype `T`, each addressing at least `n` contiguous
+/// elements, and must remain valid until the launched kernel completes on
+/// `dev`'s stream — the same caller obligation [`device_ptr`] documents for
+/// the storage guard behind the pointer it returns.
+///
+/// # Errors
+///
+/// Returns an error if allocation fails or the launch is rejected (see
+/// [`launch`]).
+pub unsafe fn launch_binary_elementwise<T: RocmElem>(
+    dev: &RocmDevice,
+    module: &str,
+    kernel: &str,
+    source: &str,
+    a_ptr: *mut c_void,
+    b_ptr: *mut c_void,
+    n: usize,
+) -> Result<RocmStorageSlice> {
+    let dst = dev.alloc::<T>(n)?;
+    let dst_ptr = dst.as_ptr();
+    // `n` is a tensor's total element count; real workloads never approach
+    // u32::MAX (~4 billion) elements.
+    #[allow(clippy::cast_possible_truncation)]
+    let n_u32 = n as u32;
+    let block = 256u32;
+    let grid = n_u32.div_ceil(block);
+    let mut args = [arg(&a_ptr), arg(&b_ptr), arg(&dst_ptr), arg(&n_u32)];
+    // SAFETY: forwarded from this function's own safety contract.
+    unsafe { launch(dev, module, kernel, source, grid, block, 0, &mut args) }?;
+    Ok(T::wrap_slice(dst))
 }
 
 /// Hand an f32 output buffer back as a `Tensor` of `shape`, without a copy.
