@@ -784,6 +784,84 @@ fn parse_context_size(s: &str) -> Result<usize> {
         .ok_or_else(|| anyhow::anyhow!("context size '{s}' overflows"))
 }
 
+/// Maximum time to wait for in-flight connections (including long-lived
+/// WebSocket/SSE sessions) to drain after the first shutdown signal before
+/// forcing exit.
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waits for Ctrl-C or (on Unix) `SIGTERM`, then logs and returns so
+/// `axum::serve`'s graceful shutdown can drain in-flight requests before exit.
+/// Once the first signal fires, a repeat signal or `SHUTDOWN_TIMEOUT` elapsing
+/// forces an immediate exit so a stuck connection can't hang the process.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!("failed to install Ctrl-C handler: {e}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            },
+            Err(e) => {
+                warn!("failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            },
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+
+    info!(
+        "Shutting down (repeat signal or wait {}s to force)...",
+        SHUTDOWN_TIMEOUT.as_secs()
+    );
+
+    tokio::spawn(async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                sig.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            () = ctrl_c => {
+                info!("Second signal received, forcing exit");
+            },
+            () = terminate => {
+                info!("Second signal received, forcing exit");
+            },
+            () = tokio::time::sleep(SHUTDOWN_TIMEOUT) => {
+                warn!(
+                    "Graceful shutdown timed out after {}s, forcing exit",
+                    SHUTDOWN_TIMEOUT.as_secs()
+                );
+            },
+        }
+        std::process::exit(1);
+    });
+}
+
 pub async fn run(mut args: Args) -> Result<()> {
     let model_path = std::path::Path::new(&args.model_path);
     if args.format.to_lowercase() == "gguf" || args.model_path.ends_with(".gguf") {
@@ -1582,6 +1660,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                 format!("unix://{}", path.display()),
                 Box::pin(async move {
                     axum::serve(listener, app)
+                        .with_graceful_shutdown(shutdown_signal())
                         .await
                         .map_err(anyhow::Error::from)
                 }),
@@ -1604,6 +1683,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                 format!("http://{local_addr}"),
                 Box::pin(async move {
                     axum::serve(listener, app)
+                        .with_graceful_shutdown(shutdown_signal())
                         .await
                         .map_err(anyhow::Error::from)
                 }),
@@ -1632,6 +1712,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             format!("http://{local_addr}"),
             Box::pin(async move {
                 axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
                     .await
                     .map_err(anyhow::Error::from)
             }),
