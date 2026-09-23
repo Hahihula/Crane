@@ -30,11 +30,18 @@ required-features = ["onnx"]
 ahash = "0.8"
 anyhow = "1.0.97"
 
-# Candle backend variants — see `src/candle_backend.rs`.
-candle-nn = { workspace = true }
+# Candle backend variants: see `src/candle_backend.rs`. `candle-nn` and
+# `candle-transformers` here, plus `candle-core` in the `[target...]` tables
+# below, are optional and gated behind the `candle-default` feature:
+# `rocm`/`sycl` pull in a *different* crate under the same
+# `candle_core`/`candle_nn`/`candle_transformers` names, and rustc rejects
+# the resulting `extern crate ... as candle_core` name collision if the
+# plain crates are also linked in. Building `rocm`/`sycl` requires
+# `--no-default-features`.
+candle-nn = { workspace = true, optional = true }
 # TODO(candle-transformers-removal): See CANDLE_TRANSFORMERS.md for the
 # remaining model/component and generation-helper call sites.
-candle-transformers = { workspace = true }
+candle-transformers = { workspace = true, optional = true }
 
 candle-core-sycl = { workspace = true, optional = true }
 candle-nn-sycl = { workspace = true, optional = true }
@@ -72,30 +79,37 @@ half = "2"
 prost = { version = "0.14.3", optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-candle-core = { workspace = true, features = ["metal"] }
-candle-nn = { workspace = true, features = ["metal"] }
+candle-core = { workspace = true, features = ["metal"], optional = true }
+candle-nn = { workspace = true, features = ["metal"], optional = true }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-candle-core = { workspace = true, features = ["accelerate"] }
+candle-core = { workspace = true, features = ["accelerate"], optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = { workspace = true }
+candle-core = { workspace = true, optional = true }
 
 [features]
+default = ["candle-default"]
+# The plain (non-fork) candle backend. See the comment on `candle-nn` above.
+candle-default = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
 metal = [
+    "candle-default",
     "candle-core/metal",
     "candle-nn/metal",
     "candle-transformers/metal",
 ]
 cuda = [
+    "candle-default",
     "candle-core/cuda",
     "candle-nn/cuda",
     "candle-transformers/cuda",
     "dep:bindgen_cuda",
 ]
-cudnn = ["candle-core/cudnn"]
+cudnn = ["candle-default", "candle-core/cudnn"]
 # AMD ROCm/HIP backend (experimental fork). Also enables the fork's own
-# `rocm` feature — it's off by default there too.
+# `rocm` feature — it's off by default there too. Build with
+# `--no-default-features`: this crate's `default` feature pulls in the
+# plain `candle-core`, which collides with this fork under the same name.
 rocm = [
     "dep:candle-core-rocm",
     "dep:candle-nn-rocm",
@@ -104,7 +118,8 @@ rocm = [
     "candle-nn-rocm/rocm",
     "candle-transformers-rocm/rocm",
 ]
-# Intel oneAPI/SYCL backend (experimental fork). Same deal as `rocm` above.
+# Intel oneAPI/SYCL backend (experimental fork). Same deal as `rocm` above,
+# including the `--no-default-features` requirement.
 sycl = [
     "dep:candle-core-sycl",
     "dep:candle-nn-sycl",
@@ -114,12 +129,14 @@ sycl = [
     "candle-transformers-sycl/sycl",
 ]
 mkl = [
+    "candle-default",
     "dep:intel-mkl-src",
     "candle-core/mkl",
     "candle-nn/mkl",
     "candle-transformers/mkl",
 ]
 accelerate = [
+    "candle-default",
     "dep:accelerate-src",
     "candle-core/accelerate",
     "candle-nn/accelerate",
