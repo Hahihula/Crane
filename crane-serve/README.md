@@ -79,63 +79,10 @@ OpenAI-compatible endpoints. See
 [Audio: Text-to-Speech and Speech Recognition](docs/audio.md) for setup,
 voice lists, generation parameters, and troubleshooting.
 
-## CUDA Usage
+## GPU Deployment
 
-> **Note:** CUDA support requires the `cuda` feature flag at build time (see above). The server automatically uses the first available CUDA device.
-
-### Basic CUDA inference
-
-```bash
-crane-serve --model-path /path/to/Qwen3-8B-Instruct
-```
-
-On CUDA, `model_info` will report the device as `Cuda(0)` (or `Cuda(1)`, etc.).
-
-### GPU memory control
-
-GPU memory grows as KV caches accumulate. Use `--gpu-memory-limit` to keep usage bounded:
-
-```bash
-# Hard cap at 8 GB — recommended starting point for a 12 GB GPU
-crane-serve --model-path /path/to/model \
-    --gpu-memory-limit 8G \
-    --max-seq-len 4096
-
-# Cap at 5 GB for 8 GB VRAM cards
-crane-serve --model-path /path/to/model \
-    --gpu-memory-limit 5G \
-    --max-seq-len 2048 \
-    --max-concurrent 4
-
-# Use 75% of total VRAM
-crane-serve --model-path /path/to/model \
-    --gpu-memory-limit 0.75
-```
-
-When the KV memory budget is exceeded, the engine evicts the longest-output sequence (preserving its state), tightens the concurrency cap, and resumes that sequence automatically once load subsides. This avoids OOM without crashing the server.
-
-**Recommended values by GPU size:**
-
-| GPU VRAM | `--gpu-memory-limit` | `--max-seq-len` |
-|----------|---------------------|----------------|
-| 8 GB     | `6G` or `0.7`       | `2048`         |
-| 12 GB    | `8G` or `0.7`       | `4096`         |
-| 24 GB    | `20G` or `0.8`      | `8192`         |
-| 48 GB+   | *(omit)*            | *(omit)*       |
-
-### GGUF quantized models on CUDA
-
-GGUF quantization roughly halves VRAM usage compared to FP16:
-
-```bash
-crane-serve --model-path /path/to/Qwen3-8B-Q4_K_M.gguf \
-    --format gguf \
-    --gpu-memory-limit 8G
-```
-
-### Multi-GPU note
-
-Currently crane-serve runs on a single CUDA device (device 0). Multi-GPU tensor parallelism is not yet supported.
+Build with `--features cuda`, control VRAM usage, and use GGUF
+quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 
 ## CLI Parameters
 
@@ -260,23 +207,21 @@ Tool calling and reasoning control are **template-driven**, not model-type-drive
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CRANE_FORCE_GPU_TOPK` | `0` | Force GPU top-k even for large vocabularies |
-| `CRANE_TOPP_FALLBACK_TOPK` | `64` | k value for GPU top-k fallback |
-| `CRANE_TOPK_SAMPLE_ON_CPU` | `0` | Sample on CPU after GPU top-k |
 | `CRANE_SAMPLE_TRACE` | `0` | Verbose sampling timing logs |
 | `CRANE_KV_QUANT` | unset | Qwen 3.5 family K/V cache: `int8` (~2x smaller) or `int4` (~4x smaller) |
 | `CRANE_EMBED_DENSE` | `0` | GGUF: dequantize the whole embedding table at load instead of gathering rows (pre-optimization behaviour; costs ~1.7 GiB on Qwen 3.8-27B) |
 | `CRANE_PROF` | `0` | Per-forward-pass profiler: splits kernel *submission* time from wall time after a device sync |
 
+GPU-specific environment variables (`CRANE_FORCE_GPU_TOPK`,
+`CRANE_TOPP_FALLBACK_TOPK`, `CRANE_TOPK_SAMPLE_ON_CPU`) are documented in
+[GPU Deployment](docs/gpu.md).
+
 ## Notes
 
 - **API key authentication is opt-in** — unset by default (open access); see [Authentication](#authentication) for `--api-key`/`--api-key-file`.
-- **Single CUDA device** — The server uses CUDA device 0. Multi-GPU tensor parallelism is not yet supported.
 - **KV eviction is lossless** — Evicted sequences preserve their full state and resume automatically; in-flight requests are not dropped or errored.
 - **`--max-seq-len 0`** means no limit. On constrained hardware, always set an explicit value to avoid runaway memory growth.
-- **GGUF quantization** is supported for Hunyuan Dense and Qwen 3. Qwen 2.5 requires Safetensors format.
 - **`--decode-tokens-per-seq`** controls decode rounds per engine step, not per request. Requests always complete fully regardless of this value.
-- **Log diagnostics** — The startup log prints `kv_bytes` and `kv_budget`. Monitor these to validate your `--gpu-memory-limit` headroom.
 - **Qwen3-TTS and Voxtral TTS run on a dedicated thread** — No continuous batching; each `/v1/audio/speech` request is processed sequentially. Concurrent requests are queued in an unbounded channel.
 - **Qwen3-TTS decoder backend** — The speech-tokenizer decoder (codes → waveform) uses native Candle by default. ONNX export is optional as a compatibility fallback.
 - **Voxtral TTS uses greedy decoding** — `temperature`, `top_p`, and `repetition_penalty` are accepted for API compatibility but do not affect the output.
