@@ -6,6 +6,7 @@ SERVER_BIN_PATH="$ROOT_DIR/target/release/crane-serve"
 CHAT_SIMPLE_BIN_PATH="$ROOT_DIR/target/release/chat_simple"
 CHAT_CLI_BIN_PATH="$ROOT_DIR/target/release/chat_cli"
 BUILD_FEATURES=()
+NO_DEFAULT_FEATURES=false
 PLATFORM="unknown"
 
 RED='\033[0;31m'
@@ -23,6 +24,15 @@ say() {
   printf "%b\n" "$1"
 }
 
+say "${BOLD}Crane installer${NC}"
+say "This will detect your platform (macOS+Metal, Linux+NVIDIA CUDA,"
+say "Linux+AMD ROCm, or CPU-only), then run 'cargo build --release' for"
+say "crane-serve, chat_simple, and chat_cli with the matching GPU backend"
+say "feature enabled."
+say "${YELLOW}It does not install any system packages, drivers, or GPU"
+say "toolkits. Toolkits must already be present for a GPU build to succeed.${NC}"
+say ""
+
 if [[ "$(uname -s)" == "Darwin" ]]; then
   PLATFORM="macos"
   BUILD_FEATURES+=("metal")
@@ -35,6 +45,21 @@ elif [[ "$(uname -s)" == "Linux" ]]; then
     BUILD_FEATURES+=("cuda")
     say "${YELLOW}${BOLD}Detected platform:${NC} Linux with NVIDIA CUDA"
     say "${YELLOW}Enabled Cargo features:${NC} cuda"
+  elif have_cmd rocminfo; then
+    PLATFORM="linux-rocm"
+    BUILD_FEATURES+=("rocm")
+    # crane-core's rocm feature aliases the fork's candle-core/-nn/-transformers
+    # crates under the same names the plain (default) candle backend uses, so
+    # both can't be compiled into the same build -- see crane-core/Cargo.toml's
+    # "rocm" feature comment.
+    NO_DEFAULT_FEATURES=true
+    : "${ROCM_PATH:=/opt/rocm}"
+    : "${HIP_PATH:=/opt/rocm}"
+    export ROCM_PATH HIP_PATH
+    export LD_LIBRARY_PATH="$ROCM_PATH/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    say "${YELLOW}${BOLD}Detected platform:${NC} Linux with AMD ROCm"
+    say "${YELLOW}Enabled Cargo features:${NC} rocm (--no-default-features)"
+    say "${YELLOW}ROCM_PATH:${NC} ${ROCM_PATH}"
   else
     PLATFORM="linux"
     say "${YELLOW}${BOLD}Detected platform:${NC} Linux (CPU build)"
@@ -45,10 +70,24 @@ else
 fi
 
 BUILD_CMD=(cargo build --release -p crane-serve -p crane-examples --bin crane-serve --bin chat_simple --bin chat_cli)
+if [[ "${NO_DEFAULT_FEATURES}" == true ]]; then
+  BUILD_CMD+=(--no-default-features)
+fi
 if [[ ${#BUILD_FEATURES[@]} -gt 0 ]]; then
   FEATURES_CSV=$(IFS=,; printf '%s' "${BUILD_FEATURES[*]}")
   BUILD_CMD+=(--features "$FEATURES_CSV")
 fi
+
+say ""
+say "${BLUE}${BOLD}Will run:${NC} ${BUILD_CMD[*]}"
+read -r -p "$(printf '%b' "${BLUE}${BOLD}Continue? [y/N]: ${NC}")" REPLY || REPLY=""
+case "${REPLY}" in
+  y | Y | yes | Yes | YES) ;;
+  *)
+    say "${YELLOW}Aborted.${NC}"
+    exit 0
+    ;;
+esac
 
 say "${BLUE}${BOLD}Building crane-serve, chat_simple, and chat_cli...${NC}"
 (
