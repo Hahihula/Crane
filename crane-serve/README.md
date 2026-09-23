@@ -6,10 +6,10 @@ cloud account, no per-token billing, no data leaving your hardware.
 
 It exposes an OpenAI-compatible API and an SGLang-compatible API, so
 existing OpenAI SDK clients, chat UIs, and tooling work against it
-unmodified. It runs on [Crane](../README.md), a Rust inference framework
-built on Candle. A continuous-batching scheduler serves multiple requests
-concurrently on CPU, NVIDIA CUDA, or Apple Metal, with no Python runtime
-required.
+unmodified. It runs on [Crane Local AI](../README.md), a Rust inference
+framework built on Candle. A continuous-batching scheduler serves multiple
+requests concurrently on CPU, NVIDIA CUDA, or Apple Metal, with no Python
+runtime required.
 
 ## Features
 
@@ -95,8 +95,8 @@ microphone access from plain HTTP remote origins.
 
 ## Text-to-Speech and Speech Recognition
 
-Crane supports Qwen3-TTS, Voxtral TTS, and Qwen3-ASR, all exposed through
-OpenAI-compatible endpoints. See
+Crane Local AI supports Qwen3-TTS, Voxtral TTS, and Qwen3-ASR, all exposed
+through OpenAI-compatible endpoints. See
 [Audio: Text-to-Speech and Speech Recognition](docs/audio.md) for setup,
 voice lists, generation parameters, and troubleshooting.
 
@@ -115,7 +115,7 @@ quantized models on GPU: see [GPU Deployment](docs/gpu.md).
 | `--host` | `0.0.0.0` | Bind address |
 | `--port` | `8080` | Bind port |
 | `--unix-socket` | *(none)* | Serve over a Unix domain socket at this path instead of TCP (Unix only); a stale socket file is removed and the new one created with `0600` permissions |
-| `--ui` | `false` | Serve Crane's built-in browser UI at `/` |
+| `--ui` | `false` | Serve Crane Local AI's built-in browser UI at `/` |
 | `--log-level` | *(none)* | Log verbosity filter: a bare level (`debug`, `info`, `warn`) or per-target filters (`info,crane_core=debug`). Overrides `RUST_LOG` when both are set |
 | `--cpu` | `false` | Force CPU even when a GPU is available |
 | `--max-concurrent` | `16` | Hard cap on concurrently decoding sequences. Actual concurrency may be lower when `--gpu-memory-limit` is active. |
