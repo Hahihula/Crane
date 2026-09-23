@@ -60,6 +60,10 @@ impl CustomOp2 for Atan2Op {
             (T::to_cpu_storage_owned(dst), l_y.shape().clone())
         }
 
+        if l_y.shape() != l_x.shape() {
+            candle_core::bail!("atan2: y and x must have the same shape");
+        }
+
         match (s_y, s_x) {
             (CpuStorage::BF16(y), CpuStorage::BF16(x)) => Ok(inner(y, l_y, x, l_x)),
             (CpuStorage::F16(y), CpuStorage::F16(x)) => Ok(inner(y, l_y, x, l_x)),
