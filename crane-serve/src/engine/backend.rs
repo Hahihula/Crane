@@ -12,6 +12,7 @@
 //! | Batch decode      | No       | Sequences decoded sequentially per step        |
 
 use anyhow::Result;
+use crane_core::device::DeviceAssignment;
 use crane_core::{DType, Device, Tensor, bail};
 
 /// Per-layer KV cache for one sequence: `(K, V)` per layer, or `None` for
@@ -89,6 +90,18 @@ pub trait ModelBackend: Send + 'static {
     /// computed for this backend.
     fn kv_bytes_per_token(&self) -> Option<u64> {
         None
+    }
+
+    /// Re-run expert promotion with an updated policy (e.g. after
+    /// `derive_safe_max_seq_len` tightens `max_seq_len`). The default
+    /// implementation is a no-op — only `MoE` backends override this.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying promotion fails for reasons
+    /// unrelated to out-of-memory (which is caught inside the model).
+    fn re_promote_experts(&mut self, _policy: &ExpertPromotionPolicy) -> Result<()> {
+        Ok(())
     }
 
     // ── Batch decode (GPU-efficient concurrent serving) ───────
@@ -615,6 +628,21 @@ impl ModelBackend for Qwen3_5Backend {
 //  Qwen 3 Backend
 // ─────────────────────────────────────────────────────────────
 
+/// `MoE` expert GPU-promotion policy, resolved from CLI flags in
+/// `crane-serve/src/lib.rs`. Never enters `crane-core` — the model only
+/// sees the resolved scalars via `Model::promote_experts_to_gpu`.
+pub struct ExpertPromotionPolicy {
+    /// VRAM ceiling for expert weights, in bytes.
+    pub vram_ceiling_bytes: u64,
+    /// Maximum concurrent sequences the engine will serve, used to
+    /// estimate KV cache VRAM. `None` falls back to a conservative default.
+    pub max_concurrent: Option<usize>,
+    /// Maximum tokens (prompt + completion) per sequence, used to estimate
+    /// KV cache VRAM. `None` or `Some(0)` falls back to a conservative
+    /// default.
+    pub max_seq_len: Option<usize>,
+}
+
 pub struct Qwen3Backend {
     pub model: crane_core::models::qwen3::Model,
     #[allow(dead_code)]
@@ -622,11 +650,27 @@ pub struct Qwen3Backend {
 }
 
 impl Qwen3Backend {
+    /// `promotion` is `Some` only when `devices.expert` starts on CPU and
+    /// the runtime wants the model to attempt promoting experts to GPU
+    /// after construction, once real VRAM headroom is known.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the model fails to load from `model_path`.
-    pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
-        let model = crane_core::models::qwen3::Model::new(model_path, device, dtype)?;
+    /// Returns an error if the model fails to load from `model_path`, or if
+    /// expert promotion fails outright (not counting an out-of-memory
+    /// promotion attempt, which is caught and logged inside the model).
+    pub fn new(
+        model_path: &str,
+        devices: &DeviceAssignment,
+        dtype: &DType,
+        promotion: Option<&ExpertPromotionPolicy>,
+    ) -> Result<Self> {
+        let mut model = crane_core::models::qwen3::Model::loader(model_path, &devices.main, dtype)
+            .expert_device(&devices.expert)
+            .build()?;
+        if let Some(p) = promotion {
+            model.promote_experts_to_gpu(p.vram_ceiling_bytes, p.max_concurrent, p.max_seq_len)?;
+        }
         Ok(Self {
             model,
             dtype: *dtype,
@@ -703,6 +747,14 @@ impl ModelBackend for Qwen3Backend {
 
     fn kv_bytes_per_token(&self) -> Option<u64> {
         Some(self.model.kv_bytes_per_token())
+    }
+
+    fn re_promote_experts(&mut self, policy: &ExpertPromotionPolicy) -> Result<()> {
+        self.model.promote_experts_to_gpu(
+            policy.vram_ceiling_bytes,
+            policy.max_concurrent,
+            policy.max_seq_len,
+        )
     }
 
     // ── Batch decode ──

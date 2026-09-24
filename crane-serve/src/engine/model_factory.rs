@@ -6,13 +6,14 @@
 #[cfg(feature = "onnx")]
 use anyhow::Context;
 use anyhow::Result;
+use crane_core::device::DeviceAssignment;
 use crane_core::{DType, Device, gguf_file};
 use serde::Deserialize;
 use std::path::Path;
 
 use super::backend::{
-    Gemma4Backend, HunyuanBackend, Minicpm5Backend, ModelBackend, Qwen3_5Backend, Qwen3Backend,
-    Qwen25Backend,
+    ExpertPromotionPolicy, Gemma4Backend, HunyuanBackend, Minicpm5Backend, ModelBackend,
+    Qwen3_5Backend, Qwen3Backend, Qwen25Backend,
 };
 use crate::chat_template::{AutoChatTemplate, ChatTemplateProcessor, HunyuanChatTemplate};
 
@@ -61,7 +62,8 @@ impl ModelType {
             | "minicpm_o_duplex" => Self::MiniCpmODuplex,
             "minicpm5" | "minicpm-5" | "minicpm_5" | "minicpm" => Self::Minicpm5,
             "qwen25" | "qwen2.5" | "qwen2" => Self::Qwen25,
-            "qwen3" => Self::Qwen3,
+            // Qwen3-Coder ships model_type "qwen3moe"; it uses the same Qwen3 architecture.
+            "qwen3" | "qwen3moe" => Self::Qwen3,
             // Qwen 3.6 / 3.8 are the same architecture as 3.5 (they even
             // declare `model_type: "qwen3_5"`), so they alias onto it rather
             // than getting their own `ModelType`.
@@ -221,7 +223,8 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                     };
                 },
                 "qwen2" | "qwen2.5" => return ModelType::Qwen25,
-                "qwen3" => return ModelType::Qwen3,
+                // Qwen3-Coder ships model_type "qwen3moe"; it uses the same Qwen3 architecture.
+                "qwen3" | "qwen3moe" => return ModelType::Qwen3,
                 // Qwen 3.6 / 3.8 27B ship `model_type: "qwen3_5"`; the 3.6/3.8
                 // spellings are only here for retagged third-party repacks.
                 "qwen3_5" | "qwen3.5" | "qwen3_6" | "qwen3.6" | "qwen3_8" | "qwen3.8" => {
@@ -293,6 +296,9 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                     || a.contains("qwen3.8")
                 {
                     return ModelType::Qwen3_5;
+                }
+                if a.contains("qwen3moeforcausallm") {
+                    return ModelType::Qwen3;
                 }
                 if a.contains("qwen3") {
                     return ModelType::Qwen3;
@@ -514,14 +520,19 @@ fn resolve(model_type: ModelType, model_path: &str) -> ModelType {
 ///
 /// `quant` requests in-situ quantization of a safetensors checkpoint (e.g.
 /// `q4k`, `q8_0`); only backends that support it accept the flag.
+/// `devices.expert` and `promotion` are Qwen3-specific `MoE` expert
+/// placement inputs (see [`super::backend::Qwen3Backend::new`]); ignored by
+/// every other backend, which uses `devices.main` for everything.
 pub fn create_backend(
     model_type: ModelType,
     model_path: &str,
-    device: &Device,
+    devices: &DeviceAssignment,
     dtype: &DType,
     format: ModelFormat,
     quant: Option<&str>,
+    promotion: Option<&ExpertPromotionPolicy>,
 ) -> Result<Box<dyn ModelBackend>> {
+    let device = &devices.main;
     let model_type = resolve(model_type, model_path);
     tracing::info!("Creating backend: {:?}", model_type);
 
@@ -566,7 +577,9 @@ pub fn create_backend(
             )?))
         },
         ModelType::Qwen25 => Ok(Box::new(Qwen25Backend::new(model_path, device, dtype)?)),
-        ModelType::Qwen3 => Ok(Box::new(Qwen3Backend::new(model_path, device, dtype)?)),
+        ModelType::Qwen3 => Ok(Box::new(Qwen3Backend::new(
+            model_path, devices, dtype, promotion,
+        )?)),
         ModelType::Qwen3_5 => {
             let quant = quant
                 .map(crane_core::ops::linear::parse_ggml_dtype)
@@ -830,6 +843,17 @@ mod tests {
         assert_eq!(ModelType::from_str("QWEN2"), ModelType::Qwen25);
         assert_eq!(ModelType::from_str("qwen3"), ModelType::Qwen3);
         assert_eq!(ModelType::from_str("QWEN3"), ModelType::Qwen3);
+        assert_eq!(ModelType::from_str("qwen3moe"), ModelType::Qwen3);
+        assert_eq!(ModelType::from_str("QWEN3MOE"), ModelType::Qwen3);
+    }
+
+    #[test]
+    fn detect_from_config_json_model_type_qwen3moe() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "qwen3moe"}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Qwen3);
     }
 
     // ── uses_xml_tool_format ──
@@ -1184,6 +1208,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
         std::fs::write(&config, r#"{"architectures": ["Qwen3ForCausalLM"]}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Qwen3);
+    }
+
+    #[test]
+    fn detect_from_config_json_architectures_qwen3moe() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"architectures": ["Qwen3MoeForCausalLM"]}"#).unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::Qwen3);
     }

@@ -55,6 +55,17 @@ without crashing the server.
 The startup log prints `kv_bytes` and `kv_budget`. Monitor these to
 validate your `--gpu-memory-limit` headroom.
 
+### Auto-derived context length
+
+If `--context`/`--max-seq-len` is left unset while `--gpu-memory-limit` is
+set, and the loaded model supports it (currently Qwen3), crane-serve
+computes a safe cap after loading from measured GPU memory, actual weight
+usage, and the model's per-token memory cost — protecting a single
+long-running session's own KV cache growth, which eviction alone doesn't
+cover (see above). Check the startup log for `auto-derived N tokens...`;
+if it instead logs a warning that no safe value could be derived
+(unsupported model/device), set `--context` explicitly.
+
 ## GGUF quantized models on CUDA
 
 GGUF quantization roughly halves VRAM usage compared to FP16:

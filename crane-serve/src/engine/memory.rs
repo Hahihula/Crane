@@ -59,7 +59,7 @@ impl MemoryConfig {
         ("M", 20),
     ];
 
-    fn parse_memory_limit(s: &str, device: &Device) -> u64 {
+    pub(crate) fn parse_memory_limit(s: &str, device: &Device) -> u64 {
         let s = s.trim();
         if s.is_empty() || s == "0" {
             return 0;
@@ -111,7 +111,7 @@ impl MemoryConfig {
     }
 
     /// Query total GPU memory (bytes). Returns 0 if unavailable.
-    fn query_total_gpu_memory(device: &Device) -> u64 {
+    pub(crate) fn query_total_gpu_memory(device: &Device) -> u64 {
         crane_core::device_memory_info(device).map_or(0, |(_free, total)| total)
     }
 }

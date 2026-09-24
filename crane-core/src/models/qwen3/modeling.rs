@@ -44,11 +44,14 @@ use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
+use crate::device::{DeviceAssignment, format_budget, greedy_fit_layers, query_gpu_memory};
 use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::flash_attn::dispatch_flash_attn;
 use crate::models::modules::kv_cache;
+use crate::models::modules::moe::{MlpOrMoe, MoeConfig, SparseMoeBlock};
 use crate::models::modules::rotary::RotaryEmbedding;
 use crate::utils::DeviceExt;
+use ribo::utils::log;
 
 // Reuse the polymorphic linear layer and the shared GGUF loader.
 pub use crate::ops::linear::LinearLayer;
@@ -121,6 +124,21 @@ pub struct Config {
     pub use_sliding_window: bool,
     #[serde(default)]
     pub eos_token_id: Option<u32>,
+    /// Total number of experts per `MoE` layer. `None` for dense checkpoints.
+    #[serde(default)]
+    pub num_experts: Option<usize>,
+    /// Number of experts activated per token (top-K). `None` for dense checkpoints.
+    #[serde(default)]
+    pub num_experts_per_tok: Option<usize>,
+    /// Hidden dimension of each expert's feed-forward network.
+    #[serde(default)]
+    pub moe_intermediate_size: Option<usize>,
+    /// Whether to renormalize the top-K routing weights to sum to 1.
+    #[serde(default)]
+    pub norm_topk_prob: Option<bool>,
+    /// Every Nth layer is `MoE`; the rest stay dense MLP.
+    #[serde(default)]
+    pub decoder_sparse_step: Option<usize>,
 }
 
 impl Config {
@@ -139,6 +157,19 @@ impl Config {
             * self.num_key_value_heads as u64
             * self.head_dim() as u64
             * dtype_bytes as u64
+    }
+
+    /// Builds the `MoE` configuration for this model, or `None` if this is a
+    /// dense (non-`MoE`) checkpoint.
+    #[must_use]
+    pub fn moe_config(&self) -> Option<MoeConfig> {
+        Some(MoeConfig {
+            num_experts: self.num_experts?,
+            num_experts_per_tok: self.num_experts_per_tok?,
+            moe_intermediate_size: self.moe_intermediate_size?,
+            norm_topk_prob: self.norm_topk_prob.unwrap_or(true),
+            decoder_sparse_step: self.decoder_sparse_step,
+        })
     }
 }
 
@@ -655,11 +686,17 @@ impl Mlp {
     }
 }
 
+impl Module for Mlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        Self::forward(self, xs)
+    }
+}
+
 // ── Decoder Layer ───────────────────────────────────────────────────────
 
 struct DecoderLayer {
     self_attn: Attention,
-    mlp: Mlp,
+    mlp: MlpOrMoe<Mlp>,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
 }
@@ -667,9 +704,29 @@ struct DecoderLayer {
 impl DecoderLayer {
     // See `Attention::new`'s comment on `VarBuilder` by-value.
     #[allow(clippy::needless_pass_by_value)]
-    fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        config: &Config,
+        layer_idx: usize,
+        vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
         let self_attn = Attention::new(config, vb.pp("self_attn"))?;
-        let mlp = Mlp::new(config, vb.pp("mlp"))?;
+        let moe_config = config.moe_config();
+        // HF's `mlp_only_layers` override (per-layer dense exceptions) isn't
+        // modeled here; only the uniform `decoder_sparse_step` stride is.
+        let is_moe_layer = moe_config.as_ref().is_some_and(|mc| {
+            mc.decoder_sparse_step
+                .is_none_or(|step| (layer_idx + 1).is_multiple_of(step))
+        });
+        let mlp = match moe_config {
+            Some(mc) if is_moe_layer => MlpOrMoe::Moe(SparseMoeBlock::new(
+                &mc,
+                config.hidden_size,
+                vb.pp("mlp"),
+                expert_device,
+            )?),
+            _ => MlpOrMoe::Dense(Mlp::new(config, vb.pp("mlp"))?),
+        };
         let input_layernorm = candle_nn::rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
@@ -692,9 +749,26 @@ impl DecoderLayer {
         config: &Config,
         gg: &mut Gguf<R>,
         layer_idx: usize,
+        expert_device: &Device,
     ) -> Result<Self> {
         let self_attn = Attention::new_from_gguf(config, gg, layer_idx)?;
-        let mlp = Mlp::new_from_gguf(gg, layer_idx, config.intermediate_size)?;
+        let is_moe = gg.contains_tensor(&format!("blk.{layer_idx}.ffn_gate_inp.weight"));
+        let mlp = if is_moe {
+            let moe_config = config.moe_config().ok_or_else(|| {
+                candle_core::Error::Msg(format!(
+                    "layer {layer_idx} has MoE tensors but Config lacks MoE fields"
+                ))
+                .bt()
+            })?;
+            MlpOrMoe::Moe(SparseMoeBlock::new_from_gguf(
+                &moe_config,
+                gg,
+                layer_idx,
+                expert_device,
+            )?)
+        } else {
+            MlpOrMoe::Dense(Mlp::new_from_gguf(gg, layer_idx, config.intermediate_size)?)
+        };
         let prefix = format!("blk.{layer_idx}");
         let input_layernorm =
             gg.rms_norm(&format!("{prefix}.attn_norm.weight"), config.rms_norm_eps)?;
@@ -715,15 +789,39 @@ impl DecoderLayer {
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
+        let hidden_states = self.forward_attn(hidden_states, cos, sin, attention_mask)?;
+        self.forward_mlp(&hidden_states)
+    }
+
+    /// Attention half: input layernorm, self-attention, residual add.
+    ///
+    /// Split out from [`Self::forward`] so [`Qwen3Model::decode`] can prune
+    /// hidden states to only the output-needing positions between this and
+    /// [`Self::forward_mlp`] on the last layer, saving `MoE` expert
+    /// dispatches on positions whose hidden states would otherwise be
+    /// discarded before `lm_head`. Self-attention must still see every
+    /// position (for KV cache correctness), so only the MLP half is
+    /// prunable.
+    fn forward_attn(
+        &mut self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let residual = hidden_states;
         let hidden_states = self.input_layernorm.forward(hidden_states)?;
         let hidden_states = self
             .self_attn
             .forward(&hidden_states, cos, sin, attention_mask)?;
-        let hidden_states = (residual + hidden_states)?;
+        residual + hidden_states
+    }
 
-        let residual = &hidden_states;
-        let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
+    /// MLP half: post-attention layernorm, dense/`MoE` MLP, residual add.
+    /// See [`Self::forward_attn`] for why this is split out.
+    fn forward_mlp(&self, hidden_states: &Tensor) -> Result<Tensor> {
+        let residual = hidden_states;
+        let hidden_states = self.post_attention_layernorm.forward(hidden_states)?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         residual + hidden_states
     }
@@ -743,20 +841,91 @@ pub struct Qwen3Model {
     rotary_emb: RotaryEmbedding,
     config: Config,
     dtype: DType,
-    /// Full-sequence post-norm hidden states from the most recent forward
-    /// call — see [`Self::last_hidden_states`].
+    /// Post-norm hidden states from the most recent forward call.
+    ///
+    /// Shape is `[B, S, H]` in the common case, but `[B, 1, H]` (last
+    /// position only) when the last decoder layer is `MoE` and `seq_len > 1`,
+    /// because the `MoE` pruning optimization narrows hidden states before
+    /// the final MLP. See [`Self::last_hidden_states`].
     last_hidden_states: Option<Tensor>,
+    /// Whether the last decoder layer uses a Mixture-of-Experts MLP,
+    /// cached at construction to avoid re-checking on every decode call.
+    last_layer_is_moe: bool,
+}
+
+/// `MoE` expert metadata read from GGUF, all `None` for dense
+/// (non-`MoE`) checkpoints.
+struct GgufMoeMetadata {
+    num_experts: Option<usize>,
+    num_experts_per_tok: Option<usize>,
+    moe_intermediate_size: Option<usize>,
+    norm_topk_prob: Option<bool>,
+}
+
+/// Reads `MoE` expert metadata from GGUF, if present.
+fn read_moe_metadata<R: Read + Seek>(gg: &Gguf<R>, arch: &str) -> GgufMoeMetadata {
+    let num_experts = gg
+        .metadata()
+        .get(&format!("{arch}.expert_count"))
+        .and_then(|v| v.to_u32().ok())
+        .map(|v| v as usize)
+        // Some dense GGUF exports write an explicit `expert_count = 0`
+        // rather than omitting the key; treat that the same as absent.
+        .filter(|&n| n > 0);
+    let num_experts_per_tok = gg
+        .metadata()
+        .get(&format!("{arch}.expert_used_count"))
+        .and_then(|v| v.to_u32().ok())
+        .map(|v| v as usize);
+    let moe_intermediate_size = gg
+        .metadata()
+        .get(&format!("{arch}.expert_feed_forward_length"))
+        .and_then(|v| v.to_u32().ok())
+        .map(|v| v as usize);
+    let expert_shared_ffn_length = gg
+        .metadata()
+        .get(&format!("{arch}.expert_shared_feed_forward_length"))
+        .and_then(|v| v.to_u32().ok())
+        .map(|v| v as usize);
+    // Qwen3 MoE has no shared experts, so an absent or zero shared-FFN
+    // length means the top-K routing weights should be renormalized.
+    let norm_topk_prob = num_experts
+        .map(|_| expert_shared_ffn_length.is_none() || expert_shared_ffn_length == Some(0));
+    GgufMoeMetadata {
+        num_experts,
+        num_experts_per_tok,
+        moe_intermediate_size,
+        norm_topk_prob,
+    }
 }
 
 impl Qwen3Model {
-    /// Construct from safetensors / `HuggingFace` checkpoint.
+    /// Construct from safetensors / `HuggingFace` checkpoint. Expert weights
+    /// (if `MoE`) go on the same device as the rest of the model; use
+    /// [`Self::new_with_expert_device`] to place them elsewhere.
     ///
     /// # Errors
     ///
     /// Returns an error if a required weight tensor is missing or has an
     /// unexpected shape.
     pub fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
-        Self::new_inner(config, vb.pp("model"), vb)
+        let device = vb.device().clone();
+        Self::new_inner(config, vb.pp("model"), vb, &device)
+    }
+
+    /// Like [`Self::new`], but places `MoE` expert weights on `expert_device`
+    /// rather than the model's main device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight tensor is missing or has an
+    /// unexpected shape.
+    pub fn new_with_expert_device(
+        config: &Config,
+        vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
+        Self::new_inner(config, vb.pp("model"), vb, expert_device)
     }
 
     /// Construct from a checkpoint where the decoder is nested under a
@@ -764,6 +933,9 @@ impl Qwen3Model {
     /// `model.language_model.*`). `model_vb` must already be scoped to the
     /// decoder's root (what would otherwise be `vb.pp("model")`); `root_vb`
     /// is the checkpoint root, used to resolve an untied `lm_head` sibling.
+    /// Expert weights (if `MoE`) go on the same device as `model_vb`; use
+    /// [`Self::new_from_model_vb_with_expert_device`] to place them
+    /// elsewhere.
     ///
     /// # Errors
     ///
@@ -774,12 +946,34 @@ impl Qwen3Model {
         model_vb: VarBuilder,
         root_vb: VarBuilder,
     ) -> Result<Self> {
-        Self::new_inner(config, model_vb, root_vb)
+        let device = model_vb.device().clone();
+        Self::new_inner(config, model_vb, root_vb, &device)
+    }
+
+    /// Like [`Self::new_from_model_vb`], but places `MoE` expert weights on
+    /// `expert_device` rather than `model_vb`'s device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight tensor is missing or has an
+    /// unexpected shape.
+    pub fn new_from_model_vb_with_expert_device(
+        config: &Config,
+        model_vb: VarBuilder,
+        root_vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
+        Self::new_inner(config, model_vb, root_vb, expert_device)
     }
 
     // See `Attention::new`'s comment on `VarBuilder` by-value.
     #[allow(clippy::needless_pass_by_value)]
-    fn new_inner(config: &Config, model_vb: VarBuilder, root_vb: VarBuilder) -> Result<Self> {
+    fn new_inner(
+        config: &Config,
+        model_vb: VarBuilder,
+        root_vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
         let dtype = model_vb.dtype();
         let embed_tokens = EmbeddingLayer::Dense(candle_nn::embedding(
             config.vocab_size,
@@ -790,7 +984,12 @@ impl Qwen3Model {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let layers_vb = model_vb.pp("layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(config, layers_vb.pp(i))?);
+            layers.push(DecoderLayer::new(
+                config,
+                i,
+                layers_vb.pp(i),
+                expert_device,
+            )?);
         }
 
         let norm =
@@ -826,6 +1025,10 @@ impl Qwen3Model {
             model_vb.device(),
         )?;
 
+        let last_layer_is_moe = layers
+            .last()
+            .is_some_and(|l| matches!(l.mlp, MlpOrMoe::Moe(_)));
+
         Ok(Self {
             embed_tokens,
             layers,
@@ -835,20 +1038,31 @@ impl Qwen3Model {
             config: config.clone(),
             dtype,
             last_hidden_states: None,
+            last_layer_is_moe,
         })
     }
 
     /// Construct from a GGUF file.
     ///
+    /// `devices.main` holds every weight but `MoE` experts; `devices.expert`
+    /// holds `MoE` expert weights, if the checkpoint is `MoE`.
+    ///
     /// # Errors
     ///
     /// Returns an error if a required tensor or metadata entry is missing
     /// or has an unexpected shape.
+    // This function's length comes from reading many independent GGUF
+    // metadata keys (attention, RoPE, MoE) into `Config` one field at a
+    // time; splitting it up would scatter that flat read-and-assign
+    // sequence across several small functions without simplifying it.
+    #[allow(clippy::too_many_lines)]
     pub fn from_gguf<R: Read + Seek>(
         ct: gguf_file::Content,
         reader: &mut R,
-        device: &Device,
+        devices: impl Into<DeviceAssignment>,
     ) -> Result<Self> {
+        let devices = devices.into();
+        let device = &devices.main;
         let dtype = if device.is_cuda() {
             DType::BF16
         } else if device.is_metal() || device.is_rocm() {
@@ -898,6 +1112,8 @@ impl Qwen3Model {
                 .unwrap_or(1_000_000.0),
         );
 
+        let moe_meta = read_moe_metadata(&gg, &arch);
+
         let use_qk_norm = gg.ct.tensor_infos.contains_key("blk.0.attn_q_norm.weight");
         let tie_word_embeddings = !gg.ct.tensor_infos.contains_key("output.weight");
 
@@ -919,6 +1135,13 @@ impl Qwen3Model {
             max_window_layers: 0,
             use_sliding_window: false,
             eos_token_id: None,
+            num_experts: moe_meta.num_experts,
+            num_experts_per_tok: moe_meta.num_experts_per_tok,
+            moe_intermediate_size: moe_meta.moe_intermediate_size,
+            norm_topk_prob: moe_meta.norm_topk_prob,
+            // Not a standard GGUF metadata key; the GGUF layer-construction
+            // path detects MoE-vs-dense per layer by tensor presence instead.
+            decoder_sparse_step: None,
         };
 
         let embed_tokens = gg.quantized_embedding("token_embd.weight", hidden_size)?;
@@ -930,7 +1153,12 @@ impl Qwen3Model {
 
         let mut layers = Vec::with_capacity(num_hidden_layers);
         for i in 0..num_hidden_layers {
-            layers.push(DecoderLayer::new_from_gguf(&config, &mut gg, i)?);
+            layers.push(DecoderLayer::new_from_gguf(
+                &config,
+                &mut gg,
+                i,
+                &devices.expert,
+            )?);
         }
 
         let norm = gg.rms_norm("output_norm.weight", rms_norm_eps)?;
@@ -948,6 +1176,10 @@ impl Qwen3Model {
             device,
         )?;
 
+        let last_layer_is_moe = layers
+            .last()
+            .is_some_and(|l| matches!(l.mlp, MlpOrMoe::Moe(_)));
+
         Ok(Self {
             embed_tokens,
             layers,
@@ -957,7 +1189,168 @@ impl Qwen3Model {
             config,
             dtype,
             last_hidden_states: None,
+            last_layer_is_moe,
         })
+    }
+
+    /// Runs a probe forward pass to force GPU backends' lazy first-use
+    /// library initialization (rocBLAS/hipRAND/JIT-compiled kernels), then
+    /// live-queries free VRAM and greedily promotes CPU-placed `MoE` expert
+    /// layers to `main_device` up to `vram_ceiling_bytes` (minus
+    /// `runtime_reservation_bytes`). No-op for non-`MoE` checkpoints.
+    ///
+    /// A static pre-load VRAM estimate consistently undershoots real usage:
+    /// rocBLAS/hipRAND/CUDA JIT lazily initialize on first use, so the real
+    /// number is only visible once a forward pass actually runs. This is
+    /// why placement is decided here, after construction, rather than
+    /// while loading.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if a tensor op unrelated to the promotion
+    /// itself fails; an out-of-memory promotion attempt is caught and
+    /// logged instead — remaining layers just stay on CPU.
+    // One sequential pipeline (probe -> cost estimate -> budget -> promote)
+    // sharing local state (`gpu_location`, `layer_costs`) throughout;
+    // splitting it up would scatter that shared context across several
+    // small functions without simplifying the control flow itself.
+    #[allow(clippy::too_many_lines)]
+    pub fn promote_experts_to_gpu(
+        &mut self,
+        main_device: &Device,
+        vram_ceiling_bytes: u64,
+        runtime_reservation_bytes: u64,
+    ) -> Result<()> {
+        let Some(moe_config) = self.config.moe_config() else {
+            return Ok(());
+        };
+        if matches!(main_device, Device::Cpu) {
+            return Ok(());
+        }
+        let gpu_location = main_device.location();
+        log::info!(
+            "Expert placement: running probe forward pass + live VRAM query on {gpu_location:?} \
+             before deciding MoE GPU/CPU split (may take a few seconds)"
+        );
+        let probe_ids = Tensor::new(&[45u32, 546, 456], main_device)?.unsqueeze(0)?;
+        if let Err(e) = self.forward(&probe_ids, 0) {
+            self.clear_kv_cache();
+            log::warn!(
+                "expert-placement probe forward failed on {gpu_location:?} (non-fatal, all \
+                 experts stay on CPU): {e}"
+            );
+            return Ok(());
+        }
+        self.clear_kv_cache();
+
+        let is_moe_layer: Vec<bool> = self
+            .layers
+            .iter()
+            .map(|l| matches!(l.mlp, MlpOrMoe::Moe(_)))
+            .collect();
+        let total_moe_layers = is_moe_layer.iter().filter(|&&m| m).count();
+        // Every MoE layer in a Qwen3 checkpoint has identical expert-tensor
+        // shapes (3 projections per expert: gate, up, down), so this cost
+        // is uniform across MoE layers; non-MoE layers cost 0 so they never
+        // affect the greedy budget below.
+        let per_layer_cost = moe_config.num_experts as u64
+            * moe_config.moe_intermediate_size as u64
+            * self.config.hidden_size as u64
+            * 3
+            * self.dtype.size_in_bytes() as u64;
+        // Layers whose experts already live on `gpu_location` (e.g. a
+        // re-promotion pass after `max_seq_len` shrinks and frees headroom)
+        // cost 0: they're already promoted, so charging them again would
+        // waste budget on a no-op and starve layers still on CPU.
+        let layer_costs: Vec<u64> = self
+            .layers
+            .iter()
+            .map(|l| match &l.mlp {
+                MlpOrMoe::Moe(block) if block.expert_device().location() != gpu_location => {
+                    per_layer_cost
+                },
+                _ => 0,
+            })
+            .collect();
+        log::debug!(
+            "MoE layout: {total_moe_layers} layers, per-layer expert cost estimate={}",
+            format_budget(per_layer_cost),
+        );
+
+        let Some((free, total)) = query_gpu_memory(main_device) else {
+            log::warn!(
+                "No live VRAM query available for {gpu_location:?}; skipping expert promotion \
+                 (all experts stay on CPU)"
+            );
+            return Ok(());
+        };
+        let used = total.saturating_sub(free);
+        let ceiling = vram_ceiling_bytes.min(total);
+        let remaining = ceiling.saturating_sub(used);
+        let available = remaining.saturating_sub(runtime_reservation_bytes);
+        log::info!(
+            "Live VRAM on {gpu_location:?} after probe: free={}, total={}, used={}, \
+             available_for_experts={} (configured limit={})",
+            format_budget(free),
+            format_budget(total),
+            format_budget(used),
+            format_budget(available),
+            format_budget(vram_ceiling_bytes),
+        );
+
+        let promoted: std::collections::HashSet<usize> = greedy_fit_layers(&layer_costs, available)
+            .into_iter()
+            .filter(|&i| is_moe_layer[i])
+            .collect();
+        log::debug!(
+            "Attempting promotion of {} of {total_moe_layers} MoE layers to {gpu_location:?}: {:?}",
+            promoted.len(),
+            {
+                let mut sorted: Vec<usize> = promoted.iter().copied().collect();
+                sorted.sort_unstable();
+                sorted
+            },
+        );
+
+        // The greedy budget above is a heuristic upper bound on what to
+        // *attempt* — allocator fragmentation and per-expert allocation
+        // overhead mean actual usage can still exceed it even though
+        // `promote_experts_to` is itself atomic per layer. A failed
+        // promotion here (e.g. real GPU out-of-memory) must not abort
+        // model load: stop promoting further layers and leave the rest on
+        // CPU — degraded, not fatal.
+        let mut gpu_layers = 0usize;
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            if !promoted.contains(&i) {
+                continue;
+            }
+            let MlpOrMoe::Moe(block) = &mut layer.mlp else {
+                continue;
+            };
+            match block.promote_experts_to(main_device, self.dtype) {
+                Ok(()) => {
+                    gpu_layers += 1;
+                    log::debug!(
+                        "layer {i}: promoted to {gpu_location:?} (cost={})",
+                        format_budget(layer_costs[i]),
+                    );
+                },
+                Err(e) => {
+                    log::warn!(
+                        "expert promotion stopped at layer {i} on {gpu_location:?} (device \
+                         allocation failed, this and remaining layers stay on CPU): {e}"
+                    );
+                    break;
+                },
+            }
+        }
+
+        log::info!(
+            "Expert placement: {gpu_layers}/{total_moe_layers} MoE layers on {gpu_location:?}, \
+             {} on CPU",
+            total_moe_layers - gpu_layers,
+        );
+        Ok(())
     }
 
     // ── Forward ─────────────────────────────────────────────────────────
@@ -1062,29 +1455,69 @@ impl Qwen3Model {
             None
         };
 
+        // Only the last position's hidden state feeds `lm_head` below, but
+        // every position must still pass through every layer's
+        // self-attention (for KV cache correctness). When the last layer is
+        // MoE, its expert dispatch is otherwise wasted on the `seq_len - 1`
+        // positions this method discards anyway: prune to the last position
+        // right after that layer's attention, before its MoE MLP runs.
+        // Skipped for single-token decode (`seq_len == 1`, nothing to prune)
+        // and for a dense last layer (no MoE dispatch cost to save, and
+        // preserves full-sequence `last_hidden_states` for callers like
+        // MiniCPM-o's TTS conditioning).
+        let prune_last = seq_len > 1 && self.last_layer_is_moe;
+
         let mut hidden_states = hidden_states;
-        for layer in &mut self.layers {
-            hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask.as_ref())?;
+        if let Some((last, rest)) = self.layers.split_last_mut() {
+            for layer in rest {
+                hidden_states =
+                    layer.forward(&hidden_states, &cos, &sin, attention_mask.as_ref())?;
+            }
+            if prune_last {
+                hidden_states =
+                    last.forward_attn(&hidden_states, &cos, &sin, attention_mask.as_ref())?;
+                hidden_states = hidden_states.narrow(1, seq_len - 1, 1)?;
+                hidden_states = last.forward_mlp(&hidden_states)?;
+            } else {
+                hidden_states =
+                    last.forward(&hidden_states, &cos, &sin, attention_mask.as_ref())?;
+            }
         }
 
         let hidden_states = self.norm.forward(&hidden_states)?;
         // Cheap to stash: Tensor is Arc-backed, so this is a refcount bump,
-        // not a data copy. Lets callers that need the full-sequence
-        // post-norm hidden states (e.g. MiniCPM-o's TTS conditioning, which
-        // needs every generated position's hidden state, not just the
-        // last) get them via `last_hidden_states()` without changing this
-        // method's return type for every other caller.
+        // not a data copy. Lets callers that need the post-norm hidden
+        // states (e.g. MiniCPM-o's TTS conditioning, which needs every
+        // generated position's hidden state, not just the last) get them
+        // via `last_hidden_states()` without changing this method's return
+        // type for every other caller. Already pruned to the last position
+        // alone when `prune_last` fired above.
         self.last_hidden_states = Some(hidden_states.clone());
-        let logits = self
-            .lm_head
-            .forward_logits(&hidden_states.narrow(1, seq_len - 1, 1)?)?;
+        debug_assert!(
+            prune_last || hidden_states.dim(1).is_ok_and(|s| s == seq_len),
+            "last_hidden_states seq dim mismatch: expected {seq_len}, got {:?}",
+            hidden_states.dim(1),
+        );
+        let logits = if prune_last {
+            self.lm_head.forward_logits(&hidden_states)?
+        } else {
+            self.lm_head
+                .forward_logits(&hidden_states.narrow(1, seq_len - 1, 1)?)?
+        };
         Ok(logits)
     }
 
-    /// Full-sequence post-norm hidden states (`[B, S, H]`, pre-`lm_head`)
-    /// from the most recent [`Self::forward`]/[`Self::forward_embeds`] call.
-    /// See the field doc on why this exists instead of widening every
-    /// caller's return type.
+    /// Post-norm hidden states (pre-`lm_head`) from the most recent
+    /// [`Self::forward`]/[`Self::forward_embeds`] call.
+    ///
+    /// Shape is `[B, S, H]` normally, but `[B, 1, H]` (last position only)
+    /// when the last decoder layer is `MoE` and `seq_len > 1`. The `MoE`
+    /// pruning optimization narrows hidden states before that layer's MLP,
+    /// so only the output-relevant position survives. Callers that need the
+    /// full sequence should check `dim(1)`.
+    ///
+    /// Exists as a side-channel instead of widening every caller's return
+    /// type.
     #[must_use]
     pub fn last_hidden_states(&self) -> Option<&Tensor> {
         self.last_hidden_states.as_ref()
@@ -1468,6 +1901,118 @@ mod tests {
     #[test]
     fn test_kv_bytes_per_token_tiny_config() {
         assert_eq!(tiny_config().kv_bytes_per_token(4), 64);
+    }
+
+    // Dense checkpoints carry no MoE fields, so `moe_config()` must return `None`.
+    #[test]
+    fn test_moe_config_none_for_dense_checkpoint() {
+        assert!(tiny_config().moe_config().is_none());
+    }
+
+    // A checkpoint with all five MoE fields set builds a matching `MoeConfig`.
+    #[test]
+    fn test_moe_config_some_for_full_moe_checkpoint() {
+        let config = Config {
+            num_experts: Some(8),
+            num_experts_per_tok: Some(2),
+            moe_intermediate_size: Some(64),
+            norm_topk_prob: Some(false),
+            decoder_sparse_step: Some(2),
+            ..tiny_config()
+        };
+        let moe_config = config.moe_config().expect("moe_config");
+        assert_eq!(moe_config.num_experts, 8);
+        assert_eq!(moe_config.num_experts_per_tok, 2);
+        assert_eq!(moe_config.moe_intermediate_size, 64);
+        assert!(!moe_config.norm_topk_prob);
+        assert_eq!(moe_config.decoder_sparse_step, Some(2));
+    }
+
+    // A missing required sizing field (here `moe_intermediate_size`) means
+    // `moe_config()` must return `None`, even if other MoE fields are set.
+    #[test]
+    fn test_moe_config_none_when_required_field_missing() {
+        let config = Config {
+            num_experts: Some(8),
+            num_experts_per_tok: Some(2),
+            ..tiny_config()
+        };
+        assert!(config.moe_config().is_none());
+    }
+
+    // An absent `norm_topk_prob` defaults to `true`.
+    #[test]
+    fn test_moe_config_norm_topk_prob_defaults_to_true() {
+        let config = Config {
+            num_experts: Some(8),
+            num_experts_per_tok: Some(2),
+            moe_intermediate_size: Some(64),
+            ..tiny_config()
+        };
+        assert!(config.moe_config().expect("moe_config").norm_topk_prob);
+    }
+
+    fn moe_layer_config(num_hidden_layers: usize, decoder_sparse_step: Option<usize>) -> Config {
+        Config {
+            num_hidden_layers,
+            num_experts: Some(2),
+            num_experts_per_tok: Some(1),
+            moe_intermediate_size: Some(32),
+            decoder_sparse_step,
+            ..tiny_config()
+        }
+    }
+
+    // `decoder_sparse_step: Some(2)` makes every 2nd layer (1-indexed) MoE;
+    // the rest stay dense.
+    #[test]
+    fn test_moe_layer_selection_respects_decoder_sparse_step() {
+        let cfg = moe_layer_config(4, Some(2));
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let model = Qwen3Model::new(&cfg, vb).expect("new");
+
+        let is_moe: Vec<bool> = model
+            .layers
+            .iter()
+            .map(|l| matches!(l.mlp, MlpOrMoe::Moe(_)))
+            .collect();
+        assert_eq!(is_moe, vec![false, true, false, true]);
+    }
+
+    // An absent `decoder_sparse_step` on a MoE checkpoint means every layer
+    // is MoE, matching HF's default of `1`.
+    #[test]
+    fn test_moe_all_layers_when_decoder_sparse_step_none() {
+        let cfg = moe_layer_config(2, None);
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let model = Qwen3Model::new(&cfg, vb).expect("new");
+
+        assert!(
+            model
+                .layers
+                .iter()
+                .all(|l| matches!(l.mlp, MlpOrMoe::Moe(_)))
+        );
+    }
+
+    // On a CPU-only model, `promote_experts_to_gpu` must return `Ok(())`
+    // without panicking (no live VRAM query is possible on CPU, so it
+    // takes the early-return path before running the probe forward pass).
+    #[test]
+    fn test_promote_experts_to_gpu_is_noop_on_cpu() {
+        let cfg = moe_layer_config(2, None);
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let mut model = Qwen3Model::new(&cfg, vb).expect("new");
+
+        model
+            .promote_experts_to_gpu(&device, 1 << 30, 0)
+            .expect("promote_experts_to_gpu");
     }
 
     fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
@@ -1899,5 +2444,108 @@ mod tests {
 
         assert_eq!(out_single.dims(), out_chunked.dims());
         assert!(max_abs_diff(&out_single, &out_chunked) < 1e-4);
+    }
+
+    // MoE last-layer pruning (narrowing hidden states to the last position
+    // between attention and MLP on the final layer when it is MoE) must not
+    // change the model's output. Verify by comparing a multi-token prefill
+    // (which triggers the prune path) against single-token-at-a-time
+    // decoding through the same weights (which never prunes because
+    // `seq_len == 1`).
+    #[test]
+    fn test_moe_last_layer_prune_matches_incremental_decode() {
+        // 2 layers, all MoE (decoder_sparse_step: None), so
+        // `prune_last` fires when seq_len > 1.
+        let cfg = moe_layer_config(2, None);
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let mut model_prefill = Qwen3Model::new(&cfg, vb.clone()).expect("model_prefill");
+        let mut model_incr = Qwen3Model::new(&cfg, vb).expect("model_incr");
+
+        assert!(
+            matches!(
+                model_prefill.layers.last().expect("layers").mlp,
+                MlpOrMoe::Moe(_)
+            ),
+            "last layer should be MoE for this test",
+        );
+
+        // Multi-token prefill: seq_len=3 > 1, triggers prune path.
+        let prefill_ids = Tensor::new(&[[1u32, 2, 3]], &device).expect("prefill_ids");
+        let logits_prefill = model_prefill
+            .forward(&prefill_ids, 0)
+            .expect("prefill forward");
+
+        // Incremental decode: feed tokens one at a time (never prunes).
+        let t1 = Tensor::new(&[[1u32]], &device).expect("t1");
+        let t2 = Tensor::new(&[[2u32]], &device).expect("t2");
+        let t3 = Tensor::new(&[[3u32]], &device).expect("t3");
+        model_incr.forward(&t1, 0).expect("incr t1");
+        model_incr.forward(&t2, 1).expect("incr t2");
+        let logits_incr = model_incr.forward(&t3, 2).expect("incr t3");
+
+        // Both produce logits for the last position given the same
+        // context; they must match.
+        assert_eq!(logits_prefill.dims(), logits_incr.dims());
+        assert!(
+            max_abs_diff(&logits_prefill, &logits_incr) < 1e-4,
+            "MoE pruned prefill diverged from incremental decode",
+        );
+    }
+
+    // When the last layer is dense (not MoE), the pruning optimization
+    // must not fire and `last_hidden_states` must retain the full sequence
+    // dimension.
+    #[test]
+    fn test_dense_last_layer_preserves_full_hidden_states() {
+        // 3 layers, step=2: layers [dense, MoE, dense]. Last is dense,
+        // so prune_last stays false.
+        let cfg = moe_layer_config(3, Some(2));
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let mut model = Qwen3Model::new(&cfg, vb).expect("new");
+
+        assert!(
+            matches!(model.layers.last().expect("layers").mlp, MlpOrMoe::Dense(_)),
+            "last layer should be dense for this test",
+        );
+
+        let ids = Tensor::new(&[[1u32, 2, 3]], &device).expect("ids");
+        model.forward(&ids, 0).expect("forward");
+
+        let hidden = model
+            .last_hidden_states()
+            .expect("last_hidden_states should be Some");
+        assert_eq!(
+            hidden.dims(),
+            &[1, 3, 16],
+            "dense last layer should preserve full sequence in hidden states",
+        );
+    }
+
+    // When pruning fires, `last_hidden_states` should be narrowed to
+    // `[B, 1, H]`.
+    #[test]
+    fn test_moe_last_layer_prune_narrows_hidden_states() {
+        let cfg = moe_layer_config(2, None);
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let mut model = Qwen3Model::new(&cfg, vb).expect("new");
+
+        let ids = Tensor::new(&[[1u32, 2, 3]], &device).expect("ids");
+        model.forward(&ids, 0).expect("forward");
+
+        let hidden = model
+            .last_hidden_states()
+            .expect("last_hidden_states should be Some");
+        assert_eq!(
+            hidden.dims(),
+            &[1, 1, 16],
+            "MoE pruned path should narrow hidden states to last position",
+        );
     }
 }
