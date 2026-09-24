@@ -1,0 +1,11 @@
+target/
+.git/
+*.onnx
+*.bin
+*.pt
+checkpoints/
+outputs/
+output/
+data/images/
+data/audio/
+.env

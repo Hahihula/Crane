@@ -15,3 +15,5 @@ outputs/
 __pycache__/
 output/
 /docs/
+# docker compose settings (COMPOSE_PROFILES, MODEL_DIR, ...), per user
+.env

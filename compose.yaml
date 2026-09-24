@@ -1,0 +1,96 @@
+# crane-serve containers, one service per GPU backend, selected by profile.
+#
+#   COMPOSE_PROFILES=rocm MODEL_DIR=~/models MODEL=Qwen3-4B docker compose up -d
+#
+# Or put the variables in a `.env` file next to this one and just run
+# `docker compose up -d`. With no profile selected, nothing starts.
+#
+# MODEL is a model directory (or single .gguf file) relative to MODEL_DIR.
+# CRANE_PORT overrides the published host port (default 8080).
+#
+# ROCm micro-benchmarks (profile `rocm-bench`, not started by `up` under `rocm`):
+#
+#   docker compose run --rm crane-bench-rocm                      # both, defaults
+#   docker compose run --rm crane-bench-rocm gdn_bench 16 512 128 128 100
+#   docker compose run --rm crane-bench-rocm topk_bench 248320 40 200
+#
+# `<<:` merges keys, not lists or nested maps: a service that sets its own
+# `volumes` or `environment` must repeat the anchor's entries.
+
+# crane-serve settings shared by every backend.
+x-crane-serve: &crane-serve
+  # `[::]` listens on IPv4 and IPv6. The default 0.0.0.0 is IPv4-only, and
+  # rootless podman (pasta) forwards host `localhost` (::1) as IPv6, which
+  # would then be refused inside the container.
+  command: ["--model-path", "/models/${MODEL:?set MODEL to a path under MODEL_DIR}", "--host", "[::]", "--port", "8080"]
+  ports:
+    - "${CRANE_PORT:-8080}:8080"
+  volumes:
+    - ${MODEL_DIR:?set MODEL_DIR to the host model directory}:/models:ro
+  restart: unless-stopped
+
+# AMD ROCm GPU access, Strix Halo (gfx1151). See docker/rocm/Dockerfile.
+# Do NOT set HSA_OVERRIDE_GFX_VERSION: gfx1151 is supported natively.
+x-rocm: &rocm
+  build:
+    context: .
+    dockerfile: docker/rocm/Dockerfile
+  devices:
+    - /dev/dri:/dev/dri
+    - /dev/kfd:/dev/kfd
+  # Host GIDs (render=105, video=39 on this host); names would be resolved
+  # against the container's /etc/group instead. Check with `getent group`.
+  group_add:
+    - "105"
+    - "39"
+  security_opt:
+    - seccomp:unconfined
+    - apparmor:unconfined
+    - label=disable
+
+services:
+  crane-serve-rocm:
+    <<: [*crane-serve, *rocm]
+    profiles: [rocm]
+    build:
+      context: .
+      dockerfile: docker/rocm/Dockerfile
+      target: runtime
+    image: localhost/crane-serve:rocm10
+    environment:
+      HSA_ENABLE_SDMA: "0"
+      # rocBLAS profile logging (dumps a GEMM-shape summary to stderr on
+      # exit). Diagnostic only; drop it for quieter logs.
+      ROCBLAS_LAYER: "4"
+      # Passed through from the shell / .env when set:
+      CRANE_PROF:          # forward-pass submission vs GPU time, to stderr
+      CRANE_TOPK_HOST:     # 1 = host sort instead of the GPU top-k kernel
+      CRANE_GDN_PORTABLE:  # 1 = op-by-op GDN recurrence instead of the fused kernel
+    volumes:
+      - ${MODEL_DIR:?set MODEL_DIR to the host model directory}:/models:ro
+      # hipcc-compiled kernel cache; the first start compiles for minutes.
+      - candle-rocm-cache:/var/cache/candle-rocm
+
+  # gdn_bench [BH S K V iters]: fused GDN recurrence kernel in isolation
+  #   (defaults 16 512 128 128 100, Qwen3.5-0.8B single-sequence prefill).
+  # topk_bench [N K iters]: GPU top-k kernel vs host sort
+  #   (defaults 248320 40 200, Qwen3.5 vocab sampling).
+  crane-bench-rocm:
+    <<: *rocm
+    profiles: [rocm-bench]
+    build:
+      context: .
+      dockerfile: docker/rocm/Dockerfile
+      target: bench
+    image: localhost/crane-bench:rocm10
+    environment:
+      HSA_ENABLE_SDMA: "0"
+      # 1 makes topk_bench's "gpu" arm fall back to the host sort (A/B check).
+      # gdn_bench calls the fused kernel directly, so CRANE_GDN_PORTABLE and
+      # CRANE_PROF only affect crane-serve.
+      CRANE_TOPK_HOST:
+    volumes:
+      - candle-rocm-cache:/var/cache/candle-rocm
+
+volumes:
+  candle-rocm-cache:
