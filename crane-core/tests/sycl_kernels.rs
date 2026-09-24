@@ -1,6 +1,6 @@
 //! SYCL kernel correctness checks against the portable references.
 //!
-//! Needs an Intel GPU + oneAPI. Run inside the `contrib/sycl` container:
+//! Needs an Intel GPU + oneAPI. Run inside the `docker/sycl` dev container:
 //!   cargo test -p crane-core --release --features sycl --test sycl_kernels
 #![cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
 use crane_core::{candle_core, candle_nn};

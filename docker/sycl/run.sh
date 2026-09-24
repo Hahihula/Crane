@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Build and run Crane on the Intel SYCL backend inside the oneAPI container.
+# Build and run Crane on the Intel SYCL backend inside the oneAPI dev
+# container (docker/sycl/Dockerfile.dev).
 #
-#   contrib/sycl/run.sh build
-#   contrib/sycl/run.sh chat  -m /models/<dir>
-#   contrib/sycl/run.sh test          # cargo test --test sycl_kernels
-#   contrib/sycl/run.sh <any bash command run inside the container>
+#   docker/sycl/run.sh build
+#   docker/sycl/run.sh chat  -m /models/<dir>
+#   docker/sycl/run.sh test          # cargo test --test sycl_kernels
+#   docker/sycl/run.sh <any bash command run inside the container>
 #
 # Env overrides:
 #   CRANE_SYCL_MODELS  host dir of models, mounted read-only at /models
@@ -23,13 +24,13 @@ CANDLE="${CRANE_CANDLE:-}"
 mkdir -p "$TARGET"
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || \
-  docker build -t "$IMAGE" -f "$REPO/contrib/sycl/Dockerfile" "$REPO/contrib/sycl"
+  docker build -t "$IMAGE" -f "$REPO/docker/sycl/Dockerfile.dev" "$REPO/docker/sycl"
 
 BUILD='cargo build --release -p crane-examples --bin chat_cli --features sycl'
-# Prepend both build.rs OUT_DIRs (libcandle_sycl.so / libcrane_gdn_sycl.so —
-# their rpath does not reach the final binary) to the image's baked oneAPI
-# LD_LIBRARY_PATH. Do NOT clobber it: it carries mkl / umf / pti / level-zero
-# adapter dirs that both the split libmkl_sycl_* deps and GPU discovery need.
+# crane_core::utils::sycl_env::ensure_sycl_runtime_env() puts the oneAPI
+# runtime on LD_LIBRARY_PATH itself (re-exec'ing once), so RUN_PRE only needs
+# to cover the out-of-tree kernel libraries (libcandle_sycl.so /
+# libcrane_gdn_sycl.so — their rpath does not reach the final binary).
 RUN_PRE='export LD_LIBRARY_PATH="$(find /target -name "libcandle_sycl.so" -o -name "libcrane_gdn_sycl.so" | xargs -rn1 dirname | sort -u | paste -sd:):${LD_LIBRARY_PATH}"'
 case "${1:-build}" in
   build) CMD="$BUILD" ;;

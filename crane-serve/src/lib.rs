@@ -224,6 +224,8 @@ fn format_device_name(device: &candle_core::Device) -> String {
         candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
         #[cfg(feature = "rocm")]
         candle_core::DeviceLocation::Rocm { gpu_id } => format!("rocm:{gpu_id}"),
+        #[cfg(feature = "sycl")]
+        candle_core::DeviceLocation::Sycl { gpu_id } => format!("sycl:{gpu_id}"),
     }
 }
 

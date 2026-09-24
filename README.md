@@ -423,7 +423,7 @@ cargo run  --release --features sycl -p crane-examples --bin chat_cli -- \
 ```
 
 Setup details, a containerised build/run/test recipe and the driver gotchas
-(Level-Zero V2, Resizable BAR) are in [`contrib/sycl/`](contrib/sycl/).
+(Level-Zero V2, Resizable BAR) are in [`docker/sycl/`](docker/sycl/).
 
 Verified on an Intel Arc iGPU (Meteor Lake) and a discrete Arc Pro B70
 (Battlemage): `Qwen3-0.6B`, `Qwen3.5-0.8B` and `Qwen3.8-27B` (GGUF Q4_K_M, ~11.5

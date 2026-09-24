@@ -52,31 +52,61 @@ cargo build --release --features sycl
 ```
 
 The binaries bake an rpath to the kernel libraries and re-exec once with the
-oneAPI runtime on `LD_LIBRARY_PATH` (`crane_core::utils::sycl_env`), so they run
-straight from `target/release/` with nothing sourced. `contrib/sycl/env.sh` is
-the escape hatch if that ever fails, and for example binaries that do not call
-it.
+oneAPI runtime on `LD_LIBRARY_PATH` and the Level-Zero V2 adapter workaround
+applied (`crane_core::utils::sycl_env::ensure_sycl_runtime_env`), so they run
+straight from `target/release/` with nothing sourced — see "Driver notes"
+below for what that workaround is and why it's needed.
 
-## One-shot container recipe
+## Docker
+
+Two images, for two different jobs. Both are verified end to end (build,
+`sycl-ls` enumerates the GPU, `crane-serve`/`chat_cli` select it and run) on
+a discrete Arc Pro B70 — see "Status" below.
+
+- **`Dockerfile.dev`** — a dev/build container. Nothing is baked in; mount the
+  repo and build/run/test inside on each invocation via `run.sh`, so the
+  compiled binary stays in sync with the mounted source.
+- **`Dockerfile`** — a deployable image with `crane-serve` baked in, built
+  multi-stage (oneAPI basekit `builder` → a slim `runtime` stage carrying only
+  the SYCL/oneMKL/TBB runtime libraries and the Level-Zero GPU driver stack —
+  2.9 GB vs. `Dockerfile.dev`'s 14 GB), mirroring `docker/rocm/Dockerfile`.
+
+Both replace the oneAPI basekit's/Ubuntu's own bundled Level-Zero GPU driver
+with a newer, version-matched set from GitHub releases — required for
+Battlemage (Arc B-series, including the B70); see "Driver notes" below.
 
 ```bash
-docker build -t crane-sycl:dev -f contrib/sycl/Dockerfile contrib/sycl
+docker build -t crane-sycl:dev -f docker/sycl/Dockerfile.dev docker/sycl
 
-contrib/sycl/run.sh build              # compile
-contrib/sycl/run.sh test               # cargo test --test sycl_kernels
+docker/sycl/run.sh build              # compile
+docker/sycl/run.sh test               # cargo test --test sycl_kernels
 CRANE_SYCL_MODELS=/path/to/models \
-  contrib/sycl/run.sh chat -m /models/Qwen3.5-0.8B --max-new-tokens 200
+  docker/sycl/run.sh chat -m /models/Qwen3.5-0.8B --max-new-tokens 200
 ```
 
 `run.sh <cmd>` runs an arbitrary command in the container. It mounts the repo,
 `~/.cargo/{registry,git}` and a persistent `../crane-sycl-docker-target/` (kept
 outside the repo — the container writes it as root).
 
+```bash
+docker build -f docker/sycl/Dockerfile -t localhost/crane-serve:sycl .
+docker run --rm --device /dev/dri:/dev/dri -p 8080:8080 \
+  -v /path/to/models:/models:ro \
+  localhost/crane-serve:sycl --model-path /models/Qwen3.5-0.8B
+```
+
 ## Status
 
 Verified on an Intel Arc iGPU (Meteor Lake) and a discrete Arc Pro B70
-(Battlemage, `xe` driver, compute-runtime 26.31 / IGC 2.40, oneAPI 2026.1).
-Decode figures are `CRANE_PROF=1` per-token wall time; the `avg tok/s` the CLI
+(Battlemage, `xe` driver, compute-runtime 26.31 / IGC 2.40, oneAPI 2026.1) on
+bare metal, and separately in both `docker/sycl/Dockerfile.dev` and
+`docker/sycl/Dockerfile` under rootless podman on the B70 (`sycl-ls` lists
+`Intel(R) Arc(TM) Pro B70 Graphics` under `level_zero:gpu`; `crane-serve`
+starts and `chat_cli` selects the device and gets past model loading).
+Rootless-container GPU passthrough needs `--group-add keep-groups` (or the
+exact host gid, e.g. `--group-add $(getent group render | cut -d: -f3)`) —
+`--device /dev/dri` alone is not sufficient. Decode figures below are from the
+bare-metal run: `CRANE_PROF=1` per-token wall time; the `avg tok/s` the CLI
 prints includes prefill and reads lower on short runs.
 
 | Model | Arch / format | Meteor Lake | B70 |
@@ -107,14 +137,34 @@ faster at decode than the op-by-op path.
 - Prefill beyond the mat-vec threshold dequantizes whole weights; an MMQ-style
   quantized GEMM is what that needs.
 - Multi-GPU, `crane-serve` continuous batching, and vision towers untried.
+- The pinned driver versions in `docker/sycl/Dockerfile`/`Dockerfile.dev`
+  (`COMPUTE_RUNTIME_VERSION`, `IGC_VERSION`, `LEVEL_ZERO_VERSION` build args)
+  need bumping — and re-verifying on real hardware — as newer GPU generations
+  ship; see "Driver notes" below for why they're pinned at all.
 
 ## Driver notes (not code)
 
+- **Battlemage (Arc B-series, including the B70) needs compute-runtime
+  25.27+.** Both the oneAPI basekit image's bundled driver and Intel's own
+  apt repo (`repositories.intel.com/gpu/ubuntu noble/unified`, checked at the
+  time this was written) are older than that, so on Battlemage they enumerate
+  zero GPU devices — no error, `sycl-ls`/`zeInit` just silently report none.
+  Both `docker/sycl/Dockerfile` and `Dockerfile.dev` replace the driver with a
+  version-matched set (`libze1`, `intel-igc-core-2`/`intel-igc-opencl-2`,
+  `libigdgmm12`, `libze-intel-gpu1`, `intel-opencl-icd`) pulled from GitHub
+  releases instead. The loader and driver share an ABI, so a newer driver
+  paired with an older `libze1` (e.g. Ubuntu 24.04's stock 1.16.1) segfaults
+  during enumeration rather than working or failing cleanly — bump the four
+  version build args together, never independently.
 - **oneAPI 2026.x defaults to the Level-Zero V2 adapter**, which fails on the
   first kernel submission from an in-order USM queue on Battlemage with
   `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` (44). It reproduces with a bare 10-line
-  SYCL program, so it is an adapter/driver limitation. Force the legacy
-  adapter: `export UR_LOADER_USE_LEVEL_ZERO_V2=0` (`env.sh` does this).
+  SYCL program, so it is an adapter/driver limitation.
+  `crane_core::utils::sycl_env::ensure_sycl_runtime_env` sets
+  `UR_LOADER_USE_LEVEL_ZERO_V2=0` automatically (forcing the legacy adapter)
+  before anything touches SYCL, so this needs no manual step; set it yourself
+  before launching if you're driving the SYCL runtime some other way (e.g. a
+  bare `sycl-ls`).
 - **Resizable BAR must be on.** Without it the compute runtime does not
   enumerate the GPU at all — `sycl-ls` shows only the CPU device and warns
   `Resizable BAR not detected`. Check with `lspci -v -s <bus> | grep "Memory at"`
