@@ -475,7 +475,7 @@ impl Qwen3_5TextModel {
         start_pos: usize,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        use crate::ops::prof::{Span, timed};
+        use crate::utils::prof::{Span, timed};
 
         let seq_len = input_ids.dim(1)?;
         let xs = timed(Span::Embed, || self.embed_tokens.forward(input_ids))?;
@@ -586,7 +586,7 @@ impl Qwen3_5TextModel {
     /// running the head over the whole prompt would put the quadratic memory
     /// term straight back after chunking removed it from attention.
     pub(super) fn head(&self, hidden: &Tensor) -> Result<Tensor> {
-        crate::ops::prof::timed(crate::ops::prof::Span::Head, || {
+        crate::utils::prof::timed(crate::utils::prof::Span::Head, || {
             let (b, _s, _h) = hidden.dims3()?;
             let xs = self.norm.forward(hidden)?.reshape((b, ()))?;
             Ok(self.lm_head.forward_logits(&xs)?)
