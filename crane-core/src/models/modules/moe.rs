@@ -151,12 +151,15 @@ impl SparseMoeBlock {
         // mismatch on the first router matmul.
         let gate_weight = gate.weight().to_dtype(DType::F32)?;
         let gate = Linear::new(gate_weight, None);
+        // Redirect the builder before loading experts so their weights land
+        // on `expert_device` rather than `vb`'s (main) device.
+        let expert_vb = vb.set_device(expert_device.clone());
         let experts = (0..config.num_experts)
             .map(|i| {
                 MoeExpert::new(
                     hidden_size,
                     config.moe_intermediate_size,
-                    vb.pp(format!("experts.{i}")),
+                    expert_vb.pp(format!("experts.{i}")),
                 )
             })
             .collect::<Result<Vec<_>>>()?;

@@ -12,6 +12,7 @@
 //! | Batch decode      | No       | Sequences decoded sequentially per step        |
 
 use anyhow::Result;
+use crane_core::device::DeviceAssignment;
 use crane_core::{DType, Device, Tensor, bail};
 
 /// Per-layer KV cache for one sequence: `(K, V)` per layer, or `None` for
@@ -625,8 +626,10 @@ impl Qwen3Backend {
     /// # Errors
     ///
     /// Returns an error if the model fails to load from `model_path`.
-    pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
-        let model = crane_core::models::qwen3::Model::new(model_path, device, dtype)?;
+    pub fn new(model_path: &str, devices: &DeviceAssignment, dtype: &DType) -> Result<Self> {
+        let model = crane_core::models::qwen3::Model::loader(model_path, &devices.main, dtype)
+            .expert_device(&devices.expert)
+            .build()?;
         Ok(Self {
             model,
             dtype: *dtype,

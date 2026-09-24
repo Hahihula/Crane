@@ -16,6 +16,7 @@ use ribo::utils::log;
 use tokenizers::Tokenizer;
 
 use super::modeling::{BatchKvCache, Config, Qwen3Model};
+use crate::device::DeviceAssignment;
 use crate::generation::GenerationConfig;
 use crate::generation::based::ModelForCausalLM;
 use crate::utils::token_output_stream::TokenOutputStream;
@@ -40,6 +41,53 @@ pub struct Model {
     inner: Qwen3Model,
 }
 
+/// Builder for loading a Qwen3 checkpoint with `MoE` expert weights placed
+/// on a device other than the model's main device (e.g. CPU offload).
+/// Callers that don't need that should use [`Model::new`]/
+/// [`Model::new_with_format`] instead.
+pub struct ModelLoader<'a> {
+    /// Directory or file containing the checkpoint to load.
+    model_path: &'a str,
+    /// Device for model weights and inference (everything but `MoE` experts).
+    device: &'a Device,
+    /// Weight dtype for safetensors checkpoints; ignored for GGUF, which
+    /// derives dtype from the quantized weights themselves.
+    dtype: &'a DType,
+    /// Weight format on disk; defaults to `ModelFormat::Auto`.
+    format: ModelFormat,
+    /// Device for `MoE` expert weights, if set via [`Self::expert_device`].
+    /// Falls back to `device` when `None`.
+    expert_device: Option<&'a Device>,
+}
+
+impl<'a> ModelLoader<'a> {
+    /// Place `MoE` expert weights on `device` instead of the model's main
+    /// device. Ignored by dense (non-`MoE`) checkpoints.
+    #[must_use]
+    pub fn expert_device(mut self, device: &'a Device) -> Self {
+        self.expert_device = Some(device);
+        self
+    }
+
+    /// Override auto-detected weight format.
+    #[must_use]
+    pub fn format(mut self, format: ModelFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the model files cannot be found or loaded.
+    pub fn build(self) -> Result<Model> {
+        let devices = DeviceAssignment {
+            main: self.device.clone(),
+            expert: self.expert_device.unwrap_or(self.device).clone(),
+        };
+        Model::load(self.model_path, &devices, self.dtype, self.format)
+    }
+}
+
 impl Model {
     /// # Errors
     ///
@@ -57,6 +105,40 @@ impl Model {
         dtype: &DType,
         format: ModelFormat,
     ) -> Result<Self> {
+        Self::load(
+            model_path,
+            &DeviceAssignment::uniform(device),
+            dtype,
+            format,
+        )
+    }
+
+    /// Load with `MoE` expert weights optionally placed on a different
+    /// device than the rest of the model. See [`ModelLoader`].
+    #[must_use]
+    pub fn loader<'a>(
+        model_path: &'a str,
+        device: &'a Device,
+        dtype: &'a DType,
+    ) -> ModelLoader<'a> {
+        ModelLoader {
+            model_path,
+            device,
+            dtype,
+            format: ModelFormat::Auto,
+            expert_device: None,
+        }
+    }
+
+    /// `devices.main` holds every weight but `MoE` experts; `devices.expert`
+    /// holds `MoE` expert weights, if the checkpoint is `MoE`. Applies to
+    /// both GGUF and safetensors checkpoints.
+    fn load(
+        model_path: &str,
+        devices: &DeviceAssignment,
+        dtype: &DType,
+        format: ModelFormat,
+    ) -> Result<Self> {
         let format = match format {
             ModelFormat::Auto => {
                 let p = std::path::Path::new(model_path);
@@ -70,8 +152,8 @@ impl Model {
         };
 
         match format {
-            ModelFormat::Gguf | ModelFormat::Auto => Self::from_gguf(model_path, device),
-            ModelFormat::Safetensors => Self::from_pretrained(model_path, device, *dtype),
+            ModelFormat::Gguf | ModelFormat::Auto => Self::from_gguf(model_path, devices),
+            ModelFormat::Safetensors => Self::from_pretrained(model_path, devices, *dtype),
         }
     }
 
@@ -91,7 +173,11 @@ impl Model {
             .kv_bytes_per_token(self.dtype.size_in_bytes())
     }
 
-    fn from_pretrained(model_path: &str, device: &Device, dtype: DType) -> Result<Model> {
+    fn from_pretrained(
+        model_path: &str,
+        devices: &DeviceAssignment,
+        dtype: DType,
+    ) -> Result<Model> {
         let tokenizer_path = std::path::Path::new(model_path).join("tokenizer.json");
         if !tokenizer_path.exists() {
             anyhow::bail!("Tokenizer not found at {}", tokenizer_path.display());
@@ -99,24 +185,24 @@ impl Model {
         let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(E::msg)?;
 
         let filenames = utils::get_safetensors_files(model_path)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, device) }?;
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &devices.main) }?;
 
         let config_file = std::path::Path::new(model_path).join("config.json");
         let config_data = std::fs::read(config_file)?;
         let config: Config = serde_json::from_slice(&config_data)?;
 
-        let inner = Qwen3Model::new(&config, vb)?;
+        let inner = Qwen3Model::new_with_expert_device(&config, vb, &devices.expert)?;
 
         Ok(Self {
             tokenizer: TokenOutputStream::new(tokenizer),
-            device: device.clone(),
+            device: devices.main.clone(),
             dtype,
             inner,
         })
     }
 
     /// Load a GGUF quantized model file.
-    fn from_gguf(model_path: &str, device: &Device) -> Result<Model> {
+    fn from_gguf(model_path: &str, devices: &DeviceAssignment) -> Result<Model> {
         let gguf_path = std::path::Path::new(model_path);
 
         let mmap = crate::quantized::gguf_file::mmap_gguf_file(gguf_path)?;
@@ -131,12 +217,12 @@ impl Model {
 
         let tokenizer = tokenizer_utils::resolve_gguf_tokenizer(&ct, gguf_path)?;
 
-        let inner = Qwen3Model::from_gguf(ct, &mut cursor, device)?;
+        let inner = Qwen3Model::from_gguf(ct, &mut cursor, devices)?;
         let dtype = inner.model_dtype();
 
         Ok(Self {
             tokenizer: TokenOutputStream::new(tokenizer),
-            device: device.clone(),
+            device: devices.main.clone(),
             dtype,
             inner,
         })

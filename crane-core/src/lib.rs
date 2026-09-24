@@ -16,6 +16,7 @@
 //! | [`bins`] | Model loading helpers used by CLI entry-points |
 //! | [`quantized`] | Shared GGUF file loading (mmap, typed tensor access) |
 //! | [`utils`] | Misc tensor / device utilities |
+//! | [`device`] | `DeviceAssignment`, bundling a model's main and MoE-expert devices |
 //!
 //! ## Feature flags
 //!
@@ -28,6 +29,7 @@
 
 include!("candle_backend.rs");
 
+pub mod device;
 pub mod generation;
 pub mod models;
 pub mod ops;

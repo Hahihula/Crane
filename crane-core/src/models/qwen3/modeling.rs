@@ -44,6 +44,7 @@ use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
+use crate::device::DeviceAssignment;
 use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::flash_attn::dispatch_flash_attn;
 use crate::models::modules::kv_cache;
@@ -702,7 +703,12 @@ struct DecoderLayer {
 impl DecoderLayer {
     // See `Attention::new`'s comment on `VarBuilder` by-value.
     #[allow(clippy::needless_pass_by_value)]
-    fn new(config: &Config, layer_idx: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        config: &Config,
+        layer_idx: usize,
+        vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
         let self_attn = Attention::new(config, vb.pp("self_attn"))?;
         let moe_config = config.moe_config();
         // HF's `mlp_only_layers` override (per-layer dense exceptions) isn't
@@ -716,7 +722,7 @@ impl DecoderLayer {
                 &mc,
                 config.hidden_size,
                 vb.pp("mlp"),
-                vb.device(),
+                expert_device,
             )?),
             _ => MlpOrMoe::Dense(Mlp::new(config, vb.pp("mlp"))?),
         };
@@ -862,14 +868,32 @@ fn read_moe_metadata<R: Read + Seek>(gg: &Gguf<R>, arch: &str) -> GgufMoeMetadat
 }
 
 impl Qwen3Model {
-    /// Construct from safetensors / `HuggingFace` checkpoint.
+    /// Construct from safetensors / `HuggingFace` checkpoint. Expert weights
+    /// (if `MoE`) go on the same device as the rest of the model; use
+    /// [`Self::new_with_expert_device`] to place them elsewhere.
     ///
     /// # Errors
     ///
     /// Returns an error if a required weight tensor is missing or has an
     /// unexpected shape.
     pub fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
-        Self::new_inner(config, vb.pp("model"), vb)
+        let device = vb.device().clone();
+        Self::new_inner(config, vb.pp("model"), vb, &device)
+    }
+
+    /// Like [`Self::new`], but places `MoE` expert weights on `expert_device`
+    /// rather than the model's main device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight tensor is missing or has an
+    /// unexpected shape.
+    pub fn new_with_expert_device(
+        config: &Config,
+        vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
+        Self::new_inner(config, vb.pp("model"), vb, expert_device)
     }
 
     /// Construct from a checkpoint where the decoder is nested under a
@@ -877,6 +901,9 @@ impl Qwen3Model {
     /// `model.language_model.*`). `model_vb` must already be scoped to the
     /// decoder's root (what would otherwise be `vb.pp("model")`); `root_vb`
     /// is the checkpoint root, used to resolve an untied `lm_head` sibling.
+    /// Expert weights (if `MoE`) go on the same device as `model_vb`; use
+    /// [`Self::new_from_model_vb_with_expert_device`] to place them
+    /// elsewhere.
     ///
     /// # Errors
     ///
@@ -887,12 +914,34 @@ impl Qwen3Model {
         model_vb: VarBuilder,
         root_vb: VarBuilder,
     ) -> Result<Self> {
-        Self::new_inner(config, model_vb, root_vb)
+        let device = model_vb.device().clone();
+        Self::new_inner(config, model_vb, root_vb, &device)
+    }
+
+    /// Like [`Self::new_from_model_vb`], but places `MoE` expert weights on
+    /// `expert_device` rather than `model_vb`'s device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight tensor is missing or has an
+    /// unexpected shape.
+    pub fn new_from_model_vb_with_expert_device(
+        config: &Config,
+        model_vb: VarBuilder,
+        root_vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
+        Self::new_inner(config, model_vb, root_vb, expert_device)
     }
 
     // See `Attention::new`'s comment on `VarBuilder` by-value.
     #[allow(clippy::needless_pass_by_value)]
-    fn new_inner(config: &Config, model_vb: VarBuilder, root_vb: VarBuilder) -> Result<Self> {
+    fn new_inner(
+        config: &Config,
+        model_vb: VarBuilder,
+        root_vb: VarBuilder,
+        expert_device: &Device,
+    ) -> Result<Self> {
         let dtype = model_vb.dtype();
         let embed_tokens = EmbeddingLayer::Dense(candle_nn::embedding(
             config.vocab_size,
@@ -903,7 +952,12 @@ impl Qwen3Model {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let layers_vb = model_vb.pp("layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(config, i, layers_vb.pp(i))?);
+            layers.push(DecoderLayer::new(
+                config,
+                i,
+                layers_vb.pp(i),
+                expert_device,
+            )?);
         }
 
         let norm =
@@ -953,6 +1007,9 @@ impl Qwen3Model {
 
     /// Construct from a GGUF file.
     ///
+    /// `devices.main` holds every weight but `MoE` experts; `devices.expert`
+    /// holds `MoE` expert weights, if the checkpoint is `MoE`.
+    ///
     /// # Errors
     ///
     /// Returns an error if a required tensor or metadata entry is missing
@@ -965,8 +1022,10 @@ impl Qwen3Model {
     pub fn from_gguf<R: Read + Seek>(
         ct: gguf_file::Content,
         reader: &mut R,
-        device: &Device,
+        devices: impl Into<DeviceAssignment>,
     ) -> Result<Self> {
+        let devices = devices.into();
+        let device = &devices.main;
         let dtype = if device.is_cuda() {
             DType::BF16
         } else if device.is_metal() || device.is_rocm() {
@@ -1057,7 +1116,12 @@ impl Qwen3Model {
 
         let mut layers = Vec::with_capacity(num_hidden_layers);
         for i in 0..num_hidden_layers {
-            layers.push(DecoderLayer::new_from_gguf(&config, &mut gg, i, device)?);
+            layers.push(DecoderLayer::new_from_gguf(
+                &config,
+                &mut gg,
+                i,
+                &devices.expert,
+            )?);
         }
 
         let norm = gg.rms_norm("output_norm.weight", rms_norm_eps)?;
