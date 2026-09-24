@@ -73,6 +73,33 @@ requires the Safetensors format.
 crane-serve runs on a single CUDA device (device 0). Multi-GPU tensor
 parallelism is not yet supported.
 
+## AMD ROCm in Docker (Strix Halo / gfx1151)
+
+`docker/rocm/Dockerfile` builds `crane-serve --features rocm` against AMD's
+ROCm 10 packages and ships it on `fedora-minimal:44`. The root `compose.yaml`
+runs it as service `crane-serve-rocm` under the `rocm` profile, with the GPU
+devices mapped:
+
+```bash
+COMPOSE_PROFILES=rocm MODEL_DIR=/path/to/models MODEL=Qwen3-4B \
+    docker compose up --build
+```
+
+- The ROCm backend compiles its HIP kernels with `hipcc` on first use, so the
+  runtime image includes the ROCm LLVM toolchain (~2.9 GB). Code objects are
+  cached in `CANDLE_ROCM_CACHE_DIR` (`/var/cache/candle-rocm`); the compose
+  file keeps it in a named volume so restarts skip recompilation.
+- The container needs `/dev/kfd` and `/dev/dri`, plus the host's `render` and
+  `video` GIDs (`getent group render video`); set them in `group_add`.
+- Do not set `HSA_OVERRIDE_GFX_VERSION`; gfx1151 is supported natively.
+- Build without `-Z build-std=core`: it collides with the prebuilt `std`
+  (E0152). The builder sets `RUSTC_BOOTSTRAP=1` and installs `rust-src` for
+  the nested amdgcn kernel build that `rocm-rs` runs itself.
+- Kernel micro-benchmarks: the Dockerfile's optional `bench` target ships
+  `gdn_bench [BH S K V iters]` and `topk_bench [N K iters]`; run them with
+  `docker compose run --rm crane-bench-rocm [gdn_bench|topk_bench ARGS]`
+  (profile `rocm-bench`). With no arguments it runs both at their defaults.
+
 ## Environment variables
 
 These tune GPU-side sampling. They rarely need changing.
