@@ -268,7 +268,7 @@ fn fused_recurrence(
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
-    use crate::ops::prof::{Span, timed};
+    use crate::utils::prof::{Span, timed};
 
     let (hv, kd, vd) = (dims.num_v_heads, dims.head_k_dim, dims.head_v_dim);
     let bh = batch_size * hv;

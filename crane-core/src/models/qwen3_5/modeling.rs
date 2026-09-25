@@ -848,7 +848,7 @@ impl DecoderLayer {
         gdn_cache: Option<&mut GdnLayerCache>,
         attn_cache: Option<&mut KvCache>,
     ) -> Result<Tensor> {
-        use crate::ops::prof::{Span, timed};
+        use crate::utils::prof::{Span, timed};
 
         let residual = x;
         let normed = timed(Span::BlockNorm, || self.input_layernorm.forward(x))?;

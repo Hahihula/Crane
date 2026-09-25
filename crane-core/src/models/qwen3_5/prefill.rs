@@ -38,7 +38,7 @@ pub fn chunk_size() -> usize {
 ///
 /// Under `CRANE_PROF=1` this is the profiling boundary: it is the outermost
 /// call that covers the whole model forward and nothing else, so the device
-/// sync [`crate::ops::prof::PassTimer::finish`] takes here measures exactly
+/// sync [`crate::utils::prof::PassTimer::finish`] takes here measures exactly
 /// this pass's GPU work.
 pub(super) fn forward(
     model: &mut Qwen3_5TextModel,
@@ -46,7 +46,7 @@ pub(super) fn forward(
     start_pos: usize,
     attention_mask: Option<&Tensor>,
 ) -> Result<Tensor> {
-    let timer = crate::ops::prof::pass(input_ids.dim(1)?);
+    let timer = crate::utils::prof::pass(input_ids.dim(1)?);
     let out = forward_inner(model, input_ids, start_pos, attention_mask);
     if let Some(timer) = timer {
         timer.finish(model.device());
