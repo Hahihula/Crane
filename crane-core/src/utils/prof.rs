@@ -25,6 +25,26 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use candle_core::Device;
+use ribo::utils::log::tracing;
+
+/// Emit a line through `tracing` if the current subscriber would actually
+/// surface it at `INFO` for this module, otherwise `eprintln!` it directly.
+///
+/// `CRANE_PROF` alone must be enough to see output, without also needing
+/// `RUST_LOG` set correctly. That is the trap `CRANE_SAMPLE_TRACE` already
+/// fell into. `INFO`, not `TRACE`, because `crane-serve` already
+/// defaults `RUST_LOG` to `info`, so this is visible with no extra
+/// configuration in the common case. The `eprintln!` fallback still covers
+/// the rest (no subscriber installed, or `RUST_LOG` lowered below `info`).
+macro_rules! prof_log {
+    ($($arg:tt)*) => {
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!($($arg)*);
+        } else {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// One measured region of the forward pass.
 ///
@@ -177,7 +197,7 @@ impl PassTimer {
         // A sync failure here is a profiling artifact, not a model error, and
         // the caller has no useful response to it — the pass itself succeeded.
         if let Err(e) = device.synchronize() {
-            eprintln!("[crane-prof] device sync failed, dropping sample: {e}");
+            prof_log!("[crane-prof] device sync failed, dropping sample: {e}");
             return;
         }
         let wall = self.start.elapsed();
@@ -226,30 +246,28 @@ fn report(kind: usize, t: &Totals) {
     #[allow(clippy::cast_precision_loss)]
     let sum = |range: std::ops::Range<usize>| range.map(|i| per(t.spans[i])).sum::<f64>();
 
-    // `eprintln!`, not a log macro: crane-core has no logging facade, and an
-    // explicitly opted-in diagnostic that silently needs a second variable
-    // (`RUST_LOG`) to appear is the trap `CRANE_SAMPLE_TRACE` already fell into.
-    eprintln!(
+    prof_log!(
         "[crane-prof] {label} n={} tokens={} | enqueue {enqueue:.2} ms  wall {wall:.2} ms  \
          enqueue/wall {ratio:.0}%",
-        t.passes, t.tokens,
+        t.passes,
+        t.tokens,
     );
-    eprintln!(
+    prof_log!(
         "[crane-prof]   pass:  {} | sum {:.2} ms",
         line(TIER1),
         sum(TIER1)
     );
-    eprintln!(
+    prof_log!(
         "[crane-prof]   gdn:   {} | sum {:.2} ms",
         line(TIER2),
         sum(TIER2)
     );
-    eprintln!(
+    prof_log!(
         "[crane-prof]   recur: {} | sum {:.2} ms",
         line(TIER3),
         sum(TIER3)
     );
-    eprintln!(
+    prof_log!(
         "[crane-prof]   moe:   {} | sum {:.2} ms",
         line(TIER2_MOE),
         sum(TIER2_MOE)

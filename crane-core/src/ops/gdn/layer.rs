@@ -120,7 +120,7 @@ impl GatedDeltaNet {
     ///
     /// `x: [B, S, hidden_size]`. Returns `[B, S, hidden_size]`.
     pub fn forward(&self, x: &Tensor, dims: &GdnDims, cache: &mut GdnLayerCache) -> Result<Tensor> {
-        use crate::ops::prof::{Span, timed};
+        use crate::utils::prof::{Span, timed};
 
         let (batch_size, seq_len, _) = x.dims3()?;
         let dtype = x.dtype();
