@@ -719,6 +719,7 @@ pub fn create_tts(
     model_path: &str,
     device: &Device,
     dtype: &DType,
+    voice_dir: Option<&std::path::Path>,
 ) -> Result<Box<dyn crane::audio::Tts + Send>> {
     tracing::info!(
         "Creating {} model from: {}",
@@ -740,7 +741,13 @@ pub fn create_tts(
         ModelType::Kokoro => anyhow::bail!("Kokoro TTS requires the 'onnx' feature"),
         ModelType::VoxCpm2 => {
             let model = crane_core::models::voxcpm2::VoxCpm2Model::new(model_path, device, dtype)?;
-            Ok(Box::new(model))
+            let tts = crane::audio::VoxCpm2Tts::new(
+                model,
+                std::path::Path::new(model_path),
+                voice_dir,
+                device,
+            )?;
+            Ok(Box::new(tts))
         },
         other => anyhow::bail!("{other:?} is not a TTS model type"),
     }

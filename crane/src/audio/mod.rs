@@ -17,9 +17,11 @@ pub use asr::{Asr, AsrStream, TranscribeOptions, Transcript};
 #[cfg(feature = "onnx")]
 pub use asr_client::AsrClient;
 pub use pcm::{
-    AudioInfo, decode_wav, encode_wav, load_wav_f32, pcm_f32_to_i16, pcm_i16_to_f32, save_wav,
+    AudioInfo, decode_wav, encode_wav, load_audio_f32, load_wav_f32, pcm_f32_to_i16,
+    pcm_i16_to_f32, save_wav,
 };
 pub use tts::{Tts, TtsStream, VoiceInfo};
 pub use tts_client::TtsClient;
 #[cfg(feature = "onnx")]
 pub use tts_kokoro::KokoroTts;
+pub use tts_voxcpm2::VoxCpm2Tts;

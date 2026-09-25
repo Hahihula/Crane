@@ -1,92 +1,243 @@
-//! [`Tts`] trait implementation for [`crane_core::models::voxcpm2::VoxCpm2Model`].
-//!
-//! `generate_speech` is zero-shot. `generate_voice_clone` maps onto
-//! VoxCPM2's "Ultimate Cloning" mode (`VoxCpm2Conditioning::Continuation` —
-//! reference audio *and* its transcript, audio-continuation style) since
-//! that's the only one of VoxCPM2's three real conditioning modes whose
-//! shape matches the trait's `ref_audio`+`ref_text` signature (same mapping
-//! `tts_qwen3.rs`'s own `generate_voice_clone` uses). The other two modes
-//! (transcript-free "Controllable Cloning", and the combined
-//! reference-prefix-plus-continuation mode) aren't reachable through this
-//! trait's shape — use `VoxCpm2Model::generate_speech_conditioned` directly
-//! for those (see `example/src/voxcpm2_simple.rs`).
-//!
-//! `voices()` still returns no presets — cloning is always driven by a
-//! caller-supplied reference clip, never a discrete preset list.
-//! `generate_speech_stream` drives the zero-shot path incrementally via
-//! [`VoxCpm2Model::generate_speech_streaming`], yielding PCM chunks as the
-//! autoregressive loop produces them (voice-clone streaming is not exposed
-//! through the trait — its `ref_audio` args have no streaming entry point).
+//! VoxCPM2 TTS adapter with persistent built-in voice embeddings.
 
-use anyhow::Result;
-use candle_core::Tensor;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use std::time::SystemTime;
+
+use anyhow::{Context, Result};
+use candle_core::{Device, Tensor};
 use crane_core::candle_core;
 use crane_core::generation::SpeechOptions;
 use crane_core::models::voxcpm2::{
     VoxCpm2Conditioning, VoxCpm2GenerationConfig, VoxCpm2Model, VoxCpm2StreamConfig,
 };
 
-use super::pcm::{AudioInfo, load_wav_f32};
+use super::pcm::{AudioInfo, load_audio_f32, load_wav_f32};
 use super::tts::{Tts, TtsStream, VoiceInfo};
 
-/// Build a [`VoxCpm2GenerationConfig`] from the trait-level [`SpeechOptions`],
-/// honoring the optional CFM-sampler overrides (`cfm_steps` / `cfg_scale`) and
-/// falling back to the model defaults otherwise. `cfm_steps` is clamped to at
-/// least 1 — the CFM sampler divides by the step count.
+const CACHE_DIR: &str = ".voxcpm2-cache";
+const CACHE_TENSOR: &str = "embedding";
+
+/// VoxCPM2 plus reference-audio embeddings loaded once at startup.
+pub struct VoxCpm2Tts {
+    model: VoxCpm2Model,
+    voices: BTreeMap<String, Tensor>,
+    voice_names: Vec<String>,
+}
+
+impl VoxCpm2Tts {
+    pub fn new(
+        model: VoxCpm2Model,
+        model_path: &Path,
+        voice_dir: Option<&Path>,
+        device: &Device,
+    ) -> Result<Self> {
+        let mut this = Self {
+            model,
+            voices: BTreeMap::new(),
+            voice_names: Vec::new(),
+        };
+        if let Some(voice_dir) = voice_dir {
+            this.load_builtin_voices(model_path, voice_dir, device)?;
+        }
+        Ok(this)
+    }
+
+    fn load_builtin_voices(
+        &mut self,
+        model_path: &Path,
+        voice_dir: &Path,
+        device: &Device,
+    ) -> Result<()> {
+        if !voice_dir.exists() {
+            eprintln!(
+                "[voxcpm2] built-in voice directory does not exist: {}",
+                voice_dir.display()
+            );
+            return Ok(());
+        }
+
+        let cache_dir = voice_dir.join(CACHE_DIR);
+        fs::create_dir_all(&cache_dir).with_context(|| {
+            format!(
+                "create VoxCPM2 voice cache directory {}",
+                cache_dir.display()
+            )
+        })?;
+
+        let mut sources = fs::read_dir(voice_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| is_supported_audio(path))
+            .collect::<Vec<_>>();
+        sources.sort();
+
+        for source in sources {
+            let file_name = source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .context("voice filename is not valid UTF-8")?
+                .to_string();
+            let stem = source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .context("voice filename has no stem")?
+                .to_string();
+            let cache_path = cache_dir.join(format!("{file_name}.safetensors"));
+
+            let embedding = if cache_is_fresh(&cache_path, &source, model_path) {
+                match candle_core::safetensors::load(&cache_path, device).and_then(|mut tensors| {
+                    tensors.remove(CACHE_TENSOR).ok_or_else(|| {
+                        candle_core::Error::Msg(format!(
+                            "missing tensor {CACHE_TENSOR:?} in {}",
+                            cache_path.display()
+                        ))
+                        .bt()
+                    })
+                }) {
+                    Ok(tensor) => {
+                        eprintln!("[voxcpm2] loaded built-in voice cache: {file_name}");
+                        tensor
+                    },
+                    Err(err) => {
+                        eprintln!(
+                            "[voxcpm2] rebuilding invalid voice cache {}: {err}",
+                            cache_path.display()
+                        );
+                        self.encode_and_cache_voice(&source, &cache_path)?
+                    },
+                }
+            } else {
+                self.encode_and_cache_voice(&source, &cache_path)?
+            };
+
+            // The extension-free stem is the public voice name. Keep the
+            // exact filename as a backwards-compatible lookup alias only.
+            self.voices.insert(stem.clone(), embedding.clone());
+            self.voices.insert(file_name, embedding);
+            self.voice_names.push(stem);
+        }
+
+        eprintln!(
+            "[voxcpm2] {} built-in voice(s) ready from {}",
+            self.voice_names.len(),
+            voice_dir.display()
+        );
+        Ok(())
+    }
+
+    fn encode_and_cache_voice(&self, source: &Path, cache_path: &Path) -> Result<Tensor> {
+        let source_str = source.to_string_lossy();
+        eprintln!("[voxcpm2] encoding built-in voice: {}", source.display());
+        let samples = load_audio_f32(&source_str, self.model.encoder_sample_rate())?;
+        let embedding = self.model.encode_reference_audio(&samples, false)?;
+        embedding
+            .to_device(&Device::Cpu)?
+            .save_safetensors(CACHE_TENSOR, cache_path)?;
+        eprintln!(
+            "[voxcpm2] saved built-in voice cache: {}",
+            cache_path.display()
+        );
+        Ok(embedding)
+    }
+
+    fn conditioning(&self, voice: Option<&str>) -> Result<VoxCpm2Conditioning> {
+        match voice {
+            None => Ok(VoxCpm2Conditioning::ZeroShot),
+            Some(name) => self
+                .voices
+                .get(name)
+                .cloned()
+                .map(VoxCpm2Conditioning::Reference)
+                .with_context(|| {
+                    format!(
+                        "unknown VoxCPM2 voice {name:?}; available voices: {}",
+                        self.voice_names.join(", ")
+                    )
+                }),
+        }
+    }
+}
+
+fn is_supported_audio(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "wav" | "mp3" | "flac" | "ogg" | "m4a" | "aac"
+                )
+            })
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+fn cache_is_fresh(cache: &Path, source: &Path, model_path: &Path) -> bool {
+    let Some(cache_time) = modified(cache) else {
+        return false;
+    };
+    [
+        source.to_path_buf(),
+        model_path.join("config.json"),
+        model_path.join("model.safetensors"),
+        model_path.join("audiovae.safetensors"),
+    ]
+    .iter()
+    .filter_map(|path| modified(path))
+    .all(|time| time <= cache_time)
+}
+
 fn gen_config(opts: &SpeechOptions) -> VoxCpm2GenerationConfig {
     let defaults = VoxCpm2GenerationConfig::default();
     VoxCpm2GenerationConfig {
         max_len: opts.max_new_tokens.max(1),
         inference_timesteps: opts
             .cfm_steps
-            .map_or(defaults.inference_timesteps, |s| s.max(1)),
+            .map_or(defaults.inference_timesteps, |steps| steps.max(1)),
         cfg_value: opts.cfg_scale.unwrap_or(defaults.cfg_value),
         ..defaults
     }
 }
 
-impl Tts for VoxCpm2Model {
+impl Tts for VoxCpm2Tts {
     fn audio_info(&self) -> AudioInfo {
         AudioInfo {
-            sample_rate: self.sample_rate,
+            sample_rate: self.model.sample_rate,
             channels: 1,
             bits_per_sample: 16,
         }
     }
 
-    /// No discrete presets — VoxCPM2 is zero-shot per-utterance, or cloned
-    /// from a caller-supplied reference clip.
     fn voices(&self) -> Vec<VoiceInfo> {
-        vec![]
+        self.voice_names
+            .iter()
+            .map(|name| VoiceInfo {
+                name: name.clone(),
+                languages: vec![],
+            })
+            .collect()
     }
 
     fn supports_voice_cloning(&self) -> bool {
         true
     }
 
-    /// `language`/`voice` are unused: VoxCPM2's zero-shot path infers
-    /// prosody/language from the text itself and has no voice selection.
     fn generate_speech(
         &mut self,
         text: &str,
         _language: &str,
-        _voice: Option<&str>,
+        voice: Option<&str>,
         opts: &SpeechOptions,
     ) -> Result<Tensor> {
-        // `max_new_tokens` doc says "codec frames"; VoxCPM2's closest analog
-        // is its own generation-step count (each step yields one 4-frame
-        // latent patch) — pass through directly as an upper bound rather
-        // than inventing an unjustified conversion factor. The model's own
-        // stop head almost always ends generation well before this cap.
-        let cfg = gen_config(opts);
-        VoxCpm2Model::generate_speech(self, text, &cfg)
+        let conditioning = self.conditioning(voice)?;
+        self.model
+            .generate_speech_conditioned(text, &conditioning, &gen_config(opts))
     }
 
-    /// Maps onto `VoxCpm2Conditioning::Continuation`: `ref_audio` is treated
-    /// as prompt audio to continue from, `ref_text` as its transcript
-    /// (concatenated with `text` before tokenizing — matches the reference's
-    /// own `prompt_text + target_text` behavior). `language`/`voice` unused,
-    /// same as `generate_speech`.
     fn generate_voice_clone(
         &mut self,
         text: &str,
@@ -95,33 +246,29 @@ impl Tts for VoxCpm2Model {
         ref_text: &str,
         opts: &SpeechOptions,
     ) -> Result<Tensor> {
-        let sr = self.encoder_sample_rate();
-        let samples = load_wav_f32(ref_audio, sr)?;
-        let prompt_feat = self.encode_reference_audio(&samples, true)?;
+        let samples = load_wav_f32(ref_audio, self.model.encoder_sample_rate())?;
+        let prompt_feat = self.model.encode_reference_audio(&samples, true)?;
         let conditioning = VoxCpm2Conditioning::Continuation {
             prompt_text: ref_text.to_string(),
             prompt_feat,
         };
-        let cfg = gen_config(opts);
-        self.generate_speech_conditioned(text, &conditioning, &cfg)
+        self.model
+            .generate_speech_conditioned(text, &conditioning, &gen_config(opts))
     }
 
-    /// Incremental zero-shot streaming. Yields f32 PCM chunks (flat
-    /// `[n_samples]`) as patches are generated; the concatenation of all
-    /// chunks equals [`Self::generate_speech`]'s output for the same inputs.
-    /// `language`/`voice` unused, same as [`Self::generate_speech`].
     fn generate_speech_stream(
         &mut self,
         text: &str,
         _language: &str,
-        _voice: Option<&str>,
+        voice: Option<&str>,
         opts: &SpeechOptions,
     ) -> Result<TtsStream<'_>> {
         let audio_info = self.audio_info();
+        let conditioning = self.conditioning(voice)?;
         let cfg = gen_config(opts);
-        let stream = self.generate_speech_streaming(
+        let stream = self.model.generate_speech_streaming(
             text,
-            &VoxCpm2Conditioning::ZeroShot,
+            &conditioning,
             &cfg,
             VoxCpm2StreamConfig::default(),
         )?;

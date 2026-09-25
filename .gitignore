@@ -17,3 +17,6 @@ output/
 /docs/
 # docker compose settings (COMPOSE_PROFILES, MODEL_DIR, ...), per user
 .env
+.voxcpm2-cache/
+data/voices/.voxcpm2-cache/
+voxcpm2-stream.wav

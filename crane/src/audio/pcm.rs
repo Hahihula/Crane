@@ -209,11 +209,15 @@ fn read_wav_f32<R: std::io::Read>(
             .collect()
     };
 
-    // Resample if needed (linear interpolation)
+    // Resample if needed.
     if raw_sr == target_sr {
         return Ok(mono);
     }
 
+    resample_mono(&mono, raw_sr, target_sr)
+}
+
+fn resample_mono(mono: &[f32], raw_sr: u32, target_sr: u32) -> Result<Vec<f32>> {
     use audioadapter_buffers::direct::SequentialSliceOfVecs;
     use rubato::{
         Async, FixedAsync, Resampler as RubatoResampler, SincInterpolationParameters,
@@ -272,6 +276,82 @@ fn read_wav_f32<R: std::io::Read>(
 pub fn load_wav_f32(path: &str, target_sr: u32) -> Result<Vec<f32>> {
     let reader = hound::WavReader::open(path)?;
     read_wav_f32(reader, target_sr)
+}
+
+/// Decode an audio file to mono f32 samples and resample it to `target_sr`.
+///
+/// WAV files use the existing hound path. Other supported containers/codecs
+/// (notably MP3, used by bundled VoxCPM2 voices) are decoded with Symphonia.
+pub fn load_audio_f32(path: &str, target_sr: u32) -> Result<Vec<f32>> {
+    if let Ok(reader) = hound::WavReader::open(path) {
+        return read_wav_f32(reader, target_sr);
+    }
+
+    use std::fs::File;
+    use std::path::Path;
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::errors::Error as SymphoniaError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = File::open(path)?;
+    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = Path::new(path).extension().and_then(|v| v.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| anyhow::anyhow!("no default audio track in {path}"))?;
+    let track_id = track.id;
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+    let mut source_sr = track.codec_params.sample_rate;
+    let mut mono = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            },
+            Err(err) => return Err(err.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(err) => return Err(err.into()),
+        };
+        source_sr.get_or_insert(decoded.spec().rate);
+        let channels = decoded.spec().channels.count();
+        let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        samples.copy_interleaved_ref(decoded);
+        for frame in samples.samples().chunks(channels) {
+            mono.push(frame.iter().sum::<f32>() / channels as f32);
+        }
+    }
+
+    let source_sr = source_sr.ok_or_else(|| anyhow::anyhow!("unknown sample rate in {path}"))?;
+    if source_sr == target_sr {
+        Ok(mono)
+    } else {
+        resample_mono(&mono, source_sr, target_sr)
+    }
 }
 
 /// Decodes in-memory WAV bytes and returns f32 samples normalized to `[-1, 1]`.

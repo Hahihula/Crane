@@ -58,6 +58,11 @@ pub struct Args {
     /// of `--model-path` when unset.
     #[arg(long, help_heading = "Model")]
     pub model_name: Option<String>,
+    /// Directory containing built-in VoxCPM2 reference audio files. Each
+    /// filename stem (without `.wav`, `.mp3`, etc.) becomes a `voice` value.
+    /// Embeddings are cached in this directory after the first startup.
+    #[arg(long, default_value = "data/voices", help_heading = "Model")]
+    pub voice_dir: std::path::PathBuf,
     /// Listen address. Default `0.0.0.0` (all interfaces). Use `127.0.0.1`
     /// to restrict to localhost.
     #[arg(long, default_value = "0.0.0.0", help_heading = "Server")]
@@ -1120,6 +1125,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             resolved_type, args.model_path
         );
         let model_path_clone = args.model_path.clone();
+        let voice_dir_clone = args.voice_dir.clone();
         // `device` already resolves cuda -> rocm -> metal -> cpu (and honors
         // `args.cpu`); re-deriving CPU-vs-GPU here only checked the `cuda`
         // feature, so it silently forced CPU on rocm/metal builds.
@@ -1135,6 +1141,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                     &model_path_clone,
                     &tts_device,
                     &tts_dtype,
+                    Some(&voice_dir_clone),
                 ) {
                     Ok(m) => m,
                     Err(e) => {
