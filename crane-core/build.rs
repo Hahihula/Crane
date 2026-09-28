@@ -26,6 +26,14 @@ fn oneapi_runtime_dirs() -> Vec<String> {
 fn main() {
     println!("cargo::rerun-if-changed=kernels/cuda/");
     println!("cargo::rerun-if-changed=kernels/sycl/");
+    // The Metal kernels in `kernels/metal/fused_ops.metal` are `include_str!`'d
+    // at compile time and JIT-compiled at first dispatch through
+    // `MetalDevice::new_library_with_source(...)`. This directive here only
+    // re-runs `build.rs` if the file changes — `include_str!` itself invalidates
+    // the cargo build cache when the file is modified, but listing the
+    // directory explicitly also covers any future sibling .metal files that
+    // might be added without being referenced.
+    println!("cargo::rerun-if-changed=kernels/metal/");
     println!("cargo::rerun-if-changed=build.rs");
 
     #[cfg(feature = "onnx")]
