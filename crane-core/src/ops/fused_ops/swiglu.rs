@@ -8,6 +8,14 @@
 //! `kernels/cuda/swiglu.cu`, following the [`super::snake`] pattern.
 //! `rocm_fwd` is gated behind the `rocm` feature and runs the *same*
 //! `.cu` source through `hipcc` at runtime (see [`crate::ops::rocm`]).
+//!
+//! Metal and SYCL have no fused kernel here, and `CustomOp2`'s default
+//! `metal_fwd`/`sycl_fwd` just error out ("no metal/sycl implementation for
+//! swiglu") — so [`swiglu`] routes those devices around `SwigluOp` entirely,
+//! to the portable `silu(gate) * up` chain built from candle's own `Silu`
+//! unary op and broadcast multiply, both of which already have real
+//! Metal/SYCL backends. Same pattern as `fused_ops::sycl_impl`'s
+//! `silu_mul_ops` and `topk_moe`'s CPU/Metal fallback.
 
 #[cfg(feature = "cuda")]
 use candle_core::DType;
@@ -20,6 +28,8 @@ use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 use candle_core::rocm_backend::RocmStorage;
 use candle_core::{CpuStorage, CustomOp2, Layout, Result, Shape, Tensor, WithDType};
+
+use crate::utils::DeviceExt;
 
 #[cfg(feature = "cuda")]
 mod ptx {
@@ -202,7 +212,15 @@ pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     if gate.shape() != up.shape() {
         candle_core::bail!("swiglu: gate and up must have the same shape");
     }
-    if gate.device().is_cpu() {
+    let device = gate.device();
+    // No fused kernel on Metal or SYCL — `SwigluOp` only implements
+    // cpu_fwd/cuda_fwd/rocm_fwd, so routing these devices through
+    // `apply_op2_no_bwd` would hit `CustomOp2`'s default `metal_fwd`/
+    // `sycl_fwd`, which unconditionally errors.
+    if device.is_metal() || device.is_sycl() {
+        return portable_swiglu(gate, up);
+    }
+    if device.is_cpu() {
         return gate.apply_op2_no_bwd(up, &SwigluOp);
     }
     let gate = gate.contiguous()?;
@@ -210,11 +228,19 @@ pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     gate.apply_op2_no_bwd(&up, &SwigluOp)
 }
 
+/// `silu(gate) * up` via candle's own ops, used on devices `SwigluOp` has no
+/// fused kernel for (Metal, SYCL). Both `Silu` and broadcast multiply are
+/// native candle ops with real implementations on every backend, unlike
+/// `SwigluOp`'s hand-written `CustomOp2`.
+fn portable_swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    candle_nn::ops::silu(gate)?.broadcast_mul(up)
+}
+
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
-    use super::swiglu;
+    use super::{portable_swiglu, swiglu};
 
     /// Naive reference: separate silu + mul.
     fn naive_swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
@@ -381,6 +407,23 @@ mod tests {
 
         let got = swiglu(&gate, &up)?.flatten_all()?.to_vec1::<f32>()?;
         let expected = naive_swiglu(&gate, &up)?.flatten_all()?.to_vec1::<f32>()?;
+
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-6, "got {g}, expected {e}");
+        }
+        Ok(())
+    }
+
+    // Verifies the Metal/SYCL fallback path (exercised directly here, since
+    // this CPU-only test suite can't reach it through `swiglu()`'s device
+    // check) matches the fused kernel / naive reference.
+    #[test]
+    fn portable_swiglu_matches_naive() -> Result<()> {
+        let gate = Tensor::new(&[0.0f32, 1.0, -1.0, 2.5, -0.5], &Device::Cpu)?;
+        let up = Tensor::new(&[1.0f32, 2.0, 0.5, 3.0, 1.5], &Device::Cpu)?;
+
+        let got = portable_swiglu(&gate, &up)?.to_vec1::<f32>()?;
+        let expected = naive_swiglu(&gate, &up)?.to_vec1::<f32>()?;
 
         for (g, e) in got.iter().zip(expected.iter()) {
             assert!((g - e).abs() < 1e-6, "got {g}, expected {e}");
