@@ -107,6 +107,8 @@ MODELS = {
         "dirname": "Qwen3.8-27B-GGUF",
         "kind": "llm",
         "quant_template": "Qwen3.8-27B-{quant}.gguf",
+        # This repo only ships Unsloth Dynamic ("UD-") K-quants
+        "default_quant": "UD-Q4_K_M",
         "description": "Qwen 3.8 27B, same arch as Qwen 3.5 scaled up, GGUF quant (Apache-2.0)",
     },
     "gemma-4-e2b-it-gguf": {
