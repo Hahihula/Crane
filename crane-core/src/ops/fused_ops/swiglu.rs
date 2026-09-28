@@ -9,13 +9,21 @@
 //! `rocm_fwd` is gated behind the `rocm` feature and runs the *same*
 //! `.cu` source through `hipcc` at runtime (see [`crate::ops::rocm`]).
 //!
-//! Metal and SYCL have no fused kernel here, and `CustomOp2`'s default
-//! `metal_fwd`/`sycl_fwd` just error out ("no metal/sycl implementation for
-//! swiglu") — so [`swiglu`] routes those devices around `SwigluOp` entirely,
-//! to the portable `silu(gate) * up` chain built from candle's own `Silu`
-//! unary op and broadcast multiply, both of which already have real
-//! Metal/SYCL backends. Same pattern as `fused_ops::sycl_impl`'s
-//! `silu_mul_ops` and `topk_moe`'s CPU/Metal fallback.
+//! Metal has no fused kernel here, and `CustomOp2`'s default `metal_fwd`
+//! just errors out ("no metal implementation for swiglu") — so [`swiglu`]
+//! routes Metal around `SwigluOp` entirely, to the portable
+//! `silu(gate) * up` chain built from candle's own `Silu` unary op and
+//! broadcast multiply, which already has a real Metal backend. Same pattern
+//! as `fused_ops::sycl_impl`'s `silu_mul_ops` and `topk_moe`'s CPU/Metal
+//! fallback.
+//!
+//! SYCL has a real fused kernel (`kernels/sycl/fused_ops.cpp`'s
+//! `crane_swiglu_sycl`, built into `libcrane_gdn_sycl.so` by `build.rs`),
+//! dispatched directly from [`swiglu`] rather than through `SwigluOp` (SYCL
+//! storage is an untyped device buffer + `DType` tag, not the per-dtype
+//! `CudaStorageSlice`-style enum `CustomOp2::sycl_fwd` would need to match
+//! on) — same raw-buffer-pointer pattern as `sycl_impl::fused_silu_mul` and
+//! `gdn::sycl_backend::gdn_recurrence_sycl`.
 
 #[cfg(feature = "cuda")]
 use candle_core::DType;
@@ -29,8 +37,6 @@ use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
 use candle_core::rocm_backend::RocmStorage;
 use candle_core::{CpuStorage, CustomOp2, Layout, Result, Shape, Tensor, WithDType};
 
-use crate::utils::DeviceExt;
-
 #[cfg(feature = "cuda")]
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/crane_kernels_ptx.rs"));
@@ -43,6 +49,89 @@ const MODULE_NAME: &str = "crane_swiglu";
 const ROCM_MODULE_NAME: &str = "crane_swiglu";
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 const ROCM_SOURCE: &str = include_str!("../../../kernels/cuda/swiglu.cu");
+
+/// SYCL launcher for `crane_swiglu_sycl` (`kernels/sycl/fused_ops.cpp`).
+/// Raw-buffer-pointer FFI, not a `CustomOp2::sycl_fwd` impl — see the module
+/// doc comment for why.
+#[cfg(feature = "sycl")]
+mod sycl_kernel {
+    use std::ffi::c_void;
+
+    use candle_core::op::BackpropOp;
+    use candle_core::{DType, Result, Storage, SyclStorage, Tensor};
+
+    unsafe extern "C" {
+        fn crane_swiglu_sycl(
+            queue: *mut c_void,
+            dtype: i32,
+            gate: *const c_void,
+            up: *const c_void,
+            out: *mut c_void,
+            n: i64,
+        ) -> i32;
+    }
+
+    /// Dtype tags match `crane_swiglu_sycl`'s `CRANE_FSM_*` enum.
+    fn dtype_tag(dtype: DType) -> Result<i32> {
+        Ok(match dtype {
+            DType::F32 => 0,
+            DType::F16 => 1,
+            DType::BF16 => 2,
+            dt => candle_core::bail!("swiglu: unsupported dtype {dt:?} on SYCL"),
+        })
+    }
+
+    pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        let dtype = gate.dtype();
+        let dtype_tag = dtype_tag(dtype)?;
+        let n = gate.elem_count();
+
+        // Flat kernel indexes a contiguous buffer; broadcasting/narrow'd
+        // views are compacted first, matching the CUDA/ROCm branch below.
+        let gate = gate.contiguous()?;
+        let up = up.contiguous()?;
+
+        let dev = gate.device().as_sycl_device()?.clone();
+        let queue = dev.queue().native_ptr();
+
+        let (gate_s, gate_l) = gate.storage_and_layout();
+        let (up_s, up_l) = up.storage_and_layout();
+        let ptr = |s: &Storage, offset: usize, name: &str| -> Result<*const c_void> {
+            match s {
+                Storage::Sycl(st) => Ok(unsafe {
+                    (st.buf().as_ptr() as *const u8).add(offset * dtype.size_in_bytes())
+                        as *const c_void
+                }),
+                _ => candle_core::bail!("swiglu: {name} must be a sycl tensor"),
+            }
+        };
+        let gate_ptr = ptr(&gate_s, gate_l.start_offset(), "gate")?;
+        let up_ptr = ptr(&up_s, up_l.start_offset(), "up")?;
+
+        let out_buf = dev.alloc_bytes(n * dtype.size_in_bytes())?;
+        let status = unsafe {
+            crane_swiglu_sycl(
+                queue,
+                dtype_tag,
+                gate_ptr,
+                up_ptr,
+                out_buf.as_mut_ptr(),
+                n as i64,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("crane_swiglu_sycl failed (status {status})");
+        }
+
+        let storage = Storage::Sycl(SyclStorage::from_buffer(&dev, out_buf, dtype, n));
+        Ok(Tensor::from_storage(
+            storage,
+            gate_l.shape().clone(),
+            BackpropOp::none(),
+            false,
+        ))
+    }
+}
 
 /// Fused `SwiGLU`: `silu(gate) * up`.
 struct SwigluOp;
@@ -213,11 +302,15 @@ pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
         candle_core::bail!("swiglu: gate and up must have the same shape");
     }
     let device = gate.device();
-    // No fused kernel on Metal or SYCL — `SwigluOp` only implements
-    // cpu_fwd/cuda_fwd/rocm_fwd, so routing these devices through
-    // `apply_op2_no_bwd` would hit `CustomOp2`'s default `metal_fwd`/
-    // `sycl_fwd`, which unconditionally errors.
-    if device.is_metal() || device.is_sycl() {
+    #[cfg(feature = "sycl")]
+    if device.is_sycl() {
+        return sycl_kernel::swiglu(gate, up);
+    }
+    // No fused kernel on Metal — `SwigluOp` only implements
+    // cpu_fwd/cuda_fwd/rocm_fwd, so routing this device through
+    // `apply_op2_no_bwd` would hit `CustomOp2`'s default `metal_fwd`, which
+    // unconditionally errors.
+    if device.is_metal() {
         return portable_swiglu(gate, up);
     }
     if device.is_cpu() {

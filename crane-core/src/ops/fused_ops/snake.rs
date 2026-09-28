@@ -15,12 +15,19 @@
 //! runtime (see [`crate::ops::rocm`]). Callers broadcast `x`/`alpha` to
 //! matching shapes before calling `snake()`.
 //!
-//! Metal and SYCL have no fused kernel here, and `CustomOp2`'s default
-//! `metal_fwd`/`sycl_fwd` just error out ("no metal/sycl implementation for
-//! snake") — so [`snake`] routes those devices around `SnakeOp` entirely, to
-//! the portable `x + sin(alpha * x)^2 / alpha` chain built from candle's own
-//! `sin`/`powf`/broadcast ops, all of which already have real Metal/SYCL
-//! backends. Same pattern as [`super::swiglu`].
+//! Metal has no fused kernel here, and `CustomOp2`'s default `metal_fwd`
+//! just errors out ("no metal implementation for snake") — so [`snake`]
+//! routes Metal around `SnakeOp` entirely, to the portable
+//! `x + sin(alpha * x)^2 / alpha` chain built from candle's own
+//! `sin`/`powf`/broadcast ops, which already has a real Metal backend. Same
+//! pattern as [`super::swiglu`].
+//!
+//! SYCL has a real fused kernel (`kernels/sycl/fused_ops.cpp`'s
+//! `crane_snake_sycl`, built into `libcrane_gdn_sycl.so` by `build.rs`),
+//! dispatched directly from [`snake`] rather than through `SnakeOp` — same
+//! raw-buffer-pointer FFI pattern as [`super::swiglu`]'s `sycl_kernel`
+//! module (SYCL storage has no per-dtype slice enum for `sycl_fwd` to match
+//! on, unlike CUDA's `CudaStorageSlice`).
 
 #[cfg(feature = "cuda")]
 use candle_core::DType;
@@ -33,8 +40,6 @@ use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 use candle_core::rocm_backend::RocmStorage;
 use candle_core::{CpuStorage, CustomOp2, Layout, Result, Shape, Tensor, WithDType};
-
-use crate::utils::DeviceExt;
 
 // PTX compiled from kernels/cuda/snake.cu — embedded at build time.
 #[cfg(feature = "cuda")]
@@ -49,6 +54,90 @@ const MODULE_NAME: &str = "crane_snake";
 const ROCM_MODULE_NAME: &str = "crane_snake";
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 const ROCM_SOURCE: &str = include_str!("../../../kernels/cuda/snake.cu");
+
+/// SYCL launcher for `crane_snake_sycl` (`kernels/sycl/fused_ops.cpp`).
+/// Raw-buffer-pointer FFI, not a `CustomOp2::sycl_fwd` impl — see the module
+/// doc comment for why.
+#[cfg(feature = "sycl")]
+mod sycl_kernel {
+    use std::ffi::c_void;
+
+    use candle_core::op::BackpropOp;
+    use candle_core::{DType, Result, Storage, SyclStorage, Tensor};
+
+    unsafe extern "C" {
+        fn crane_snake_sycl(
+            queue: *mut c_void,
+            dtype: i32,
+            x: *const c_void,
+            alpha: *const c_void,
+            out: *mut c_void,
+            n: i64,
+        ) -> i32;
+    }
+
+    /// Dtype tags match `crane_snake_sycl`'s `CRANE_FSM_*` enum.
+    fn dtype_tag(dtype: DType) -> Result<i32> {
+        Ok(match dtype {
+            DType::F32 => 0,
+            DType::F16 => 1,
+            DType::BF16 => 2,
+            dt => candle_core::bail!("snake: unsupported dtype {dt:?} on SYCL"),
+        })
+    }
+
+    pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
+        let dtype = x.dtype();
+        let dtype_tag = dtype_tag(dtype)?;
+        let n = x.elem_count();
+
+        // Flat kernel indexes a contiguous buffer; broadcast alpha (e.g. the
+        // real model's `[1, C, 1]` vs `x`'s `[1, C, T]`) is compacted first,
+        // matching the CUDA/ROCm branch below.
+        let x = x.contiguous()?;
+        let alpha = alpha.contiguous()?;
+
+        let dev = x.device().as_sycl_device()?.clone();
+        let queue = dev.queue().native_ptr();
+
+        let (x_s, x_l) = x.storage_and_layout();
+        let (alpha_s, alpha_l) = alpha.storage_and_layout();
+        let ptr = |s: &Storage, offset: usize, name: &str| -> Result<*const c_void> {
+            match s {
+                Storage::Sycl(st) => Ok(unsafe {
+                    (st.buf().as_ptr() as *const u8).add(offset * dtype.size_in_bytes())
+                        as *const c_void
+                }),
+                _ => candle_core::bail!("snake: {name} must be a sycl tensor"),
+            }
+        };
+        let x_ptr = ptr(&x_s, x_l.start_offset(), "x")?;
+        let alpha_ptr = ptr(&alpha_s, alpha_l.start_offset(), "alpha")?;
+
+        let out_buf = dev.alloc_bytes(n * dtype.size_in_bytes())?;
+        let status = unsafe {
+            crane_snake_sycl(
+                queue,
+                dtype_tag,
+                x_ptr,
+                alpha_ptr,
+                out_buf.as_mut_ptr(),
+                n as i64,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("crane_snake_sycl failed (status {status})");
+        }
+
+        let storage = Storage::Sycl(SyclStorage::from_buffer(&dev, out_buf, dtype, n));
+        Ok(Tensor::from_storage(
+            storage,
+            x_l.shape().clone(),
+            BackpropOp::none(),
+            false,
+        ))
+    }
+}
 
 /// Fused Snake activation: `x + sin(alpha * x)^2 / alpha`.
 struct SnakeOp;
@@ -221,11 +310,15 @@ impl CustomOp2 for SnakeOp {
 /// `F32`/`F64` (`cpu_fwd`), or — on CUDA — other than `BF16`/`F16`/`F32`,
 /// or if either input's element count doesn't match after broadcasting.
 pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
-    // No fused kernel on Metal or SYCL — `SnakeOp` only implements
-    // cpu_fwd/cuda_fwd/rocm_fwd, so routing these devices through
-    // `apply_op2_no_bwd` would hit `CustomOp2`'s default `metal_fwd`/
-    // `sycl_fwd`, which unconditionally errors.
-    if x.device().is_metal() || x.device().is_sycl() {
+    #[cfg(feature = "sycl")]
+    if x.device().is_sycl() {
+        return sycl_kernel::snake(x, alpha);
+    }
+    // No fused kernel on Metal — `SnakeOp` only implements
+    // cpu_fwd/cuda_fwd/rocm_fwd, so routing this device through
+    // `apply_op2_no_bwd` would hit `CustomOp2`'s default `metal_fwd`, which
+    // unconditionally errors.
+    if x.device().is_metal() {
         return portable_snake(x, alpha);
     }
     let x = x.contiguous()?;
