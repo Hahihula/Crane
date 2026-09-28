@@ -14,6 +14,13 @@
 //! `rocm` feature and runs the *same* `.cu` source through `hipcc` at
 //! runtime (see [`crate::ops::rocm`]). Callers broadcast `x`/`alpha` to
 //! matching shapes before calling `snake()`.
+//!
+//! Metal and SYCL have no fused kernel here, and `CustomOp2`'s default
+//! `metal_fwd`/`sycl_fwd` just error out ("no metal/sycl implementation for
+//! snake") — so [`snake`] routes those devices around `SnakeOp` entirely, to
+//! the portable `x + sin(alpha * x)^2 / alpha` chain built from candle's own
+//! `sin`/`powf`/broadcast ops, all of which already have real Metal/SYCL
+//! backends. Same pattern as [`super::swiglu`].
 
 #[cfg(feature = "cuda")]
 use candle_core::DType;
@@ -26,6 +33,8 @@ use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice, WrapErr};
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 use candle_core::rocm_backend::RocmStorage;
 use candle_core::{CpuStorage, CustomOp2, Layout, Result, Shape, Tensor, WithDType};
+
+use crate::utils::DeviceExt;
 
 // PTX compiled from kernels/cuda/snake.cu — embedded at build time.
 #[cfg(feature = "cuda")]
@@ -212,16 +221,30 @@ impl CustomOp2 for SnakeOp {
 /// `F32`/`F64` (`cpu_fwd`), or — on CUDA — other than `BF16`/`F16`/`F32`,
 /// or if either input's element count doesn't match after broadcasting.
 pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
+    // No fused kernel on Metal or SYCL — `SnakeOp` only implements
+    // cpu_fwd/cuda_fwd/rocm_fwd, so routing these devices through
+    // `apply_op2_no_bwd` would hit `CustomOp2`'s default `metal_fwd`/
+    // `sycl_fwd`, which unconditionally errors.
+    if x.device().is_metal() || x.device().is_sycl() {
+        return portable_snake(x, alpha);
+    }
     let x = x.contiguous()?;
     let alpha = alpha.contiguous()?;
     x.apply_op2_no_bwd(&alpha, &SnakeOp)
+}
+
+/// `x + sin(alpha * x)^2 / alpha` via candle's own ops, used on devices
+/// `SnakeOp` has no fused kernel for (Metal, SYCL).
+fn portable_snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
+    let sin_ax = x.broadcast_mul(alpha)?.sin()?;
+    x.broadcast_add(&sin_ax.powf(2.0)?.broadcast_div(alpha)?)
 }
 
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
-    use super::snake;
+    use super::{portable_snake, snake};
 
     /// Naive reference: the 5-op decomposition the ONNX exporter emits.
     fn naive_snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
@@ -378,6 +401,23 @@ mod tests {
 
         for (g, e) in got.iter().zip(expected.iter()) {
             assert!((g - e).abs() < 1e-3, "got {g}, expected {e}");
+        }
+        Ok(())
+    }
+
+    // Verifies the Metal/SYCL fallback path (exercised directly here, since
+    // this CPU-only test suite can't reach it through `snake()`'s device
+    // check) matches the fused kernel / naive reference.
+    #[test]
+    fn portable_snake_matches_naive() -> Result<()> {
+        let x = Tensor::new(&[0.0f32, 1.0, -1.0, 2.5, -0.5], &Device::Cpu)?;
+        let alpha = Tensor::new(&[1.0f32, 2.0, 0.5, 3.0, 1.5], &Device::Cpu)?;
+
+        let got = portable_snake(&x, &alpha)?.to_vec1::<f32>()?;
+        let expected = naive_snake(&x, &alpha)?.to_vec1::<f32>()?;
+
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-6, "got {g}, expected {e}");
         }
         Ok(())
     }
