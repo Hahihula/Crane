@@ -755,6 +755,7 @@ fn copy_linear_to_device(layer: &LinearLayer, device: &Device) -> Result<LinearL
                 "copying a Ternary-quantized expert to another device is not supported"
             )
         },
+        LinearLayer::IQuant(l) => Ok(LinearLayer::IQuant(l.to_device(device)?)),
     }
 }
 
