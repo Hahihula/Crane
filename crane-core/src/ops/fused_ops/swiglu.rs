@@ -8,6 +8,21 @@
 //! `kernels/cuda/swiglu.cu`, following the [`super::snake`] pattern.
 //! `rocm_fwd` is gated behind the `rocm` feature and runs the *same*
 //! `.cu` source through `hipcc` at runtime (see [`crate::ops::rocm`]).
+//!
+//! `metal_fwd` is gated behind the `metal` feature and runs
+//! `kernels/metal/fused_ops.metal`'s `crane_swiglu_*` kernels (one per
+//! supported dtype). The .metal source is JIT-compiled via
+//! `candle_metal_kernels::metal::Device::new_library_with_source(...)`
+//! on first dispatch and cached in a per-`(device, kernel)` `OnceLock`
+//! keyed on `MetalDevice.registry_id()`.
+//!
+//! SYCL has a real fused kernel (`kernels/sycl/fused_ops.cpp`'s
+//! `crane_swiglu_sycl`, built into `libcrane_gdn_sycl.so` by `build.rs`),
+//! dispatched directly from [`swiglu`] rather than through `SwigluOp` (SYCL
+//! storage is an untyped device buffer + `DType` tag, not the per-dtype
+//! `CudaStorageSlice`-style enum `CustomOp2::sycl_fwd` would need to match
+//! on) — same raw-buffer-pointer pattern as `sycl_impl::fused_silu_mul` and
+//! `gdn::sycl_backend::gdn_recurrence_sycl`.
 
 #[cfg(feature = "cuda")]
 use candle_core::DType;
@@ -33,6 +48,321 @@ const MODULE_NAME: &str = "crane_swiglu";
 const ROCM_MODULE_NAME: &str = "crane_swiglu";
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 const ROCM_SOURCE: &str = include_str!("../../../kernels/cuda/swiglu.cu");
+
+/// SYCL launcher for `crane_swiglu_sycl` (`kernels/sycl/fused_ops.cpp`).
+/// Raw-buffer-pointer FFI, not a `CustomOp2::sycl_fwd` impl — see the module
+/// doc comment for why.
+#[cfg(feature = "sycl")]
+mod sycl_kernel {
+    use std::ffi::c_void;
+
+    use candle_core::op::BackpropOp;
+    use candle_core::{DType, Result, Storage, SyclStorage, Tensor};
+
+    unsafe extern "C" {
+        fn crane_swiglu_sycl(
+            queue: *mut c_void,
+            dtype: i32,
+            gate: *const c_void,
+            up: *const c_void,
+            out: *mut c_void,
+            n: i64,
+        ) -> i32;
+    }
+
+    /// Dtype tags match `crane_swiglu_sycl`'s `CRANE_FSM_*` enum.
+    fn dtype_tag(dtype: DType) -> Result<i32> {
+        Ok(match dtype {
+            DType::F32 => 0,
+            DType::F16 => 1,
+            DType::BF16 => 2,
+            dt => candle_core::bail!("swiglu: unsupported dtype {dt:?} on SYCL"),
+        })
+    }
+
+    pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        let dtype = gate.dtype();
+        let dtype_tag = dtype_tag(dtype)?;
+        let n = gate.elem_count();
+
+        // Flat kernel indexes a contiguous buffer; broadcasting/narrow'd
+        // views are compacted first, matching the CUDA/ROCm branch below.
+        let gate = gate.contiguous()?;
+        let up = up.contiguous()?;
+
+        let dev = gate.device().as_sycl_device()?.clone();
+        let queue = dev.queue().native_ptr();
+
+        let (gate_s, gate_l) = gate.storage_and_layout();
+        let (up_s, up_l) = up.storage_and_layout();
+        let ptr = |s: &Storage, offset: usize, name: &str| -> Result<*const c_void> {
+            match s {
+                Storage::Sycl(st) => Ok(unsafe {
+                    (st.buf().as_ptr() as *const u8).add(offset * dtype.size_in_bytes())
+                        as *const c_void
+                }),
+                _ => candle_core::bail!("swiglu: {name} must be a sycl tensor"),
+            }
+        };
+        let gate_ptr = ptr(&gate_s, gate_l.start_offset(), "gate")?;
+        let up_ptr = ptr(&up_s, up_l.start_offset(), "up")?;
+
+        let out_buf = dev.alloc_bytes(n * dtype.size_in_bytes())?;
+        let status = unsafe {
+            crane_swiglu_sycl(
+                queue,
+                dtype_tag,
+                gate_ptr,
+                up_ptr,
+                out_buf.as_mut_ptr(),
+                n as i64,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("crane_swiglu_sycl failed (status {status})");
+        }
+
+        let storage = Storage::Sycl(SyclStorage::from_buffer(&dev, out_buf, dtype, n));
+        Ok(Tensor::from_storage(
+            storage,
+            gate_l.shape().clone(),
+            BackpropOp::none(),
+            false,
+        ))
+    }
+}
+
+/// Metal launcher for `crane_swiglu_{f32,f16,bf16}`
+/// (`kernels/metal/fused_ops.metal`). The same source also contains
+/// `crane_snake_*`, which is dispatched by [`super::snake::metal_kernel`].
+///
+/// Raw-buffer-pointer FFI through candle-core's `MetalDevice`, not a
+/// `CustomOp2::metal_fwd` impl — same direct-dispatch pattern as the SYCL
+/// kernel above. The `.metal` source is JIT-compiled into an `MTLLibrary`
+/// once per `MetalDevice` (keyed on `registry_id()`) and cached in a
+/// process-global `OnceLock`-guarded `HashMap`. Per-kernel-name
+/// `MTLComputePipelineState` is cached the same way, so the cost of the
+/// first dispatch on each dtype is one Metal shader compile + one pipeline
+/// build, and subsequent dispatches are pure buffer-binding + dispatch.
+#[cfg(feature = "metal")]
+mod metal_kernel {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use candle_core::backend::BackendStorage;
+    use candle_core::metal_backend::{MetalDevice, MetalStorage};
+    use candle_core::op::BackpropOp;
+    use candle_core::{DType, Result, Storage, Tensor};
+    use candle_metal_kernels::metal::{ComputeCommandEncoder, ComputePipeline, Library};
+
+    /// Compiled-in Metal source, see `kernels/metal/fused_ops.metal`.
+    pub(super) const SOURCE: &str = include_str!("../../../kernels/metal/fused_ops.metal");
+
+    /// Per-device compiled library. One `MTLLibrary` per `registry_id`,
+    /// shared across all kernel names on that device — Metal's compiler
+    /// caches the parsed / SPIR-V-like intermediate, so reusing one
+    /// library is significantly cheaper than one library per kernel.
+    static LIBRARIES: OnceLock<Mutex<HashMap<u64, Arc<Library>>>> = OnceLock::new();
+
+    /// Per-(device, kernel) compiled pipeline. Built lazily on first
+    /// dispatch; never invalidated (the kernel binary is determined
+    /// entirely by kernel source + device, neither of which changes).
+    static PIPELINES: OnceLock<Mutex<HashMap<(u64, &'static str), Arc<ComputePipeline>>>> =
+        OnceLock::new();
+
+    /// Compile `SOURCE` once per device, return the cached `Library`.
+    fn get_library(device: &MetalDevice) -> Result<Arc<Library>> {
+        let registry_id = device.registry_id();
+        let mtx = LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let cache = mtx.lock().expect("metal library cache poisoned");
+            if let Some(lib) = cache.get(&registry_id) {
+                return Ok(Arc::clone(lib));
+            }
+        }
+        let lib = device
+            .device()
+            .new_library_with_source(SOURCE, None)
+            .map_err(|e| {
+                candle_core::Error::Msg(format!(
+                    "swiglu: failed to compile metal `fused_ops.metal`: {e}"
+                ))
+            })?;
+        let arc = Arc::new(lib);
+        mtx.lock()
+            .expect("metal library cache poisoned")
+            .insert(registry_id, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// Get or compile the pipeline for `(device, kernel_name)`.
+    fn get_pipeline(
+        device: &MetalDevice,
+        kernel_name: &'static str,
+    ) -> Result<Arc<ComputePipeline>> {
+        let registry_id = device.registry_id();
+        let mtx = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let cache = mtx.lock().expect("metal pipeline cache poisoned");
+            if let Some(p) = cache.get(&(registry_id, kernel_name)) {
+                return Ok(Arc::clone(p));
+            }
+        }
+        let lib = get_library(device)?;
+        let func = lib.get_function(kernel_name, None).map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "swiglu: missing kernel `{kernel_name}` in compiled Metal library: {e}"
+            ))
+        })?;
+        let pipeline = device
+            .device()
+            .new_compute_pipeline_state_with_function(&func)
+            .map_err(|e| {
+                candle_core::Error::Msg(format!(
+                    "swiglu: pipeline build for `{kernel_name}` failed: {e}"
+                ))
+            })?;
+        let arc = Arc::new(pipeline);
+        mtx.lock()
+            .expect("metal pipeline cache poisoned")
+            .insert((registry_id, kernel_name), Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// `(kernel_name, dtype_size)` lookup for the dtypes `crane_swiglu_*`
+    /// supports.
+    fn dtype_kernel(dtype: DType) -> Option<(&'static str, usize)> {
+        match dtype {
+            DType::F32 => Some(("crane_swiglu_f32", 4)),
+            DType::F16 => Some(("crane_swiglu_f16", 2)),
+            DType::BF16 => Some(("crane_swiglu_bf16", 2)),
+            _ => None,
+        }
+    }
+
+    /// Compute (threadgroups, threads_per_threadgroup) for a flat one-D
+    /// dispatch with `n` total elements and `pipeline.max_total_threads_per_threadgroup()`
+    /// as the upper bound on `width`.
+    fn dispatch_dims(
+        n: usize,
+        pipeline: &ComputePipeline,
+    ) -> (objc2_metal::MTLSize, objc2_metal::MTLSize) {
+        let width = pipeline
+            .max_total_threads_per_threadgroup()
+            .max(1)
+            .min(n.max(1));
+        let count = n.div_ceil(width).max(1);
+        (
+            objc2_metal::MTLSize {
+                width: count,
+                height: 1,
+                depth: 1,
+            },
+            objc2_metal::MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+        )
+    }
+
+    /// Fused `silu(gate) * up` on Metal. Mirrors the SYCL
+    /// [`sycl_kernel::swiglu`] contract: `gate`/`up` must already be
+    /// matching-shape; we make both contiguous here (matching the
+    /// CUDA/ROCm path) so the kernel's flat `tid -> i` index lines up.
+    pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        if gate.shape() != up.shape() {
+            candle_core::bail!("swiglu: gate and up must have the same shape");
+        }
+        let dtype = gate.dtype();
+        let (kernel_name, dtype_size) = dtype_kernel(dtype).ok_or_else(|| {
+            candle_core::Error::Msg(format!("swiglu: unsupported dtype {dtype:?} on Metal"))
+        })?;
+
+        let n = gate.elem_count();
+        // Flat kernel indexes a contiguous buffer; broadcasting / narrow'd
+        // views are compacted first, matching the CUDA/ROCm/SYCL branches.
+        let gate = gate.contiguous()?;
+        let up = up.contiguous()?;
+
+        let (gate_s, gate_l) = gate.storage_and_layout();
+        let (up_s, up_l) = up.storage_and_layout();
+        let gate_storage = match &*gate_s {
+            Storage::Metal(s) => s,
+            _ => {
+                candle_core::bail!("swiglu: gate must be a metal tensor");
+            },
+        };
+        let up_storage = match &*up_s {
+            Storage::Metal(s) => s,
+            _ => {
+                candle_core::bail!("swiglu: up must be a metal tensor");
+            },
+        };
+
+        let device = gate_storage.device().clone();
+        let pipeline = get_pipeline(&device, kernel_name)?;
+        let (grid, tgp) = dispatch_dims(n, &pipeline);
+
+        let dst = device.new_buffer(n, dtype, "crane_swiglu.out")?;
+        // Scope the encoder so its borrow of `device` ends before we move
+        // `device` into `MetalStorage::new` below. Encoded work is committed
+        // when `encoder`/`CommandsGuard` drops (held by `Commands` internally),
+        // so the buffer-bound command buffer runs after this scope closes —
+        // which is the right time relative to the `dst` `Arc<Buffer>` we're
+        // handing back into a `Tensor`.
+        {
+            // One command encoder for the whole dispatch. The
+            // `CommandsGuard` returned by `command_encoder()` is a shared
+            // encoder guarded by a `Mutex` inside `Commands`, so multiple
+            // threads encoding in parallel simply queue up against the same
+            // in-flight command buffer — that's exactly what every other
+            // candle Metal backend op does. We unwrap the inner
+            // `ComputeCommandEncoder` once via `.as_ref()` because only the
+            // guard exposes `set_compute_pipeline_state` / `set_label`; the
+            // buffer-binding and dispatch methods all live on
+            // `ComputeCommandEncoder` itself.
+            let encoder_guard = device.command_encoder()?;
+            let encoder: &ComputeCommandEncoder = encoder_guard.as_ref();
+            encoder.set_compute_pipeline_state(&pipeline);
+            // Device buffer bindings are byte offsets, but Metal re-validates
+            // the underlying CPU-readable pointer — we don't read it, so
+            // passing `None` for the buffer arg is *not* correct here. The
+            // buffer base is bound; the kernel multiplies `tid` itself.
+            encoder.set_input_buffer(
+                0,
+                Some(gate_storage.buffer()),
+                gate_l.start_offset() * dtype_size,
+            );
+            encoder.set_input_buffer(
+                1,
+                Some(up_storage.buffer()),
+                up_l.start_offset() * dtype_size,
+            );
+            // Output buffer is registered via the dedicated
+            // `set_output_buffer` path so candle-metal-kernels'
+            // hazard-tracking fence database marks the page as written —
+            // required under HazardTrackingModeUntracked.
+            encoder.set_output_buffer(2, Some(&dst), 0);
+            // Scalar `n` packed into the kernel's `constant uint &n` slot.
+            let n_u32 = u32::try_from(n).map_err(|_| {
+                candle_core::Error::Msg(format!(
+                    "swiglu: {n} elements exceeds u32::MAX for the Metal kernel"
+                ))
+            })?;
+            encoder.set_bytes(3, &n_u32);
+            encoder.dispatch_thread_groups(grid, tgp);
+        }
+
+        let storage = Storage::Metal(MetalStorage::new(dst, device, n, dtype));
+        Ok(Tensor::from_storage(
+            storage,
+            gate_l.shape().clone(),
+            BackpropOp::none(),
+            false,
+        ))
+    }
+}
 
 /// Fused `SwiGLU`: `silu(gate) * up`.
 struct SwigluOp;
@@ -190,19 +520,28 @@ impl CustomOp2 for SwigluOp {
 /// `gate` and `up` must have the same shape. On CPU, `cpu_fwd` walks each
 /// input's own strides via `binary_map`, so non-contiguous views (e.g. a
 /// `narrow` of a shared `gate_up` tensor) are passed through as-is. On
-/// CUDA/ROCm the kernel indexes flat buffers, so both inputs are made
+/// CUDA/ROCm/Metal the kernel indexes flat buffers, so both inputs are made
 /// contiguous first.
 ///
 /// # Errors
 ///
 /// Returns an error if `gate`/`up` have a dtype other than `BF16`/`F16`/
-/// `F32`/`F64` (`cpu_fwd`), or on CUDA/ROCm other than `BF16`/`F16`/`F32`,
-/// or if the shapes don't match.
+/// `F32`/`F64` (`cpu_fwd`), or on CUDA/ROCm/Metal other than `BF16`/`F16`/
+/// `F32`, or if the shapes don't match.
 pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     if gate.shape() != up.shape() {
         candle_core::bail!("swiglu: gate and up must have the same shape");
     }
-    if gate.device().is_cpu() {
+    let device = gate.device();
+    #[cfg(feature = "sycl")]
+    if device.is_sycl() {
+        return sycl_kernel::swiglu(gate, up);
+    }
+    #[cfg(feature = "metal")]
+    if device.is_metal() {
+        return metal_kernel::swiglu(gate, up);
+    }
+    if device.is_cpu() {
         return gate.apply_op2_no_bwd(up, &SwigluOp);
     }
     let gate = gate.contiguous()?;
@@ -210,11 +549,24 @@ pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     gate.apply_op2_no_bwd(&up, &SwigluOp)
 }
 
+/// `silu(gate) * up` via candle's own ops. Kept around as the CPU-side
+/// reference the kernel-correctness test compares against, and nothing
+/// else: every device `swiglu()` runs on (CPU, CUDA, ROCm, SYCL, Metal)
+/// has its own dispatch path now (portable dispatch was the previous
+/// Metal and SYCL fallback, but both now have real fused Metal and SYCL
+/// kernels). Both `Silu` and broadcast multiply are native candle ops with
+/// real implementations on every backend, unlike `SwigluOp`'s hand-written
+/// `CustomOp2`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn portable_swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    candle_nn::ops::silu(gate)?.broadcast_mul(up)
+}
+
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
-    use super::swiglu;
+    use super::{portable_swiglu, swiglu};
 
     /// Naive reference: separate silu + mul.
     fn naive_swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
@@ -381,6 +733,23 @@ mod tests {
 
         let got = swiglu(&gate, &up)?.flatten_all()?.to_vec1::<f32>()?;
         let expected = naive_swiglu(&gate, &up)?.flatten_all()?.to_vec1::<f32>()?;
+
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-6, "got {g}, expected {e}");
+        }
+        Ok(())
+    }
+
+    // Verifies the Metal/SYCL fallback path (exercised directly here, since
+    // this CPU-only test suite can't reach it through `swiglu()`'s device
+    // check) matches the fused kernel / naive reference.
+    #[test]
+    fn portable_swiglu_matches_naive() -> Result<()> {
+        let gate = Tensor::new(&[0.0f32, 1.0, -1.0, 2.5, -0.5], &Device::Cpu)?;
+        let up = Tensor::new(&[1.0f32, 2.0, 0.5, 3.0, 1.5], &Device::Cpu)?;
+
+        let got = portable_swiglu(&gate, &up)?.to_vec1::<f32>()?;
+        let expected = naive_swiglu(&gate, &up)?.to_vec1::<f32>()?;
 
         for (g, e) in got.iter().zip(expected.iter()) {
             assert!((g - e).abs() < 1e-6, "got {g}, expected {e}");

@@ -56,6 +56,20 @@ candle-transformers-sycl = { workspace = true, optional = true }
 candle-core-rocm = { workspace = true, optional = true }
 candle-nn-rocm = { workspace = true, optional = true }
 candle-transformers-rocm = { workspace = true, optional = true }
+
+# Direct dep on candle's Metal helper crate, used by crane's own
+# `metal_kernel` modules in `src/ops/fused_ops/` to compile and dispatch
+# the `kernels/metal/fused_ops.metal` source through candle-core's
+# `MetalDevice`. Re-exported Metal-backend types (`MetalDevice`,
+# `MetalStorage`) aren't enough on their own — compile-time helpers like
+# `candle_metal_kernels::{Kernels, metal::Device, metal::ComputePipeline}`
+# aren't publicly re-exported through candle-core.
+candle-metal-kernels = { workspace = true, optional = true }
+
+# Construct `MTLSize` for `dispatch_threads`/`dispatch_thread_groups`
+# calls in the same `metal_kernel` modules. `candle_metal_kernels` doesn't
+# re-export it. Same `0.3.2` pin as candle-core itself.
+objc2-metal = { workspace = true, optional = true }
 clap = { version = "4.5.32", features = ["derive"] }
 hf-hub = { version = "1.0", features = ["blocking"] }
 minijinja = { version = "2.21", features = ["builtins", "preserve_order"] }
@@ -112,6 +126,8 @@ metal = [
     "candle-core-default/metal",
     "candle-nn-default/metal",
     "candle-transformers-default/metal",
+    "dep:candle-metal-kernels",
+    "dep:objc2-metal",
 ]
 cuda = [
     "candle-core-default/cuda",

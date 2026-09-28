@@ -26,6 +26,20 @@ candle-core-default = { package = "candle-core", version = "0.11" }
 candle-nn-default = { package = "candle-nn", version = "0.11" }
 candle-transformers-default = { package = "candle-transformers", version = "0.11" }
 
+# Direct dep on candle's Metal helper crate. Candle's `metal_backend` module
+# only re-exports `MetalDevice`/`MetalStorage`/`MetalError`; reaching the
+# `candle_metal_kernels::{Kernels, metal::Device, metal::ComputePipeline, ...}`
+# items needed to compile and dispatch a custom Metal kernel (see the `metal`
+# modules in `crane-core/src/ops/fused_ops/`) requires naming the crate
+# explicitly. Same `0.11` pin as candle-core itself, which pulls it in
+# transitively on its own `metal` feature.
+candle-metal-kernels = { version = "0.11.0" }
+
+# Same exact pin candle-core uses on its own `metal` feature. Needed to
+# construct `MTLSize` for `dispatch_threads`/`dispatch_thread_groups` —
+# `candle_metal_kernels` doesn't re-export it.
+objc2-metal = { version = "0.3.2" }
+
 # Intel oneAPI/SYCL backend fork (adds a `sycl` candle feature). Remove once
 # SYCL support merges into candle main.
 candle-core-sycl = { package = "candle-core", git = "https://github.com/Hahihula/candle", branch = "sycle-support" }
