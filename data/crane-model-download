@@ -111,6 +111,18 @@ MODELS = {
         "default_quant": "UD-Q4_K_M",
         "description": "Qwen 3.8 27B, same arch as Qwen 3.5 scaled up, GGUF quant (Apache-2.0)",
     },
+    "ternary-bonsai-2-27b-gguf": {
+        "repo_id": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+        "dirname": "Ternary-Bonsai-2-27B-gguf",
+        "kind": "llm",
+        "quant_template": "Ternary-Bonsai-2-27B-{quant}.gguf",
+        # This repo only ships Prism's native ternary packings (PTQ1_0, PQ2_0)
+        # plus an F16 reference.
+        # PTQ1_0 is the smaller of the two (5.95GB vs 7.21GB) and the one used
+        # in the project README's own example.
+        "default_quant": "PTQ1_0",
+        "description": "Bonsai 2 27B, Qwen3.8-27B hybrid-attention backbone natively quantized to ternary GGUF (PTQ1_0/PQ2_0, ~5.95-7.21GB) (Apache-2.0)",
+    },
     "gemma-4-e2b-it-gguf": {
         "repo_id": "unsloth/gemma-4-E2B-it-GGUF",
         "dirname": "gemma-4-E2B-it-GGUF",
