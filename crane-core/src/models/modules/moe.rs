@@ -1388,6 +1388,20 @@ struct MoeMatmulCtx<'a> {
 /// treat every active expert as equal-sized work regardless of how many
 /// tokens it actually received, leaving some threads with far more real
 /// work than others under skewed routing while the rest sat idle.
+///
+/// The flat index decomposes quad-major (`quad_idx = flat_idx /
+/// total_pairs`, `pair_idx = flat_idx % total_pairs`), not pair-major:
+/// consecutive iterations within one column-quad walk every routed pair
+/// before moving to the next 4 columns. When several tokens route to the
+/// same expert, those pairs' iterations land back-to-back and reuse the
+/// same 4 already-resident weight columns (`w0`-`w3` below) instead of
+/// each re-touching the expert's full `out_dim` column range -- the
+/// working set for one quad is a handful of KB, small enough to stay in
+/// L1 across those pairs, versus the whole projection's weights per pair.
+/// Decode (one token per expert) has no pairs to reuse across; the
+/// quad-major order neither helps nor hurts there -- the per-quad reset
+/// fires more often relative to work done, but each reset is a cheap
+/// forward-scan restart.
 fn dispatch_moe_quads<T: GgmlType>(
     ctx: &MoeMatmulCtx<'_>,
     lhs_b: &[T::VecDotType],
@@ -1417,29 +1431,46 @@ fn dispatch_moe_quads<T: GgmlType>(
         let dst_ptr = dst_ptr as *mut f32;
 
         // Find the active-expert segment containing this thread's first
-        // pair once via binary search; subsequent iterations only ever
-        // advance forward through `pair_prefix` (checked below), since
-        // `pair_idx` increases monotonically within one thread's range.
-        // `start_pair < total_pairs` always holds here (`start <
-        // total_items` was checked above), so `Ok(i)` can only land on one
-        // of the first `active_experts.len()` prefix entries, never the
-        // final (`total_pairs`) one.
-        let start_pair = start / quads_per_expert;
+        // pair once via binary search. Within one column-quad, `pair_idx`
+        // increases monotonically, so `active_idx` only ever advances
+        // forward through `pair_prefix` (checked below); at a quad
+        // boundary `pair_idx` wraps back to `0` (`flat_idx` just crossed a
+        // multiple of `total_pairs`), so `active_idx` resets to the first
+        // active expert instead. `start_pair < total_pairs` always holds
+        // here (`start < total_items` was checked above), so `Ok(i)` can
+        // only land on one of the first `active_experts.len()` prefix
+        // entries, never the final (`total_pairs`) one.
+        let start_pair = start % total_pairs;
         let mut active_idx = match pair_prefix.binary_search(&start_pair) {
             Ok(i) => i,
             Err(i) => i - 1,
         };
+        debug_assert!(active_idx < ctx.active_experts.len());
         let mut expert_idx = ctx.active_experts[active_idx];
         let mut expert_rhs: &[T] = as_quantized_slice(
             &ctx.weight_data
                 [expert_idx * ctx.bytes_per_expert..(expert_idx + 1) * ctx.bytes_per_expert],
         );
+        let mut cur_quad = start / total_pairs;
 
         for flat_idx in start..end {
-            let pair_idx = flat_idx / quads_per_expert;
-            let quad_idx = flat_idx % quads_per_expert;
+            let quad_idx = flat_idx / total_pairs;
+            let pair_idx = flat_idx % total_pairs;
             let col = quad_idx * 4;
 
+            if quad_idx != cur_quad {
+                // Crossed into a new column-quad: `pair_idx` just wrapped
+                // to `0`, so restart the forward scan from the first
+                // active expert (`pair_prefix[0] == 0` always, by
+                // construction in `MoeRouting::compute`).
+                active_idx = 0;
+                expert_idx = ctx.active_experts[0];
+                expert_rhs = as_quantized_slice(
+                    &ctx.weight_data[expert_idx * ctx.bytes_per_expert
+                        ..(expert_idx + 1) * ctx.bytes_per_expert],
+                );
+                cur_quad = quad_idx;
+            }
             while pair_idx >= pair_prefix[active_idx + 1] {
                 active_idx += 1;
                 expert_idx = ctx.active_experts[active_idx];
@@ -1467,10 +1498,13 @@ fn dispatch_moe_quads<T: GgmlType>(
 
             let out_offset = (t * ctx.topk + s) * ctx.out_dim + col;
             // SAFETY: each (t, s, col) triple is written by exactly one
-            // thread. (t, s) is routed to exactly one expert (this loop's
-            // `expert_idx`), and `col` falls in this thread's
-            // exclusively-owned `flat_idx` range, so no other thread's
-            // iteration ever targets this `out_offset`.
+            // thread. `flat_idx -> (pair_idx, quad_idx)` is a bijection
+            // onto `[0, total_pairs) x [0, quads_per_expert)`; `pair_idx`
+            // determines `(t, s)` via the expert routing and `quad_idx`
+            // determines `col`, so distinct `flat_idx` values never
+            // produce the same `out_offset`. Threads own disjoint
+            // `flat_idx` ranges, so no other thread's iteration ever
+            // targets this `out_offset`.
             unsafe {
                 let base = dst_ptr.add(out_offset);
                 *base = d0;
@@ -4477,6 +4511,55 @@ mod tests {
             assert!(
                 (g - e).abs() < 1e-5,
                 "call 2: got {got2_vals:?}, expected {expected2:?}"
+            );
+        }
+    }
+
+    // Exercises `dispatch_moe_quads`'s quad-major column ordering: with 32
+    // tokens and topk=4 spread across 8 experts, each expert gets several
+    // routed pairs, so within a column-quad consecutive iterations reuse
+    // the same 4 weight columns across those pairs. Correctness must hold
+    // regardless of traversal order, so this compares against the same
+    // independent reference as every other test.
+    #[test]
+    fn test_cpu_indexed_moe_forward_many_tokens_per_expert() {
+        let device = &Device::Cpu;
+        let (num_experts, out_dim, in_dim) = (8usize, 64usize, 32usize);
+        let (tokens, topk) = (32usize, 4usize);
+
+        let packed = make_packed_experts(num_experts, out_dim, in_dim, GgmlDType::F32, device);
+
+        let xs_data: Vec<f32> = (0..tokens * in_dim)
+            .map(|i| ((i as f32) * 0.013).sin())
+            .collect();
+        let xs = Tensor::from_vec(xs_data.clone(), (tokens, 1, in_dim), device).expect("xs");
+
+        let topk_ids_data: Vec<u32> = (0..tokens)
+            .flat_map(|t| (0..topk).map(move |s| ((t * 3 + s * 7) % num_experts) as u32))
+            .collect();
+        let topk_ids =
+            Tensor::from_vec(topk_ids_data.clone(), (tokens, topk), device).expect("topk_ids");
+
+        let routing = make_routing(&topk_ids, num_experts);
+        let got = cpu_indexed_moe_forward(&packed, &xs, &routing).expect("cpu_indexed_moe_forward");
+        assert_eq!(got.dims(), &[tokens, topk, out_dim]);
+        let got_vals = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        let expected = reference_moe_forward(
+            &packed,
+            &xs_data,
+            &topk_ids_data,
+            tokens,
+            1,
+            topk,
+            in_dim,
+            out_dim,
+            device,
+        );
+        for (i, (g, e)) in got_vals.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-5,
+                "mismatch at index {i}: got {g}, expected {e}"
             );
         }
     }
