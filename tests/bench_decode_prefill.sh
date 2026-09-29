@@ -34,11 +34,14 @@ PREFILL_SOURCES=(
 )
 
 # Target prompt sizes (in repeated filler words, not exact tokens) for the
-# `sweep` mode. Chosen to straddle CRANE_MOE_OFFLOAD_MIN_BATCH's default of
-# 32 tokens so a paired run with the threshold forced above vs. below each
-# size shows the real crossover instead of guessing from a single data
-# point.
-SWEEP_WORD_COUNTS=(8 16 32 64 128)
+# `sweep` mode. The >=32 sizes straddle CRANE_MOE_OFFLOAD_MIN_BATCH's default
+# of 32 tokens so a paired run with the threshold forced above vs. below each
+# size shows the real crossover instead of guessing from a single data point.
+# The <32 sizes stay on the CPU-batched dispatch path (cpu_batched_forward /
+# dispatch_moe_quads) at every default threshold, and are fine-grained so a
+# paired run across two server builds (same threshold, same everything else)
+# isolates a CPU dispatch-order change's effect from request-size noise.
+SWEEP_WORD_COUNTS=(4 8 12 16 20 24 28 32 64 128)
 
 for dep in curl jq bc; do
     command -v "$dep" >/dev/null 2>&1 || {
@@ -129,11 +132,18 @@ run_prefill_bench() {
 
 run_sweep_bench() {
     echo "=== MoE offload threshold sweep ==="
-    echo "Fires one small prefill request per target size below. Start the"
-    echo "server once with CRANE_MOE_OFFLOAD_MIN_BATCH forced below every"
-    echo "size and once forced above every size (CRANE_PROF=1 CRANE_PROF_EVERY=1),"
-    echo "then compare tokens=/prefill_tok_s for matching sizes across the"
-    echo "two server logs."
+    echo "Fires one small prefill request per target size below."
+    echo "Offload-threshold crossover: start the server once with"
+    echo "CRANE_MOE_OFFLOAD_MIN_BATCH forced below every size and once forced"
+    echo "above every size (CRANE_PROF=1 CRANE_PROF_EVERY=1), then compare"
+    echo "tokens=/prefill_tok_s for matching sizes across the two server logs."
+    echo "CPU dispatch-order comparison (e.g. before/after a"
+    echo "dispatch_moe_quads change): leave CRANE_MOE_OFFLOAD_MIN_BATCH at"
+    echo "its default (32) on both builds, run this sweep against each build"
+    echo "in turn with CRANE_PROF=1 CRANE_PROF_EVERY=1, then diff the 'moe:'"
+    echo "line's expert/moe-sum values for the <32-word sizes across the two"
+    echo "server logs -- those sizes always take the CPU-batched path"
+    echo "regardless of build."
 
     local count payload response t0 t1 elapsed
     for count in "${SWEEP_WORD_COUNTS[@]}"; do
