@@ -4,3 +4,5 @@
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(all(feature = "rocm", not(feature = "cuda")))]
+pub mod rocm;

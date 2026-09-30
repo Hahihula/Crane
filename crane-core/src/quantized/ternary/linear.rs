@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor, bail};
 
+use crate::utils::DeviceExt;
+
 use super::codec::{TernaryEncoding, dot_row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +27,7 @@ pub struct GdnPermutation {
 pub struct TernaryWeight {
     pub(crate) encoding: TernaryEncoding,
     pub(crate) packed_cpu: Arc<Vec<u8>>,
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(dead_code))]
     pub(crate) packed_device: Option<Tensor>,
     device: Device,
     pub(crate) rows: usize,
@@ -57,7 +59,7 @@ impl TernaryWeight {
         // Keep a single host copy on CPU. CUDA needs its own device allocation, but
         // cloning multi-gigabyte packed weights into a second CPU tensor would double
         // the model's resident memory for no benefit.
-        let packed_device = if device.is_cuda() {
+        let packed_device = if device.is_cuda() || device.is_rocm() {
             Some(Tensor::from_vec(packed.clone(), (expected,), device)?)
         } else {
             None
@@ -133,7 +135,7 @@ impl TernaryWeight {
 pub struct TernaryLinear {
     weight: Arc<TernaryWeight>,
     signs: Arc<Vec<f32>>,
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(dead_code))]
     signs_device: Tensor,
     block_size: usize,
     mode: HadamardMode,
@@ -226,8 +228,25 @@ impl TernaryLinear {
                 self.gdn_permutation,
             );
         }
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        if xs.device().is_rocm() {
+            let packed_device = self.weight.packed_device.as_ref().ok_or_else(|| {
+                candle_core::Error::Msg("ternary ROCm weight has no device allocation".into())
+            })?;
+            return crate::ops::quant_ternary::rocm::linear_f32(
+                &xs,
+                packed_device,
+                self.weight.encoding,
+                self.weight.rows,
+                self.weight.cols,
+                &self.signs_device,
+                self.block_size,
+                self.mode,
+                self.gdn_permutation,
+            );
+        }
         if !xs.device().is_cpu() {
-            bail!("TernaryLinear currently supports CPU and CUDA")
+            bail!("TernaryLinear currently supports CPU, CUDA, and ROCm")
         }
         let rows = xs.elem_count() / last;
         let input = xs.flatten_all()?.to_vec1::<f32>()?;
