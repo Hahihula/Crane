@@ -228,8 +228,25 @@ impl TernaryLinear {
                 self.gdn_permutation,
             );
         }
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        if xs.device().is_rocm() {
+            let packed_device = self.weight.packed_device.as_ref().ok_or_else(|| {
+                candle_core::Error::Msg("ternary ROCm weight has no device allocation".into())
+            })?;
+            return crate::ops::quant_ternary::rocm::linear_f32(
+                &xs,
+                packed_device,
+                self.weight.encoding,
+                self.weight.rows,
+                self.weight.cols,
+                &self.signs_device,
+                self.block_size,
+                self.mode,
+                self.gdn_permutation,
+            );
+        }
         if !xs.device().is_cpu() {
-            bail!("TernaryLinear currently supports CPU and CUDA")
+            bail!("TernaryLinear currently supports CPU, CUDA, and ROCm")
         }
         let rows = xs.elem_count() / last;
         let input = xs.flatten_all()?.to_vec1::<f32>()?;
