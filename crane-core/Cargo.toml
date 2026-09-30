@@ -112,6 +112,10 @@ candle-core-default = { workspace = true, optional = true, features = ["accelera
 candle-metal-kernels = { version = "0.11", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 
+# Mach VM statistics for `device::available_host_memory` on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 candle-core-default = { workspace = true, optional = true }
 

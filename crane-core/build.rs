@@ -77,7 +77,9 @@ fn main() {
         let sources = [
             "kernels/sycl/gdn.cpp",
             "kernels/sycl/fused_ops.cpp",
-            "kernels/sycl/quant_iq4.cpp",
+            "kernels/sycl/quant_iq.cpp",
+            "kernels/sycl/hyper_connection.cpp",
+            "kernels/sycl/qsa_mask.cpp",
         ];
         let lib = out_dir.join("libcrane_gdn_sycl.so");
 

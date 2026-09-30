@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 
-//! Launchers for `kernels/sycl/quant_iq4.cpp`.
+//! Launchers for `kernels/sycl/quant_iq.cpp`.
 //!
 //! Unlike the CUDA path ([`super::cuda`]), there is no int8-activation fast
 //! path (no portable `dp4a` equivalent across Intel GPU generations) — both
 //! entry points decode weights on the fly and accumulate a plain float dot
-//! product, mirroring the CUDA IQ4_NL kernel's simpler design rather than
-//! IQ4_XS's int8 one. Only F32/F16 outputs are supported, matching the rest
-//! of the SYCL fused-op surface (`ops/fused_ops/sycl_impl.rs`); a BF16
-//! request falls back to [`crate::quantized::iquant::IQuantLinear`]'s generic
-//! CPU dequantize path.
+//! product. Every [`IQuantType`] has a SYCL kernel, including the lower-bit
+//! types that CUDA/Metal still re-quantize. Only F32/F16 outputs are
+//! supported, matching the rest of the SYCL fused-op surface
+//! (`ops/fused_ops/sycl_impl.rs`); a BF16 request falls back to
+//! [`crate::quantized::iquant::IQuantLinear`]'s generic CPU dequantize path.
 
 use std::ffi::c_void;
 
@@ -20,27 +20,45 @@ use crate::quantized::iquant::IQuantType;
 
 // libcrane_gdn_sycl.so — linked by build.rs when `--features sycl`.
 unsafe extern "C" {
-    fn crane_iq4_matvec_sycl(
+    fn crane_iq_matvec_sycl(
         queue: *mut c_void,
-        is_xs: i32,
+        ty: i32,
         dtype: i32,
         packed: *const c_void,
+        expert_stride: usize,
+        ids: *const c_void,
+        x_div: i32,
         input: *const c_void,
         output: *mut c_void,
-        input_rows: i32,
-        output_rows: i32,
+        pairs: i32,
+        out_rows: i32,
         cols: i32,
     ) -> i32;
 
-    fn crane_iq4_dequant_sycl(
+    fn crane_iq_dequant_sycl(
         queue: *mut c_void,
-        is_xs: i32,
+        ty: i32,
         dtype: i32,
         packed: *const c_void,
+        expert_stride: usize,
+        ids: *const c_void,
+        n_mats: i32,
         output: *mut c_void,
         n_rows: i32,
         cols: i32,
     ) -> i32;
+}
+
+/// The kernels' type tag (`enum Ty` in `quant_iq.cpp`).
+fn type_tag(ty: IQuantType) -> i32 {
+    match ty {
+        IQuantType::Iq4Nl => 0,
+        IQuantType::Iq4Xs => 1,
+        IQuantType::Iq2S => 2,
+        IQuantType::Iq3Xxs => 3,
+        IQuantType::Iq3S => 4,
+        IQuantType::Q2_0 => 5,
+    }
 }
 
 fn dtype_tag(dtype: DType) -> Result<i32> {
@@ -58,6 +76,10 @@ fn byte_ptr(storage: &Storage, byte_offset: usize, name: &str) -> Result<*const 
         },
         _ => candle_core::bail!("i-quant SYCL kernel: {name} must be a sycl tensor"),
     }
+}
+
+fn to_i32(n: usize, what: &str) -> Result<i32> {
+    i32::try_from(n).map_err(|_| candle_core::Error::Msg(format!("{what} {n} exceeds i32")))
 }
 
 /// `input` (`[rows, cols]`, SYCL, any float dtype) times the transposed
@@ -79,13 +101,96 @@ pub fn matvec(
     cols: usize,
     out_dtype: DType,
 ) -> Result<Tensor> {
+    let rows = input.elem_count() / cols;
+    let out = launch_matvec(
+        input,
+        packed,
+        ty,
+        None,
+        1,
+        rows,
+        output_rows,
+        cols,
+        out_dtype,
+    )?;
+    let mut dims = input.dims().to_vec();
+    *dims.last_mut().unwrap() = output_rows;
+    out.reshape(dims)
+}
+
+/// `MoE` matmul by expert id: for each of the `ids.len()` pairs `p`, row `p`
+/// of the result is expert `ids[p]`'s `[output_rows, cols]` matrix (from the
+/// packed `[experts, output_rows, cols]` tensor) times activation row
+/// `p / x_div` of `input` (`[_, cols]`). Returns `[ids.len(), output_rows]`.
+///
+/// `ids` is `U32` on the same device and never read on the host.
+///
+/// # Errors
+///
+/// Returns an error if the tensors are not on a SYCL device, `ids` is not
+/// `U32`, `out_dtype` isn't F32/F16, or the kernel launch fails.
+#[allow(clippy::too_many_arguments)]
+pub fn matvec_indexed(
+    input: &Tensor,
+    packed: &Tensor,
+    ty: IQuantType,
+    ids: &Tensor,
+    x_div: usize,
+    output_rows: usize,
+    cols: usize,
+    out_dtype: DType,
+) -> Result<Tensor> {
+    if ids.dtype() != DType::U32 {
+        candle_core::bail!("expert ids must be U32, got {:?}", ids.dtype())
+    }
+    let ids = ids.flatten_all()?.contiguous()?;
+    let pairs = ids.elem_count();
+    if pairs >= GEMM_MIN_PAIRS {
+        return super::indexed_via_gemm(input, &ids, x_div, output_rows, cols, out_dtype, |e| {
+            dequantize_experts(packed, ty, e, output_rows, cols, DType::F16)
+        });
+    }
+    launch_matvec(
+        input,
+        packed,
+        ty,
+        Some(&ids),
+        x_div,
+        pairs,
+        output_rows,
+        cols,
+        out_dtype,
+    )
+}
+
+/// Pair count from which [`matvec_indexed`] switches from the by-id matvec
+/// (every pair decodes its expert on its own, ids stay on the device) to
+/// [`super::indexed_via_gemm`] (one host sync for the ids, then each routed expert
+/// is decoded once and multiplied on the XMX engines by oneMKL).
+///
+/// The GEMM path costs roughly a fixed ~9 ms per projection once most
+/// experts are routed (decoding them dominates) plus ~3 ms per 1000 tokens;
+/// the matvec grows linearly from ~45 us per token. On an Arc Pro B70 with
+/// Qwen3.8-Flash-Next shapes (256 experts, top-10) they cross at ~200-250
+/// tokens, i.e. ~2k pairs.
+const GEMM_MIN_PAIRS: usize = 2048;
+#[allow(clippy::too_many_arguments)]
+fn launch_matvec(
+    input: &Tensor,
+    packed: &Tensor,
+    ty: IQuantType,
+    ids: Option<&Tensor>,
+    x_div: usize,
+    pairs: usize,
+    output_rows: usize,
+    cols: usize,
+    out_dtype: DType,
+) -> Result<Tensor> {
     let dev = input.device().as_sycl_device()?.clone();
     let queue = dev.queue().native_ptr();
     let dtype = dtype_tag(out_dtype)?;
-    let is_xs = i32::from(matches!(ty, IQuantType::Iq4Xs));
-
     let input = input.to_dtype(DType::F32)?.contiguous()?;
-    let rows = input.elem_count() / cols;
+    let expert_stride = output_rows * (cols / ty.block_size()) * ty.block_bytes();
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_ptr = byte_ptr(
@@ -99,34 +204,45 @@ pub fn matvec(
         packed_layout.start_offset(),
         "matvec weight",
     )?;
+    let ids_storage = ids.map(Tensor::storage_and_layout);
+    let ids_ptr = match &ids_storage {
+        Some((storage, layout)) => byte_ptr(
+            storage,
+            layout.start_offset() * DType::U32.size_in_bytes(),
+            "expert ids",
+        )?,
+        None => std::ptr::null(),
+    };
 
-    let out_el = rows * output_rows;
+    let out_el = pairs * output_rows;
     let out_buf = dev.alloc_bytes(out_el * out_dtype.size_in_bytes())?;
 
     let status = unsafe {
-        crane_iq4_matvec_sycl(
+        crane_iq_matvec_sycl(
             queue,
-            is_xs,
+            type_tag(ty),
             dtype,
             packed_ptr,
+            expert_stride,
+            ids_ptr,
+            to_i32(x_div.max(1), "x_div")?,
             input_ptr,
             out_buf.as_mut_ptr(),
-            rows as i32,
-            output_rows as i32,
-            cols as i32,
+            to_i32(pairs, "matvec rows")?,
+            to_i32(output_rows, "matvec output rows")?,
+            to_i32(cols, "matvec cols")?,
         )
     };
     drop(input_storage);
     drop(packed_storage);
+    drop(ids_storage);
     if status != 0 {
-        candle_core::bail!("crane_iq4_matvec_sycl failed (status {status})");
+        candle_core::bail!("crane_iq_matvec_sycl failed (status {status})");
     }
 
-    let mut dims = input.dims().to_vec();
-    *dims.last_mut().unwrap() = output_rows;
     Ok(Tensor::from_storage(
         Storage::Sycl(SyclStorage::from_buffer(&dev, out_buf, out_dtype, out_el)),
-        dims,
+        (pairs, output_rows),
         BackpropOp::none(),
         false,
     ))
@@ -147,41 +263,97 @@ pub fn dequantize(
     cols: usize,
     dtype: DType,
 ) -> Result<Tensor> {
+    let row_bytes = cols / ty.block_size() * ty.block_bytes();
+    launch_dequant(
+        packed,
+        row_start * row_bytes,
+        ty,
+        None,
+        1,
+        n_rows,
+        cols,
+        dtype,
+    )?
+    .reshape((n_rows, cols))
+}
+
+/// Decode experts `ids` (`U32`, on the device) of a packed `[experts, rows,
+/// cols]` tensor into a dense `[ids.len(), rows, cols]` tensor of `dtype`,
+/// in one launch.
+///
+/// # Errors
+///
+/// Returns an error if the tensors are not on a SYCL device, `dtype` isn't
+/// F32/F16, or the kernel launch fails.
+pub fn dequantize_experts(
+    packed: &Tensor,
+    ty: IQuantType,
+    ids: &Tensor,
+    rows: usize,
+    cols: usize,
+    dtype: DType,
+) -> Result<Tensor> {
+    let n = ids.elem_count();
+    launch_dequant(packed, 0, ty, Some(ids), n, rows, cols, dtype)?.reshape((n, rows, cols))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_dequant(
+    packed: &Tensor,
+    byte_offset: usize,
+    ty: IQuantType,
+    ids: Option<&Tensor>,
+    n_mats: usize,
+    n_rows: usize,
+    cols: usize,
+    dtype: DType,
+) -> Result<Tensor> {
     let dev = packed.device().as_sycl_device()?.clone();
     let queue = dev.queue().native_ptr();
     let dtype_i = dtype_tag(dtype)?;
-    let is_xs = i32::from(matches!(ty, IQuantType::Iq4Xs));
+    let expert_stride = n_rows * (cols / ty.block_size()) * ty.block_bytes();
 
-    let row_bytes = cols / ty.block_size() * ty.block_bytes();
     let (packed_storage, packed_layout) = packed.storage_and_layout();
     let packed_ptr = byte_ptr(
         &packed_storage,
-        packed_layout.start_offset() + row_start * row_bytes,
+        packed_layout.start_offset() + byte_offset,
         "dequantize weight",
     )?;
+    let ids = ids.map(|t| t.flatten_all()?.contiguous()).transpose()?;
+    let ids_storage = ids.as_ref().map(Tensor::storage_and_layout);
+    let ids_ptr = match &ids_storage {
+        Some((storage, layout)) => byte_ptr(
+            storage,
+            layout.start_offset() * DType::U32.size_in_bytes(),
+            "expert ids",
+        )?,
+        None => std::ptr::null(),
+    };
 
-    let out_el = n_rows * cols;
+    let out_el = n_mats * n_rows * cols;
     let out_buf = dev.alloc_bytes(out_el * dtype.size_in_bytes())?;
-
     let status = unsafe {
-        crane_iq4_dequant_sycl(
+        crane_iq_dequant_sycl(
             queue,
-            is_xs,
+            type_tag(ty),
             dtype_i,
             packed_ptr,
+            expert_stride,
+            ids_ptr,
+            to_i32(n_mats, "dequantize matrices")?,
             out_buf.as_mut_ptr(),
-            n_rows as i32,
-            cols as i32,
+            to_i32(n_rows, "dequantize rows")?,
+            to_i32(cols, "dequantize cols")?,
         )
     };
     drop(packed_storage);
+    drop(ids_storage);
     if status != 0 {
-        candle_core::bail!("crane_iq4_dequant_sycl failed (status {status})");
+        candle_core::bail!("crane_iq_dequant_sycl failed (status {status})");
     }
-
     Ok(Tensor::from_storage(
         Storage::Sycl(SyclStorage::from_buffer(&dev, out_buf, dtype, out_el)),
-        (n_rows, cols),
+        out_el,
         BackpropOp::none(),
         false,
     ))

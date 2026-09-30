@@ -16,7 +16,10 @@
 
 pub mod fused_ops;
 pub mod gdn;
+pub mod hyper_connection;
 pub mod linear;
+#[cfg(feature = "metal")]
+pub mod metal_util;
 pub mod quant_iq;
 pub mod quant_ternary;
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]

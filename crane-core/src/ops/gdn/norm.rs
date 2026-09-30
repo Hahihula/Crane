@@ -1,8 +1,9 @@
-//! RMSNorm with a SiLU-gated output: `y = (x / rms(x)) * weight * silu(gate)`.
+//! RMSNorm with a gated output: `y = (x / rms(x)) * weight * act(gate)`.
 //!
-//! This is the output-side normalization used by every Gated Delta Net layer in
-//! Qwen 3.5 — the `z` projection (silu-gate) modulates the normalized
-//! recurrence output before it goes through `out_proj`.
+//! This is the output-side normalization used by every Gated Delta Net layer —
+//! the `z` projection gate modulates the normalized recurrence output before it
+//! goes through `out_proj`. Qwen 3.5 gates with silu, Qwen4-Exp with sigmoid
+//! (see [`GateActivation`]).
 //!
 //! Normalization goes through candle's fused `rms_norm`, which accumulates in
 //! f32 internally whatever the tensor dtype — so the f32 normalization the
@@ -13,35 +14,71 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-/// `RmsNorm(x) * silu(z)` with a learned per-channel weight (plain `weight`,
+/// Activation applied to the output gate of [`RmsNormGated`] (HF
+/// `output_gate_type`, falling back to `hidden_act`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateActivation {
+    /// `silu` / `swish`: Qwen 3.5 and its 3.6 / 3.8 dense successors.
+    Silu,
+    /// `sigmoid`: Qwen4-Exp.
+    Sigmoid,
+}
+
+impl GateActivation {
+    /// Parse the HF config spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for any activation other than silu/swish or sigmoid.
+    pub fn from_name(name: &str) -> Result<Self> {
+        match name {
+            "silu" | "swish" => Ok(Self::Silu),
+            "sigmoid" => Ok(Self::Sigmoid),
+            other => candle_core::bail!(
+                "unsupported GDN output gate activation {other:?} (expected silu, swish or sigmoid)"
+            ),
+        }
+    }
+
+    fn apply(self, gate: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Silu => candle_nn::ops::silu(gate),
+            Self::Sigmoid => candle_nn::ops::sigmoid(gate),
+        }
+    }
+}
+
+/// `RmsNorm(x) * act(z)` with a learned per-channel weight (plain `weight`,
 /// no unit offset — matches HF's `Qwen3_5RMSNormGated`).
 pub struct RmsNormGated {
     weight: Tensor,
     eps: f32,
+    activation: GateActivation,
 }
 
 impl RmsNormGated {
-    pub fn new(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+    pub fn new(size: usize, eps: f64, activation: GateActivation, vb: VarBuilder) -> Result<Self> {
         let weight = vb.get(size, "weight")?;
-        Ok(Self::from_weight(weight, eps))
+        Ok(Self::from_weight(weight, eps, activation))
     }
 
     /// Construct from an already-loaded weight (e.g. dequantized from GGUF).
     #[allow(clippy::cast_possible_truncation)]
-    pub fn from_weight(weight: Tensor, eps: f64) -> Self {
+    pub fn from_weight(weight: Tensor, eps: f64, activation: GateActivation) -> Self {
         Self {
             weight,
             eps: eps as f32,
+            activation,
         }
     }
 
     /// Forward pass. `x` and `gate` must share shape `[..., size]`.
     pub fn forward(&self, x: &Tensor, gate: &Tensor) -> Result<Tensor> {
-        // Norm before gate (HF order): normalize, scale by weight, then * silu(gate).
+        // Norm before gate (HF order): normalize, scale by weight, then * act(gate).
         let weight = self.weight.to_dtype(x.dtype())?;
         let normalized = candle_nn::ops::rms_norm(&x.contiguous()?, &weight, self.eps)?;
-        let silu_gate = candle_nn::ops::silu(&gate.to_dtype(x.dtype())?)?;
-        normalized.mul(&silu_gate)
+        let gate = self.activation.apply(&gate.to_dtype(x.dtype())?)?;
+        normalized.mul(&gate)
     }
 
     /// Length of the learned per-channel weight vector. Exposed so that

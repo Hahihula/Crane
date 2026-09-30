@@ -514,20 +514,21 @@ pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
     if x.device().is_metal() {
         return metal_kernel::snake(x, alpha);
     }
+    // Metal without crane's `metal` feature (candle still has its Metal
+    // backend on Apple Silicon): `SnakeOp` has no Metal implementation.
+    if x.device().is_metal() {
+        return portable_snake(x, alpha);
+    }
     let x = x.contiguous()?;
     let alpha = alpha.contiguous()?;
     x.apply_op2_no_bwd(&alpha, &SnakeOp)
 }
 
-/// `x + sin(alpha * x)^2 / alpha` via candle's own ops. Kept around as the
-/// CPU-side reference the kernel-correctness test compares against, and
-/// nothing else: every device `snake()` runs on (CPU, CUDA, ROCm, SYCL,
-/// Metal) has its own dispatch path now (the portable dispatch used to be
-/// the Metal and SYCL fallback, but both now have real fused Metal and SYCL
-/// kernels). `sin`/`powf`/broadcast are native candle ops with real
-/// implementations on every backend, unlike `SnakeOp`'s hand-written
-/// `CustomOp2`.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `x + sin(alpha * x)^2 / alpha` via candle's own ops: the reference the
+/// kernel-correctness tests compare against, and the Metal path of builds
+/// without crane's `metal` feature (whose fused kernel is not compiled in).
+/// `sin`/`powf`/broadcast are native candle ops with real implementations
+/// on every backend, unlike `SnakeOp`'s hand-written `CustomOp2`.
 fn portable_snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
     let sin_ax = x.broadcast_mul(alpha)?.sin()?;
     x.broadcast_add(&sin_ax.powf(2.0)?.broadcast_div(alpha)?)

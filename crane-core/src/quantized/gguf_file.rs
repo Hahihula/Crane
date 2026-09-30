@@ -5,7 +5,7 @@
 //! Used by every model that supports GGUF checkpoints (`hunyuan_dense`,
 //! `gemma4`, `qwen3`, `qwen3_5`, `minicpm5`, `minicpmo`).
 
-use candle_core::quantized::{QTensor, gguf_file};
+use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
 use candle_core::{DType, Device, Result};
 use candle_nn::RmsNorm;
 use std::collections::{HashMap, HashSet};
@@ -13,11 +13,8 @@ use std::io::{Read, Seek};
 use std::sync::Arc;
 
 use super::extended_gguf::{ExtendedGgufInfo, IQuantTensorInfo};
+use super::iquant::IQuantType;
 use super::ternary::{GdnPermutation, HadamardMode, TernaryLinear, TernaryWeight};
-// `Device::is_sycl` is inherent on the SYCL candle fork; this extension only
-// supplies it (as a constant `false`) for builds without that fork.
-#[cfg(not(feature = "sycl"))]
-use crate::utils::DeviceExt;
 
 /// Opens and memory-maps a GGUF file for zero-syscall tensor reads.
 ///
@@ -182,6 +179,31 @@ impl<R: Read + Seek> Gguf<R> {
         self.linear_on(name, &device)
     }
 
+    /// Like [`Self::linear`], but a float tensor (F32/F16/BF16) becomes a
+    /// dense layer in this reader's compute dtype. `QMatMul` would widen it to
+    /// F32 instead, doubling the memory of BF16 weights.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the named tensor is missing or malformed.
+    pub fn linear_compact(&mut self, name: &str) -> Result<crate::ops::linear::LinearLayer> {
+        // i-quant tensors carry a patched BF16 type in the header Candle sees.
+        let float = !self.iquant.contains_key(name)
+            && self.ct.tensor_infos.get(name).is_some_and(|info| {
+                matches!(
+                    info.ggml_dtype,
+                    GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16
+                )
+            });
+        if float {
+            let weight = self.dequant_tensor(name)?;
+            return Ok(crate::ops::linear::LinearLayer::Standard(
+                candle_nn::Linear::new(weight, None),
+            ));
+        }
+        self.linear(name)
+    }
+
     /// Load a quantized tensor onto `device` and wrap as a `LinearLayer` (`QMatMul`).
     ///
     /// Identical to [`Self::linear`] but places the weight on a caller-chosen
@@ -197,8 +219,8 @@ impl<R: Read + Seek> Gguf<R> {
         name: &str,
         device: &Device,
     ) -> Result<crate::ops::linear::LinearLayer> {
-        if native_iquant(device)
-            && let Some(info) = self.iquant.get(name)
+        if let Some(info) = self.iquant.get(name)
+            && native_iquant(device, info.ty)
             && info.shape.len() == 2
         {
             let (info, packed) = self.iquant_bytes(name)?.expect("i-quant tensor present");
@@ -214,6 +236,39 @@ impl<R: Read + Seek> Gguf<R> {
         let ws = self.load_qtensor(name, device)?;
         let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(ws))?;
         Ok(crate::ops::linear::LinearLayer::quantized(qmm))
+    }
+
+    /// Whether [`Self::iquant_experts`] would keep `name` packed on `device`.
+    /// Cheap: reads only the header.
+    #[must_use]
+    pub fn has_native_iquant_experts(&self, name: &str, device: &Device) -> bool {
+        self.iquant.get(name).is_some_and(|info| {
+            info.shape.len() == 3
+                && info.ty.has_native_experts_kernel(device)
+                && super::iquant::native_enabled()
+        })
+    }
+
+    /// A packed `[experts, rows, cols]` `MoE` tensor kept in its i-quant
+    /// encoding on `device`, or `None` when `name` is not an i-quant that has
+    /// a native kernel there (callers then load it as a regular `QTensor`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or uploading the tensor fails.
+    pub fn iquant_experts(
+        &mut self,
+        name: &str,
+        device: &Device,
+    ) -> Result<Option<super::iquant::IQuantExperts>> {
+        if !self.has_native_iquant_experts(name, device) {
+            return Ok(None);
+        }
+        let Some((info, packed)) = self.iquant_bytes(name)? else {
+            return Ok(None);
+        };
+        let shape = [info.shape[0], info.shape[1], info.shape[2]];
+        super::iquant::IQuantExperts::new(info.ty, packed, shape, device).map(Some)
     }
 
     fn ternary_linear(&mut self, name: &str) -> Result<TernaryLinear> {
@@ -416,36 +471,47 @@ impl<R: Read + Seek> Gguf<R> {
     }
 }
 
-/// Whether i-quant linear layers on `device` run through the native kernels.
-fn native_iquant(device: &Device) -> bool {
-    ((cfg!(feature = "cuda") && device.is_cuda())
-        || (cfg!(feature = "sycl") && device.is_sycl())
-        || (cfg!(feature = "metal") && device.is_metal()))
-        && super::iquant::native_enabled()
+/// Whether `ty` weights on `device` run through the native kernels.
+fn native_iquant(device: &Device, ty: IQuantType) -> bool {
+    ty.has_native_kernel(device) && super::iquant::native_enabled()
 }
 
 fn log_iquant(iquant: &HashMap<String, IQuantTensorInfo>, device: &Device) {
     if iquant.is_empty() {
         return;
     }
-    let mut types: Vec<_> = iquant.values().map(|t| t.ty.name()).collect();
-    types.sort_unstable();
-    types.dedup();
     let target =
         super::iquant::requant_target().map_or_else(|e| e.to_string(), |t| format!("{t:?}"));
-    if native_iquant(device) {
+    let type_names = |native: bool| {
+        let mut names: Vec<_> = iquant
+            .values()
+            .filter(|t| native_iquant(device, t.ty) == native)
+            .map(|t| t.ty.name())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names.join("/")
+    };
+    let (native, requant) = (type_names(true), type_names(false));
+    if !native.is_empty() {
+        // Packed experts stay packed only where by-id kernels exist.
+        let experts = if iquant
+            .values()
+            .any(|t| t.ty.has_native_experts_kernel(device))
+        {
+            "packed MoE experts run natively; embeddings are"
+        } else {
+            "embeddings and packed MoE experts are"
+        };
         eprintln!(
-            "[gguf] {} tensors in {}: linear layers run natively; embeddings and packed MoE \
-             experts are re-quantized to {target} (CRANE_IQ_REQUANT=<type> forces re-quantization)",
-            iquant.len(),
-            types.join("/"),
+            "[gguf] {native} linear layers run natively; {experts} re-quantized to {target} \
+             (CRANE_IQ_REQUANT=<type> forces re-quantization)"
         );
-    } else {
+    }
+    if !requant.is_empty() {
         eprintln!(
-            "[gguf] {} tensors in {} have no native kernel on this device; re-quantizing to \
-             {target} at load (CRANE_IQ_REQUANT to change)",
-            iquant.len(),
-            types.join("/"),
+            "[gguf] {requant} tensors have no native kernel on this device; re-quantizing to \
+             {target} at load (CRANE_IQ_REQUANT to change)"
         );
     }
 }
@@ -620,35 +686,12 @@ mod iquant_gguf_tests {
     use super::Gguf;
     use crate::quantized::extended_gguf::read_content_lenient;
     use crate::quantized::iquant::IQuantType;
+    use crate::quantized::test_util::write_gguf;
     use candle_core::quantized::GgmlDType;
     use candle_core::{DType, Device, Module, Tensor};
 
     /// Hand-write a GGUF (Candle's writer cannot emit i-quant types).
     /// Each tensor is `(name, shape outermost-first, ggml type id, bytes)`.
-    fn write_gguf(tensors: &[(&str, &[usize], u32, Vec<u8>)]) -> Vec<u8> {
-        let mut out = b"GGUF".to_vec();
-        out.extend(3u32.to_le_bytes());
-        out.extend((tensors.len() as u64).to_le_bytes());
-        out.extend(0u64.to_le_bytes());
-        let mut offset = 0u64;
-        for (name, shape, ty, data) in tensors {
-            out.extend((name.len() as u64).to_le_bytes());
-            out.extend(name.as_bytes());
-            out.extend((shape.len() as u32).to_le_bytes());
-            for &d in shape.iter().rev() {
-                out.extend((d as u64).to_le_bytes());
-            }
-            out.extend(ty.to_le_bytes());
-            out.extend(offset.to_le_bytes());
-            offset += (data.len() as u64).div_ceil(32) * 32;
-        }
-        for (_, _, _, data) in tensors {
-            out.resize(out.len().div_ceil(32) * 32, 0);
-            out.extend(data);
-        }
-        out
-    }
-
     /// `n` pseudo-random `IQ4_XS` blocks with a sane `f16` scale.
     fn iq4_xs_blocks(n: usize) -> Vec<u8> {
         let mut state = 0x2545_f491_u32;

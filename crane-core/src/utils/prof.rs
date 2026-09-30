@@ -52,7 +52,7 @@ macro_rules! prof_log {
 
 /// One measured region of the forward pass.
 ///
-/// The variants form five non-overlapping tiers: [`Span::Embed`]..=[`Span::Head`]
+/// The variants form five non-overlapping tiers: [`Span::Embed`]..=[`Span::Ple`]
 /// partition the whole pass, [`Span::GdnProj`]..=[`Span::GdnFinish`] partition
 /// [`Span::Gdn`], [`Span::GdnPrep`]..=[`Span::GdnPost`] partition
 /// [`Span::GdnRecur`], [`Span::MoeRouter`]..=[`Span::MoeMisc`] partition
@@ -87,6 +87,8 @@ pub enum Span {
     Mlp,
     Resid,
     Head,
+    /// Per-layer n-gram embedding (Qwen4-Exp): hash, host gather, gated conv.
+    Ple,
     // Tier 2 — inside `Gdn`.
     GdnProj,
     GdnConv,
@@ -156,13 +158,13 @@ pub enum Span {
     MoeCpuOutDev,
 }
 
-const NUM_SPANS: usize = 28;
-const TIER1: std::ops::Range<usize> = 0..7;
-const TIER2: std::ops::Range<usize> = 7..12;
-const TIER3: std::ops::Range<usize> = 12..15;
-const TIER2_MOE: std::ops::Range<usize> = 15..20;
-const TIER3_MOE: std::ops::Range<usize> = 20..25;
-const TIER3C_MOE: std::ops::Range<usize> = 25..28;
+const NUM_SPANS: usize = 29;
+const TIER1: std::ops::Range<usize> = 0..8;
+const TIER2: std::ops::Range<usize> = 8..13;
+const TIER3: std::ops::Range<usize> = 13..16;
+const TIER2_MOE: std::ops::Range<usize> = 16..21;
+const TIER3_MOE: std::ops::Range<usize> = 21..26;
+const TIER3C_MOE: std::ops::Range<usize> = 26..29;
 
 const NAMES: [&str; NUM_SPANS] = [
     "embed",
@@ -171,7 +173,8 @@ const NAMES: [&str; NUM_SPANS] = [
     "gdn",
     "mlp",
     "resid",
-    "head", //
+    "head",
+    "ple", //
     "proj",
     "conv",
     "qkv",

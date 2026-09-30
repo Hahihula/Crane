@@ -541,6 +541,11 @@ pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     if device.is_metal() {
         return metal_kernel::swiglu(gate, up);
     }
+    // Metal without crane's `metal` feature (candle still has its Metal
+    // backend on Apple Silicon): `SwigluOp` has no Metal implementation.
+    if device.is_metal() {
+        return portable_swiglu(gate, up);
+    }
     if device.is_cpu() {
         return gate.apply_op2_no_bwd(up, &SwigluOp);
     }
@@ -549,15 +554,12 @@ pub fn swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     gate.apply_op2_no_bwd(&up, &SwigluOp)
 }
 
-/// `silu(gate) * up` via candle's own ops. Kept around as the CPU-side
-/// reference the kernel-correctness test compares against, and nothing
-/// else: every device `swiglu()` runs on (CPU, CUDA, ROCm, SYCL, Metal)
-/// has its own dispatch path now (portable dispatch was the previous
-/// Metal and SYCL fallback, but both now have real fused Metal and SYCL
-/// kernels). Both `Silu` and broadcast multiply are native candle ops with
-/// real implementations on every backend, unlike `SwigluOp`'s hand-written
+/// `silu(gate) * up` via candle's own ops: the reference the
+/// kernel-correctness tests compare against, and the Metal path of builds
+/// without crane's `metal` feature (whose fused kernel is not compiled in).
+/// Both `Silu` and broadcast multiply are native candle ops with real
+/// implementations on every backend, unlike `SwigluOp`'s hand-written
 /// `CustomOp2`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn portable_swiglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     candle_nn::ops::silu(gate)?.broadcast_mul(up)
 }

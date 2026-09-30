@@ -50,6 +50,7 @@ use crate::models::modules::flash_attn::dispatch_flash_attn;
 use crate::models::modules::kv_cache;
 use crate::models::modules::moe::{MlpOrMoe, MoeConfig, SparseMoeBlock};
 use crate::models::modules::rotary::RotaryEmbedding;
+use crate::quantized::gguf_metadata::GgufMetadata;
 use crate::utils::DeviceExt;
 use crate::utils::prof::{self, Span};
 use ribo::utils::log;
@@ -871,29 +872,16 @@ struct GgufMoeMetadata {
 
 /// Reads `MoE` expert metadata from GGUF, if present.
 fn read_moe_metadata<R: Read + Seek>(gg: &Gguf<R>, arch: &str) -> GgufMoeMetadata {
-    let num_experts = gg
-        .metadata()
-        .get(&format!("{arch}.expert_count"))
-        .and_then(|v| v.to_u32().ok())
-        .map(|v| v as usize)
+    let md = GgufMetadata::new(gg.metadata());
+    let key = |k: &str| format!("{arch}.{k}");
+    let num_experts = md
+        .opt_usize(&key("expert_count"))
         // Some dense GGUF exports write an explicit `expert_count = 0`
         // rather than omitting the key; treat that the same as absent.
         .filter(|&n| n > 0);
-    let num_experts_per_tok = gg
-        .metadata()
-        .get(&format!("{arch}.expert_used_count"))
-        .and_then(|v| v.to_u32().ok())
-        .map(|v| v as usize);
-    let moe_intermediate_size = gg
-        .metadata()
-        .get(&format!("{arch}.expert_feed_forward_length"))
-        .and_then(|v| v.to_u32().ok())
-        .map(|v| v as usize);
-    let expert_shared_ffn_length = gg
-        .metadata()
-        .get(&format!("{arch}.expert_shared_feed_forward_length"))
-        .and_then(|v| v.to_u32().ok())
-        .map(|v| v as usize);
+    let num_experts_per_tok = md.opt_usize(&key("expert_used_count"));
+    let moe_intermediate_size = md.opt_usize(&key("expert_feed_forward_length"));
+    let expert_shared_ffn_length = md.opt_usize(&key("expert_shared_feed_forward_length"));
     // Qwen3 MoE has no shared experts, so an absent or zero shared-FFN
     // length means the top-K routing weights should be renormalized.
     let norm_topk_prob = num_experts
@@ -1078,46 +1066,24 @@ impl Qwen3Model {
             DType::F32
         };
         let mut gg = Gguf::new(ct, reader, device.clone(), dtype);
-        let md_get = |s: &str| match gg.metadata().get(s) {
-            None => candle_core::bail!("cannot find {s} in GGUF metadata"),
-            Some(v) => Ok(v.clone()),
-        };
-
-        let arch = gg
-            .metadata()
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok())
-            .cloned()
+        let md = GgufMetadata::new(gg.metadata());
+        let arch = md
+            .opt_string("general.architecture")
             .unwrap_or_else(|| "qwen3".to_string());
+        let key = |k: &str| format!("{arch}.{k}");
 
-        let num_attention_heads =
-            md_get(&format!("{arch}.attention.head_count"))?.to_u32()? as usize;
-        let num_kv_heads = md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
-        let head_dim = gg
-            .metadata()
-            .get(&format!("{arch}.attention.key_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(128) as usize;
-        let num_hidden_layers = md_get(&format!("{arch}.block_count"))?.to_u32()? as usize;
-        let hidden_size = md_get(&format!("{arch}.embedding_length"))?.to_u32()? as usize;
-        let intermediate_size = md_get(&format!("{arch}.feed_forward_length"))?.to_u32()? as usize;
-        let max_position_embeddings = gg
-            .metadata()
-            .get(&format!("{arch}.context_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(32768) as usize;
+        let num_attention_heads = md.usize(&key("attention.head_count"))?;
+        let num_kv_heads = md.usize(&key("attention.head_count_kv"))?;
+        let head_dim = md.opt_usize(&key("attention.key_length")).unwrap_or(128);
+        let num_hidden_layers = md.usize(&key("block_count"))?;
+        let hidden_size = md.usize(&key("embedding_length"))?;
+        let intermediate_size = md.usize(&key("feed_forward_length"))?;
+        let max_position_embeddings = md.opt_usize(&key("context_length")).unwrap_or(32768);
         let rms_norm_eps = f64::from(
-            gg.metadata()
-                .get(&format!("{arch}.attention.layer_norm_rms_epsilon"))
-                .and_then(|v| v.to_f32().ok())
+            md.opt_f32(&key("attention.layer_norm_rms_epsilon"))
                 .unwrap_or(1e-6),
         );
-        let rope_theta = f64::from(
-            gg.metadata()
-                .get(&format!("{arch}.rope.freq_base"))
-                .and_then(|v| v.to_f32().ok())
-                .unwrap_or(1_000_000.0),
-        );
+        let rope_theta = f64::from(md.opt_f32(&key("rope.freq_base")).unwrap_or(1_000_000.0));
 
         let moe_meta = read_moe_metadata(&gg, &arch);
 

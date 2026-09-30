@@ -19,6 +19,7 @@ use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::io::{Read, Seek};
 
+use crate::models::modules::moe::{MlpOrMoe, SparseMoeBlock};
 use crate::ops::linear::{LinearLayer, linear_layer};
 use crate::quantized::gguf_file::Gguf;
 
@@ -84,10 +85,7 @@ impl Module for Qwen35RmsNorm {
 
 use super::config::{LayerType, TextConfig};
 use super::kv_cache::KvCache;
-use crate::ops::gdn::{
-    GatedDeltaNet, GdnDims, GdnInputProjection, GdnInputProjectionKind, GdnLayerCache,
-    RmsNormGated, VHeadOrder,
-};
+use crate::ops::gdn::{GatedDeltaNet, GdnDims, GdnInputProjectionKind, GdnLayerCache};
 
 // ── MRoPE rotary embedding ─────────────────────────────────────────────
 
@@ -113,12 +111,32 @@ impl MRotaryEmbedding {
     ///
     /// Returns an error if building the cos/sin tables fails.
     pub fn new(cfg: &TextConfig, device: &Device) -> Result<Self> {
-        let rot_dim = cfg.rot_dim();
+        Self::from_params(
+            cfg.rot_dim(),
+            cfg.rope_theta(),
+            cfg.max_position_embeddings,
+            cfg.mrope_section(),
+            device,
+        )
+    }
+
+    /// Build the tables from raw rotary parameters, for configs other than
+    /// Qwen 3.5's that share its interleaved `MRoPE` (e.g. Qwen4-Exp).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if building the cos/sin tables fails.
+    pub fn from_params(
+        rot_dim: usize,
+        rope_theta: f64,
+        max_pos: usize,
+        mrope_section: &[usize],
+        device: &Device,
+    ) -> Result<Self> {
         // rope_theta is a positive frequency base (e.g. 10_000 or 10_000_000);
         // computing the RoPE table in f32 matches HF's own float32 rotary math.
         #[allow(clippy::cast_possible_truncation)]
-        let base = cfg.rope_theta() as f32;
-        let max_pos = cfg.max_position_embeddings;
+        let base = rope_theta as f32;
 
         // cos/sin tables have shape `[S, rot_dim/2]` — exactly the slice of the
         // head that receives rotary embeddings. `apply_mrope` rotates only the
@@ -148,12 +166,7 @@ impl MRotaryEmbedding {
         let cos_table = freqs.cos()?.contiguous()?;
         let sin_table = freqs.sin()?.contiguous()?;
 
-        let mrope_section_doubled: Vec<usize> = cfg
-            .rope_parameters
-            .mrope_section
-            .iter()
-            .map(|s| s * 2)
-            .collect();
+        let mrope_section_doubled: Vec<usize> = mrope_section.iter().map(|s| s * 2).collect();
 
         Ok(Self {
             cos_table,
@@ -331,14 +344,39 @@ pub struct RopeSlice<'a> {
 ///   gate applied to the attention output.
 /// - Per-head QK-norm is always present (`q_norm`, `k_norm` of size `head_dim`).
 /// - `RoPE` is MRoPE-interleaved applied only to the first `rot_dim` components.
-///   `CRANE_ATTN_EXPAND=1` forces the legacy GQA-expansion path at decode
-///   instead of the grouped matmul. The two are mathematically identical, so
-///   this exists to A/B them: same binary, same weights, one variable.
+///   `CRANE_ATTN_EXPAND=1` forces the legacy GQA-expansion path (decode and
+///   prefill) instead of the grouped matmul. The two are mathematically
+///   identical, so this exists to A/B them: same binary, same weights, one
+///   variable.
 fn legacy_attn_expand() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("CRANE_ATTN_EXPAND").is_ok_and(|v| !matches!(v.trim(), "" | "0"))
     })
+}
+
+/// Shape of a [`FullAttention`] layer, independent of which model config it
+/// comes from.
+#[derive(Debug, Clone, Copy)]
+pub struct AttentionDims {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub rms_norm_eps: f64,
+    /// `q_proj` also emits a per-head sigmoid gate on the attention output.
+    pub output_gate: bool,
+}
+
+impl From<&TextConfig> for AttentionDims {
+    fn from(cfg: &TextConfig) -> Self {
+        Self {
+            num_heads: cfg.num_attention_heads,
+            num_kv_heads: cfg.num_key_value_heads,
+            head_dim: cfg.head_dim,
+            rms_norm_eps: cfg.rms_norm_eps,
+            output_gate: cfg.attn_output_gate,
+        }
+    }
 }
 
 pub struct FullAttention {
@@ -359,37 +397,39 @@ impl FullAttention {
     ///
     /// Returns an error if a required weight tensor is missing or has an unexpected shape.
     pub fn load(cfg: &TextConfig, vb: &VarBuilder, quant: Option<GgmlDType>) -> Result<Self> {
-        let num_heads = cfg.num_attention_heads;
-        let num_kv_heads = cfg.num_key_value_heads;
-        let head_dim = cfg.head_dim;
+        Self::load_dims(AttentionDims::from(cfg), cfg.hidden_size, vb, quant)
+    }
 
-        let q_out = if cfg.attn_output_gate {
+    /// [`Self::load`] for any config that shares this attention (HF layout:
+    /// `q_proj`, `k_proj`, `v_proj`, `o_proj`, `q_norm`, `k_norm`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight tensor is missing or has an unexpected shape.
+    pub fn load_dims(
+        dims: AttentionDims,
+        hidden_size: usize,
+        vb: &VarBuilder,
+        quant: Option<GgmlDType>,
+    ) -> Result<Self> {
+        let AttentionDims {
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            rms_norm_eps,
+            output_gate,
+        } = dims;
+        let q_out = if output_gate {
             num_heads * head_dim * 2
         } else {
             num_heads * head_dim
         };
-        let q_proj = linear_layer(cfg.hidden_size, q_out, vb.pp("q_proj"), quant)?;
-        let k_proj = linear_layer(
-            cfg.hidden_size,
-            num_kv_heads * head_dim,
-            vb.pp("k_proj"),
-            quant,
-        )?;
-        let v_proj = linear_layer(
-            cfg.hidden_size,
-            num_kv_heads * head_dim,
-            vb.pp("v_proj"),
-            quant,
-        )?;
-        let o_proj = linear_layer(
-            num_heads * head_dim,
-            cfg.hidden_size,
-            vb.pp("o_proj"),
-            quant,
-        )?;
-
-        let q_norm = Qwen35RmsNorm::load(head_dim, cfg.rms_norm_eps, &vb.pp("q_norm"))?;
-        let k_norm = Qwen35RmsNorm::load(head_dim, cfg.rms_norm_eps, &vb.pp("k_norm"))?;
+        let q_proj = linear_layer(hidden_size, q_out, vb.pp("q_proj"), quant)?;
+        let k_proj = linear_layer(hidden_size, num_kv_heads * head_dim, vb.pp("k_proj"), quant)?;
+        let v_proj = linear_layer(hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"), quant)?;
+        let o_proj = linear_layer(num_heads * head_dim, hidden_size, vb.pp("o_proj"), quant)?;
+        let q_norm = Qwen35RmsNorm::load(head_dim, rms_norm_eps, &vb.pp("q_norm"))?;
+        let k_norm = Qwen35RmsNorm::load(head_dim, rms_norm_eps, &vb.pp("k_norm"))?;
 
         Ok(Self {
             q_proj,
@@ -401,8 +441,14 @@ impl FullAttention {
             num_heads,
             num_kv_heads,
             head_dim,
-            has_output_gate: cfg.attn_output_gate,
+            has_output_gate: output_gate,
         })
+    }
+
+    /// Query heads.
+    #[must_use]
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
     }
 
     /// Construct from GGUF quantized weights (llama.cpp `qwen35` layout).
@@ -419,6 +465,20 @@ impl FullAttention {
         gg: &mut Gguf<R>,
         layer_idx: usize,
     ) -> Result<Self> {
+        Self::from_gguf_dims(AttentionDims::from(cfg), gg, layer_idx)
+    }
+
+    /// [`Self::from_gguf`] for any config sharing the llama.cpp layout
+    /// (`attn_q`, `attn_k`, `attn_v`, `attn_output`, `attn_{q,k}_norm`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight tensor is missing.
+    pub fn from_gguf_dims<R: Read + Seek>(
+        dims: AttentionDims,
+        gg: &mut Gguf<R>,
+        layer_idx: usize,
+    ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
         let q_proj = gg.linear(&format!("{prefix}.attn_q.weight"))?;
         let k_proj = gg.linear(&format!("{prefix}.attn_k.weight"))?;
@@ -427,11 +487,11 @@ impl FullAttention {
 
         let q_norm = Qwen35RmsNorm::from_folded(
             gg.dequant_tensor(&format!("{prefix}.attn_q_norm.weight"))?,
-            cfg.rms_norm_eps,
+            dims.rms_norm_eps,
         );
         let k_norm = Qwen35RmsNorm::from_folded(
             gg.dequant_tensor(&format!("{prefix}.attn_k_norm.weight"))?,
-            cfg.rms_norm_eps,
+            dims.rms_norm_eps,
         );
 
         Ok(Self {
@@ -441,10 +501,10 @@ impl FullAttention {
             o_proj,
             q_norm,
             k_norm,
-            num_heads: cfg.num_attention_heads,
-            num_kv_heads: cfg.num_key_value_heads,
-            head_dim: cfg.head_dim,
-            has_output_gate: cfg.attn_output_gate,
+            num_heads: dims.num_heads,
+            num_kv_heads: dims.num_kv_heads,
+            head_dim: dims.head_dim,
+            has_output_gate: dims.output_gate,
         })
     }
 
@@ -524,90 +584,102 @@ impl FullAttention {
         #[allow(clippy::cast_precision_loss)] // head_dim is small (<=512 in practice)
         let scale = 1.0 / (self.head_dim as f64).sqrt();
 
-        if n_rep > 1 && seq_len == 1 && !legacy_attn_expand() {
-            // ── GQA-grouped SDPA for decode ──
-            //
-            // The expansion below materializes `k_rep`, `v_rep` and `k_t`, each
-            // `[B, num_heads, S, D]`, i.e. three O(context) copies per layer per
-            // token. On Qwen3.8-27B (24 q / 4 KV heads, 16 full-attn layers)
-            // that is 1.7 GB of traffic per token at 2912 tokens of context and
-            // it grows linearly with depth — the sole cause of decode falling
-            // from 16.9 t/s to 8.6 t/s between 512 and 4096 tokens.
-            //
-            // Instead fold the `n_rep` query heads sharing a KV head into the
-            // matmul's row dimension, so K/V are read once at their stored
-            // 4-head width. Ported from `models/qwen3/modeling.rs`, which has
-            // carried this since its own GQA work; `k_t` deliberately stays a
-            // view so matmul flattens it in one pass rather than us paying an
-            // explicit `contiguous()`.
-            let q_g = (q.reshape((b_sz, self.num_kv_heads, n_rep, self.head_dim))? * scale)?;
-            let k_t = k.transpose(2, 3)?; // [B, kv_heads, D, S] — view only
-            let attn_weights = q_g.matmul(&k_t)?; // [B, kv_heads, n_rep, S]
-
-            let attn_weights = match attention_mask {
-                // mask [B, 1, 1, S] broadcasts over kv_heads and n_rep
-                Some(mask) => attn_weights.broadcast_add(mask)?,
-                None => attn_weights,
-            };
-            let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-            let y = attn_weights.matmul(&v)?; // [B, kv_heads, n_rep, D]
-
-            // Back to `[B, 1, num_heads * head_dim]`. Head order is preserved:
-            // `q` was reshaped from `[B, H, 1, D]` with H == kv_heads * n_rep in
-            // that order, so flattening the two group dims restores it.
-            let y = y.reshape((b_sz, seq_len, self.num_heads * self.head_dim))?;
-
-            // Qwen 3.5 gates the attention output before `o_proj` — the one
-            // adaptation this path needs versus the qwen3 original.
-            let y = match gate {
-                Some(g) => {
-                    let gate = candle_nn::ops::sigmoid(&g.to_dtype(y.dtype())?)?;
-                    y.broadcast_mul(&gate)?
-                },
-                None => y,
-            };
-            return self.o_proj.forward(&y);
-        }
-
-        let k_rep = if n_rep > 1 {
-            let (b, kv_heads, s, d) = k.dims4()?;
-            k.unsqueeze(2)?
-                .expand((b, kv_heads, n_rep, s, d))?
-                .contiguous()?
-                .reshape((b, self.num_heads, s, d))?
+        let y = if legacy_attn_expand() {
+            expanded_sdpa(&q, &k, &v, attention_mask, scale, n_rep)?
         } else {
-            k
-        };
-        let v_rep = if n_rep > 1 {
-            let (b, kv_heads, s, d) = v.dims4()?;
-            v.unsqueeze(2)?
-                .expand((b, kv_heads, n_rep, s, d))?
-                .contiguous()?
-                .reshape((b, self.num_heads, s, d))?
-        } else {
-            v
+            grouped_sdpa(&q, &k, &v, attention_mask, scale, n_rep)?
         };
 
-        let k_t = k_rep.transpose(D::Minus2, D::Minus1)?.contiguous()?;
-        let attn_logits = (q.matmul(&k_t)? * scale)?;
-        let attn_weights = match attention_mask {
-            Some(mask) => attn_weights_with_mask(&attn_logits, mask)?,
-            None => attn_logits,
+        // Qwen 3.5 gates the attention output before `o_proj`.
+        let y = match gate {
+            Some(g) => {
+                let gate = candle_nn::ops::sigmoid(&g.to_dtype(y.dtype())?)?;
+                y.broadcast_mul(&gate)?
+            },
+            None => y,
         };
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-        let y = attn_weights.matmul(&v_rep)?;
-
-        let y = y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?;
-
-        let y = if let Some(g) = gate {
-            let gate = candle_nn::ops::sigmoid(&g.to_dtype(y.dtype())?)?;
-            y.broadcast_mul(&gate)?
-        } else {
-            y
-        };
-
         self.o_proj.forward(&y)
     }
+}
+
+/// GQA attention without expanding K/V: the `n_rep` query heads that share a
+/// KV head are folded into the matmul's row dimension, so K and V are read
+/// once at their stored `kv_heads` width.
+///
+/// Expanding them instead (see [`expanded_sdpa`]) materializes `k_rep`,
+/// `v_rep` and `k_t`, each `[B, num_heads, cells, D]`: on Qwen3.8-27B (24 q /
+/// 4 KV heads) that was 1.7 GB of traffic per decoded token at 2912 tokens of
+/// context, and on Qwen3.8-Flash-Next (24 / 2) ~1.2 GB of prefill memory at
+/// 32k. Ported from `models/qwen3/modeling.rs`'s decode path.
+///
+/// `q` is `[B, num_heads, S, D]` with heads ordered `kv_head * n_rep + r`;
+/// `k`/`v` are `[B, kv_heads, cells, D]`; `mask` is additive and broadcasts to
+/// `[B, 1, S, cells]`. Returns `[B, S, num_heads * D]`.
+fn grouped_sdpa(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    n_rep: usize,
+) -> Result<Tensor> {
+    let (b_sz, num_heads, seq_len, head_dim) = q.dims4()?;
+    let (_, kv_heads, cells, _) = k.dims4()?;
+    // Heads sharing a KV head are adjacent, so this is a free view.
+    let q_g = (q.reshape((b_sz, kv_heads, n_rep * seq_len, head_dim))? * scale)?;
+    let k_t = k.transpose(2, 3)?; // [B, kv_heads, D, cells] — view only
+    let scores = q_g.matmul(&k_t)?; // [B, kv_heads, n_rep * S, cells]
+    let scores = match mask {
+        // Split the rows back into (n_rep, S) so a [.., S, cells] mask
+        // broadcasts over kv_heads and n_rep.
+        Some(mask) => scores
+            .reshape((b_sz, kv_heads, n_rep, seq_len, cells))?
+            .broadcast_add(&mask.unsqueeze(1)?)?
+            .reshape((b_sz, kv_heads, n_rep * seq_len, cells))?,
+        None => scores,
+    };
+    let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+    weights
+        .matmul(&v.contiguous()?)? // [B, kv_heads, n_rep * S, D]
+        .reshape((b_sz, num_heads, seq_len, head_dim))?
+        .transpose(1, 2)?
+        .reshape((b_sz, seq_len, num_heads * head_dim))
+}
+
+/// The same attention with K/V expanded to every query head, kept for A/B
+/// comparisons (`CRANE_ATTN_EXPAND=1`); see [`grouped_sdpa`].
+// q/k/v/b/s/d are the standard attention-shape names.
+#[allow(clippy::many_single_char_names)]
+fn expanded_sdpa(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    n_rep: usize,
+) -> Result<Tensor> {
+    let (b_sz, num_heads, seq_len, _) = q.dims4()?;
+    let expand = |t: &Tensor| -> Result<Tensor> {
+        if n_rep == 1 {
+            return Ok(t.clone());
+        }
+        let (b, kv_heads, s, d) = t.dims4()?;
+        t.unsqueeze(2)?
+            .expand((b, kv_heads, n_rep, s, d))?
+            .contiguous()?
+            .reshape((b, num_heads, s, d))
+    };
+    let k_t = expand(k)?.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+    let attn_logits = (q.matmul(&k_t)? * scale)?;
+    let attn_weights = match mask {
+        Some(mask) => attn_weights_with_mask(&attn_logits, mask)?,
+        None => attn_logits,
+    };
+    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+    attn_weights
+        .matmul(&expand(v)?)?
+        .transpose(1, 2)?
+        .reshape((b_sz, seq_len, ()))
 }
 
 fn attn_weights_with_mask(attn_logits: &Tensor, mask: &Tensor) -> Result<Tensor> {
@@ -663,11 +735,10 @@ impl Mlp {
         let down = gg.linear(&format!("{prefix}.ffn_down.weight"))?;
         Ok(Self { gate, up, down })
     }
+}
 
-    /// # Errors
-    ///
-    /// Returns an error if the underlying tensor operations fail.
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+impl Module for Mlp {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let gate = self.gate.forward(x)?;
         let up = self.up.forward(x)?;
         let h = crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?;
@@ -685,7 +756,7 @@ pub struct DecoderLayer {
     layer_impl: LayerImpl,
     input_layernorm: Qwen35RmsNorm,
     post_attention_layernorm: Qwen35RmsNorm,
-    mlp: Mlp,
+    mlp: MlpOrMoe<Mlp>,
     /// Pre-computed dims for the GDN path. `None` for full-attention blocks.
     gdn_dims: Option<GdnDims>,
 }
@@ -701,6 +772,7 @@ impl DecoderLayer {
     /// Returns an error if a required weight tensor is missing or has an unexpected shape.
     pub fn load(
         cfg: &TextConfig,
+        layer_idx: usize,
         layer_type: LayerType,
         vb: VarBuilder,
         quant: Option<GgmlDType>,
@@ -712,7 +784,18 @@ impl DecoderLayer {
             cfg.rms_norm_eps,
             &vb.pp("post_attention_layernorm"),
         )?;
-        let mlp = Mlp::load(cfg, &vb.pp("mlp"), quant)?;
+        // `MoE` experts load dense: `quant` (in-situ quantization) applies to
+        // the attention/GDN projections and dense MLPs only.
+        let mlp = match cfg.moe_config() {
+            Some(moe) => MlpOrMoe::Moe(SparseMoeBlock::new(
+                &moe,
+                layer_idx,
+                cfg.hidden_size,
+                vb.pp("mlp"),
+                vb.device(),
+            )?),
+            None => MlpOrMoe::Dense(Mlp::load(cfg, &vb.pp("mlp"), quant)?),
+        };
 
         let (layer_impl, gdn_dims) = match layer_type {
             LayerType::FullAttention => (
@@ -737,18 +820,10 @@ impl DecoderLayer {
 
     /// Construct from GGUF quantized weights (llama.cpp `qwen35` layout).
     ///
-    /// Naming (verified against a real Qwen3.5 GGUF): linear-attention blocks
-    /// store the split GDN projections as `attn_qkv` (Q|K|V), `attn_gate`
-    /// (the z silu-gate), `ssm_beta` (β) and `ssm_alpha` (A); `ssm_conv1d` is
-    /// 2-D `[conv_dim, kernel]`, `ssm_a` is `A_log`, and `ssm_dt.bias` is
-    /// `dt_bias`. Block norms (`attn_norm`, `post_attention_norm`) carry the
-    /// folded `+1` offset; the gated `ssm_norm` is a plain weight as in HF.
-    ///
-    /// The converter also orders the linear-attention value-head axis
-    /// differently from HF ([`VHeadOrder::Chunked`] vs `Interleaved`); rather
-    /// than permuting the affected weights — which would mean dequantizing and
-    /// re-quantizing them, and `Q6_K`'s quantizer is not idempotent — the GDN
-    /// dims record the order and the Q/K expansion adapts to it.
+    /// Block norms (`attn_norm`, `post_attention_norm`) carry the folded `+1`
+    /// offset; linear-attention blocks load through
+    /// [`GatedDeltaNet::from_gguf`], which documents their tensor naming and
+    /// value-head order.
     ///
     /// # Errors
     ///
@@ -758,6 +833,7 @@ impl DecoderLayer {
         layer_type: LayerType,
         gg: &mut Gguf<R>,
         layer_idx: usize,
+        expert_device: &Device,
     ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
         let input_layernorm = Qwen35RmsNorm::from_folded(
@@ -768,7 +844,18 @@ impl DecoderLayer {
             gg.dequant_tensor(&format!("{prefix}.post_attention_norm.weight"))?,
             cfg.rms_norm_eps,
         );
-        let mlp = Mlp::from_gguf(gg, layer_idx)?;
+        // Layer kind follows tensor presence, as in the Qwen3 loader.
+        let mlp = match cfg.moe_config() {
+            Some(moe) if gg.contains_tensor(&format!("{prefix}.ffn_gate_inp.weight")) => {
+                MlpOrMoe::Moe(SparseMoeBlock::new_from_gguf(
+                    &moe,
+                    gg,
+                    layer_idx,
+                    expert_device,
+                )?)
+            },
+            _ => MlpOrMoe::Dense(Mlp::from_gguf(gg, layer_idx)?),
+        };
 
         let (layer_impl, gdn_dims) = match layer_type {
             LayerType::FullAttention => (
@@ -776,45 +863,7 @@ impl DecoderLayer {
                 None,
             ),
             LayerType::LinearAttention => {
-                let dims = GdnDims::new(cfg).with_v_head_order(VHeadOrder::Chunked);
-                let in_proj_b = LinearLayer::Standard(candle_nn::Linear::new(
-                    gg.dequant_tensor(&format!("{prefix}.ssm_beta.weight"))?,
-                    None,
-                ));
-                let in_proj_a = LinearLayer::Standard(candle_nn::Linear::new(
-                    gg.dequant_tensor(&format!("{prefix}.ssm_alpha.weight"))?,
-                    None,
-                ));
-                let input_proj = GdnInputProjection::Split {
-                    in_proj_qkv: gg.linear(&format!("{prefix}.attn_qkv.weight"))?,
-                    in_proj_z: gg.linear(&format!("{prefix}.attn_gate.weight"))?,
-                    in_proj_b,
-                    in_proj_a,
-                };
-                // GGUF stores the conv kernel 2-D; crane expects HF's
-                // `[conv_dim, 1, kernel]`.
-                let conv1d_weight = gg
-                    .dequant_tensor(&format!("{prefix}.ssm_conv1d.weight"))?
-                    .unsqueeze(1)?;
-                let dt_bias = gg.dequant_tensor(&format!("{prefix}.ssm_dt.bias"))?;
-                let a_log = gg
-                    .dequant_tensor(&format!("{prefix}.ssm_a"))?
-                    .neg()?
-                    .log()?;
-                let norm = RmsNormGated::from_weight(
-                    gg.dequant_tensor(&format!("{prefix}.ssm_norm.weight"))?,
-                    cfg.rms_norm_eps,
-                );
-                let out_proj = gg.linear(&format!("{prefix}.ssm_out.weight"))?;
-                let gdn = GatedDeltaNet::with_derived(
-                    input_proj,
-                    conv1d_weight,
-                    dt_bias,
-                    a_log,
-                    norm,
-                    out_proj,
-                    &dims,
-                )?;
+                let (gdn, dims) = GatedDeltaNet::from_gguf(gg, layer_idx, cfg)?;
                 (LayerImpl::LinearAttention(gdn), Some(dims))
             },
         };
@@ -888,5 +937,55 @@ impl DecoderLayer {
         let mlp_out = timed(Span::Mlp, || self.mlp.forward(&normed2))?;
 
         timed(Span::Resid, || residual2 + mlp_out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grouped GQA attention equals the expanded one, for decode and
+    /// prefill shapes, with and without a causal mask, on every device this
+    /// build has.
+    #[test]
+    fn grouped_sdpa_matches_expanded() -> anyhow::Result<()> {
+        #[allow(unused_mut)]
+        let mut devices = vec![Device::Cpu];
+        #[cfg(feature = "sycl")]
+        if candle_core::utils::sycl_is_available() {
+            devices.push(Device::new_sycl(0)?);
+        }
+        // Qwen3.8-27B (24 q / 4 KV) and Qwen3.8-Flash-Next (24 / 2) layouts.
+        for (heads, kv_heads, seq, cells) in [
+            (24, 4, 1, 300),
+            (24, 2, 1, 77),
+            (24, 4, 37, 300),
+            (24, 2, 64, 64),
+        ] {
+            let n_rep = heads / kv_heads;
+            let d = 32;
+            let cpu = Device::Cpu;
+            let q = Tensor::randn(0f32, 1.0, (1, heads, seq, d), &cpu)?;
+            let k = Tensor::randn(0f32, 1.0, (1, kv_heads, cells, d), &cpu)?;
+            let v = Tensor::randn(0f32, 1.0, (1, kv_heads, cells, d), &cpu)?;
+            let mask = super::super::prefill::causal_mask(seq, cells - seq, &cpu, DType::F32)?;
+            for dev in &devices {
+                let on = |t: &Tensor| t.to_device(dev);
+                for m in [None, Some(&mask)] {
+                    let m = m.map(on).transpose()?;
+                    let want =
+                        expanded_sdpa(&on(&q)?, &on(&k)?, &on(&v)?, m.as_ref(), 0.17, n_rep)?;
+                    let got = grouped_sdpa(&on(&q)?, &on(&k)?, &on(&v)?, m.as_ref(), 0.17, n_rep)?;
+                    assert_eq!(got.dims(), &[1, seq, heads * d]);
+                    let diff = (got - want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert!(
+                        diff < 1e-4,
+                        "{dev:?} heads {heads}/{kv_heads} seq {seq} masked {}: diff {diff}",
+                        m.is_some()
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }

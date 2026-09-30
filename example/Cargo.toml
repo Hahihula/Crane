@@ -85,6 +85,10 @@ name = "qwen3_5_vl_simple"
 path = "src/qwen3_5_vl_simple.rs"
 
 [[bin]]
+name = "qwen4_exp_simple"
+path = "src/qwen4_exp_simple.rs"
+
+[[bin]]
 name = "voxtral_tts_simple"
 path = "src/voxtral_tts_simple.rs"
 

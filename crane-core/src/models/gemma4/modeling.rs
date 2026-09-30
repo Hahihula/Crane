@@ -30,6 +30,7 @@ use std::io::{Read, Seek};
 use crate::models::modules::ffn::SwiGluFfn;
 pub use crate::ops::linear::LinearLayer;
 pub use crate::quantized::gguf_file::Gguf;
+use crate::quantized::gguf_metadata::GgufMetadata;
 
 // Note: Gemma 4 norms use standard `x * weight` (no `+1` shift unlike Gemma 3).
 // Weights are stored in final form. Use candle_nn::rms_norm / gg.rms_norm directly.
@@ -949,48 +950,26 @@ impl Gemma4Model {
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
-        // Some GGUF converters (e.g. unsloth) serialize what should be a scalar as a
-        // per-layer I32 array (all layers sharing the same value) or as I32 instead of
-        // U32; take the first element and accept non-negative I32 instead of erroring.
-        fn value_to_u32(v: &gguf_file::Value) -> Result<u32> {
-            match v {
-                gguf_file::Value::Array(arr) => match arr.first() {
-                    Some(first) => value_to_u32(first),
-                    None => candle_core::bail!("empty GGUF array where a u32 was expected"),
-                },
-                gguf_file::Value::I32(n) if *n >= 0 => Ok(n.cast_unsigned()),
-                v => v.to_u32(),
-            }
-        }
-
         let dtype = if device.is_cuda() {
             DType::BF16
         } else {
             DType::F32
         };
         let mut gg = Gguf::new(ct, reader, device.clone(), dtype);
-        let md_get = |s: &str| match gg.metadata().get(s) {
-            None => candle_core::bail!("cannot find {s} in GGUF metadata"),
-            Some(v) => Ok(v.clone()),
-        };
-
-        let arch = gg
-            .metadata()
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok())
-            .map(|s| s.clone())
+        let md = GgufMetadata::new(gg.metadata());
+        let arch = md
+            .opt_string("general.architecture")
             .unwrap_or_else(|| "gemma4".to_string());
+        let key = |k: &str| format!("{arch}.{k}");
 
-        let num_attention_heads =
-            value_to_u32(&md_get(&format!("{arch}.attention.head_count"))?)? as usize;
-        let num_kv_heads =
-            value_to_u32(&md_get(&format!("{arch}.attention.head_count_kv"))?)? as usize;
-        let num_hidden_layers = value_to_u32(&md_get(&format!("{arch}.block_count"))?)? as usize;
-        let hidden_size = value_to_u32(&md_get(&format!("{arch}.embedding_length"))?)? as usize;
+        let num_attention_heads = md.u32_lenient(&key("attention.head_count"))? as usize;
+        let num_kv_heads = md.u32_lenient(&key("attention.head_count_kv"))? as usize;
+        let num_hidden_layers = md.u32_lenient(&key("block_count"))? as usize;
+        let hidden_size = md.u32_lenient(&key("embedding_length"))? as usize;
         // feed_forward_length can be a single u32 or a per-layer i32 array (Gemma4 uses
         // different sizes for non-shared vs shared layers due to use_double_wide_mlp).
-        let ff_value = md_get(&format!("{arch}.feed_forward_length"))?;
-        let intermediate_size = match &ff_value {
+        let ff_value = md.get(&key("feed_forward_length"))?;
+        let intermediate_size = match ff_value {
             gguf_file::Value::U32(v) => *v as usize,
             gguf_file::Value::I32(v) => *v as usize,
             gguf_file::Value::Array(arr) => {
@@ -1006,55 +985,27 @@ impl Gemma4Model {
             },
             _ => candle_core::bail!("unexpected type for feed_forward_length"),
         };
-        let max_position_embeddings = gg
-            .metadata()
-            .get(&format!("{arch}.context_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(131072) as usize;
-        let rms_norm_eps = gg
-            .metadata()
-            .get(&format!("{arch}.attention.layer_norm_rms_epsilon"))
-            .and_then(|v| v.to_f32().ok())
-            .unwrap_or(1e-6) as f64;
-        let rope_theta = gg
-            .metadata()
-            .get(&format!("{arch}.rope.freq_base"))
-            .and_then(|v| v.to_f32().ok())
-            .unwrap_or(1_000_000.0) as f64;
+        let max_position_embeddings = md.opt_usize(&key("context_length")).unwrap_or(131_072);
+        let rms_norm_eps = f64::from(
+            md.opt_f32(&key("attention.layer_norm_rms_epsilon"))
+                .unwrap_or(1e-6),
+        );
+        let rope_theta = f64::from(md.opt_f32(&key("rope.freq_base")).unwrap_or(1_000_000.0));
 
-        let global_head_dim = gg
-            .metadata()
-            .get(&format!("{arch}.attention.key_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(512) as usize;
-        let swa_head_dim = gg
-            .metadata()
-            .get(&format!("{arch}.attention.key_length_swa"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(256) as usize;
-
-        let num_kv_shared_layers = gg
-            .metadata()
-            .get(&format!("{arch}.attention.shared_kv_layers"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(0) as usize;
-
-        let ple_dim = gg
-            .metadata()
-            .get(&format!("{arch}.embedding_length_per_layer_input"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(256) as usize;
-
-        let sliding_window = gg
-            .metadata()
-            .get(&format!("{arch}.attention.sliding_window"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(512) as usize;
-
-        let final_logit_softcapping = gg
-            .metadata()
-            .get(&format!("{arch}.final_logit_softcapping"))
-            .and_then(|v| v.to_f32().ok());
+        let global_head_dim = md.opt_usize(&key("attention.key_length")).unwrap_or(512);
+        let swa_head_dim = md
+            .opt_usize(&key("attention.key_length_swa"))
+            .unwrap_or(256);
+        let num_kv_shared_layers = md
+            .opt_usize(&key("attention.shared_kv_layers"))
+            .unwrap_or(0);
+        let ple_dim = md
+            .opt_usize(&key("embedding_length_per_layer_input"))
+            .unwrap_or(256);
+        let sliding_window = md
+            .opt_usize(&key("attention.sliding_window"))
+            .unwrap_or(512);
+        let final_logit_softcapping = md.opt_f32(&key("final_logit_softcapping"));
 
         let layer_types_str: Vec<String> = if let Some(gguf_file::Value::Array(arr)) = gg
             .metadata()

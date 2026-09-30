@@ -15,6 +15,16 @@
 // `sycl_impl.rs` wraps).
 #include <sycl/sycl.hpp>
 
+#include <cstdio>
+
+#include <cfloat>
+#include <cmath>
+#include <cstdint>
+
+#include <cfloat>
+#include <cmath>
+#include <cstdint>
+
 namespace {
 
 using bf16 = sycl::ext::oneapi::bfloat16;
@@ -94,6 +104,9 @@ extern "C" int crane_swiglu_sycl(void *queue, int dtype, const void *gate,
     }
   } catch (const sycl::exception &) {
     return 1;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
+    return 1;
   } catch (...) {
     return 1;
   }
@@ -124,6 +137,9 @@ extern "C" int crane_snake_sycl(void *queue, int dtype, const void *x,
     }
   } catch (const sycl::exception &) {
     return 1;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
+    return 1;
   } catch (...) {
     return 1;
   }
@@ -149,6 +165,133 @@ extern "C" int crane_fused_silu_mul_sycl(void *queue, int dtype,
       return 2; // unsupported dtype
     }
   } catch (const sycl::exception &) {
+    return 1;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
+    return 1;
+  } catch (...) {
+    return 1;
+  }
+}
+
+// Fused top-K MoE routing, the SYCL port of `kernels/cuda/topk_moe.cu`:
+// softmax over a token's expert logits, `top_k` rounds of sub-group argmax
+// (ties to the smaller expert id), optional renormalization. One 16-lane
+// sub-group per token; up to 32 * 16 = 512 experts (see `topk_moe.rs`'s
+// `MAX_FUSED_EXPERTS`). `logits` [n_tokens, n_experts] F32 in, `out_ids`
+// [n_tokens, top_k] U32 and `out_weights` [n_tokens, top_k] F32 out.
+extern "C" int crane_topk_moe_sycl(void *queue, const float *logits, uint32_t *out_ids,
+                                   float *out_weights, int n_tokens, int n_experts, int top_k,
+                                   int norm_topk) {
+  constexpr int SGW = 16;
+  constexpr int MAX_EPT = 32;
+  try {
+    auto &q = *static_cast<sycl::queue *>(queue);
+    q.parallel_for(
+        sycl::nd_range<1>(size_t(n_tokens) * SGW, SGW),
+        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SGW)]] {
+          const auto sg = it.get_sub_group();
+          const int token = int(it.get_group_linear_id());
+          const int lane = int(sg.get_local_linear_id());
+          const int ept = (n_experts + SGW - 1) / SGW;
+          const float *row = logits + size_t(token) * n_experts;
+          float wt[MAX_EPT];
+          for (int i = 0; i < MAX_EPT; ++i) {
+            const int e = lane + i * SGW;
+            wt[i] = (i < ept && e < n_experts) ? row[e] : -INFINITY;
+          }
+          float mx = -INFINITY;
+          for (int i = 0; i < ept; ++i) {
+            mx = sycl::fmax(mx, wt[i]);
+          }
+          mx = sycl::reduce_over_group(sg, mx, sycl::maximum<float>());
+          float sum = 0.f;
+          for (int i = 0; i < ept; ++i) {
+            const int e = lane + i * SGW;
+            wt[i] = e < n_experts ? sycl::exp(wt[i] - mx) : 0.f;
+            sum += wt[i];
+          }
+          sum = sycl::reduce_over_group(sg, sum, sycl::plus<float>());
+          for (int i = 0; i < ept; ++i) {
+            wt[i] /= sum;
+            // NaN never wins a comparison, so it would be re-selected forever.
+            if (sycl::isnan(wt[i])) {
+              wt[i] = -FLT_MAX;
+            }
+          }
+          uint32_t *ids = out_ids + size_t(token) * top_k;
+          float *ws = out_weights + size_t(token) * top_k;
+          float picked = 0.f;
+          for (int k = 0; k < top_k; ++k) {
+            float best = -INFINITY;
+            int best_e = n_experts;
+            for (int i = 0; i < ept; ++i) {
+              const int e = lane + i * SGW;
+              if (e < n_experts && (wt[i] > best || (wt[i] == best && e < best_e))) {
+                best = wt[i];
+                best_e = e;
+              }
+            }
+            for (int mask = SGW / 2; mask > 0; mask /= 2) {
+              const float ov = sycl::permute_group_by_xor(sg, best, mask);
+              const int oe = sycl::permute_group_by_xor(sg, best_e, mask);
+              if (ov > best || (ov == best && oe < best_e)) {
+                best = ov;
+                best_e = oe;
+              }
+            }
+            if (lane == 0) {
+              ids[k] = uint32_t(best_e);
+              ws[k] = best;
+            }
+            picked += best;
+            if (best_e % SGW == lane) {
+              wt[best_e / SGW] = -INFINITY;
+            }
+          }
+          if (norm_topk && lane == 0) {
+            const float inv = 1.f / (picked > 0.f ? picked : 1.f);
+            for (int k = 0; k < top_k; ++k) {
+              ws[k] *= inv;
+            }
+          }
+        });
+    return 0;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
+    return 1;
+  } catch (...) {
+    return 1;
+  }
+}
+
+// Element-wise `atan2(y, x)`, the SYCL counterpart of
+// `kernels/cuda/atan2.cu` / `kernels/metal/atan2.metal`, computed in f32
+// (`sycl::atan2` keeps IEEE quadrants and signed zeros; `atan2(0, 0) = 0`).
+// dtype tags: 0 = f32, 1 = f16.
+extern "C" int crane_atan2_sycl(void *queue, int dtype, const void *y, const void *x, void *out,
+                                size_t n) {
+  try {
+    auto &q = *static_cast<sycl::queue *>(queue);
+    auto run = [&](auto t) {
+      using T = decltype(t);
+      const T *yp = static_cast<const T *>(y);
+      const T *xp = static_cast<const T *>(x);
+      T *op = static_cast<T *>(out);
+      q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+        op[i] = static_cast<T>(sycl::atan2(static_cast<float>(yp[i]), static_cast<float>(xp[i])));
+      });
+    };
+    if (dtype == 0) {
+      run(float{});
+    } else if (dtype == 1) {
+      run(sycl::half{});
+    } else {
+      return 2;
+    }
+    return 0;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
     return 1;
   } catch (...) {
     return 1;

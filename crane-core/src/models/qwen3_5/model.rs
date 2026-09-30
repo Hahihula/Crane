@@ -9,6 +9,7 @@ use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{Linear, VarBuilder, embedding};
 
 use crate::ops::linear::{LinearLayer, parse_ggml_dtype, quantize_linear};
+use crate::quantized::gguf_metadata::GgufMetadata;
 use crate::utils::DeviceExt;
 // TODO(candle-transformers-removal): Generation helpers only; see CANDLE_TRANSFORMERS.md.
 use candle_transformers::generation::LogitsProcessor;
@@ -100,6 +101,7 @@ impl Qwen3_5TextModel {
         for (idx, &layer_type) in layer_types.iter().enumerate() {
             layers.push(DecoderLayer::load(
                 &text_cfg,
+                idx,
                 layer_type,
                 vb_lm.pp("layers").pp(idx),
                 quant,
@@ -225,58 +227,38 @@ impl Qwen3_5TextModel {
             None => Gguf::new(ct, reader, device.clone(), dtype),
         };
 
-        let arch = gg
-            .metadata()
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok())
-            .cloned()
+        let md = GgufMetadata::new(gg.metadata());
+        let arch = md
+            .opt_string("general.architecture")
             .unwrap_or_else(|| "qwen35".to_string());
-        let md_u32 = |gg: &Gguf<&mut R>, key: &str| -> Result<usize> {
-            gg.metadata()
-                .get(&format!("{arch}.{key}"))
-                .ok_or_else(|| {
-                    candle_core::Error::Msg(format!("missing GGUF metadata {arch}.{key}"))
-                })?
-                .to_u32()
-                .map(|v| v as usize)
-                .map_err(Into::into)
-        };
-        let md_u32_or = |gg: &Gguf<&mut R>, key: &str, default: usize| -> usize {
-            gg.metadata()
-                .get(&format!("{arch}.{key}"))
-                .and_then(|v| v.to_u32().ok())
-                .map_or(default, |v| v as usize)
-        };
+        let key = |k: &str| format!("{arch}.{k}");
 
-        let head_dim = md_u32(&gg, "attention.key_length")?;
-        let hidden_size = md_u32(&gg, "embedding_length")?;
+        let head_dim = md.usize(&key("attention.key_length"))?;
+        let hidden_size = md.usize(&key("embedding_length"))?;
         // Newer converters append the MTP draft layer(s) as extra `blk.N`
         // blocks and count them in `block_count`; they are not decoder layers.
-        let num_hidden_layers =
-            md_u32(&gg, "block_count")? - md_u32_or(&gg, "nextn_predict_layers", 0);
-        let rms_norm_eps = gg
-            .metadata()
-            .get(&format!("{arch}.attention.layer_norm_rms_epsilon"))
-            .and_then(|v| v.to_f32().ok())
+        let num_hidden_layers = md.usize(&key("block_count"))?
+            - md.opt_usize(&key("nextn_predict_layers")).unwrap_or(0);
+        let rms_norm_eps = md
+            .opt_f32(&key("attention.layer_norm_rms_epsilon"))
             .map_or(1e-6, f64::from);
-        let rope_theta = gg
-            .metadata()
-            .get(&format!("{arch}.rope.freq_base"))
-            .and_then(|v| v.to_f32().ok())
+        let rope_theta = md
+            .opt_f32(&key("rope.freq_base"))
             .map_or(10_000_000.0, f64::from);
-        let rot_dim = md_u32_or(&gg, "rope.dimension_count", head_dim / 4);
-        let mrope_section: Vec<usize> = gg
-            .metadata()
-            .get(&format!("{arch}.rope.dimension_sections"))
-            .and_then(|v| v.to_vec().ok())
-            .map(|vals| {
-                vals.iter()
-                    .filter_map(|v| v.to_i32().ok().map(|x| usize::try_from(x).unwrap_or(0)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let num_v_heads = md_u32(&gg, "ssm.time_step_rank")?;
-        let inner_size = md_u32(&gg, "ssm.inner_size")?;
+        let rot_dim = md
+            .opt_usize(&key("rope.dimension_count"))
+            .unwrap_or(head_dim / 4);
+        let mrope_section: Vec<usize> =
+            md.0.get(&key("rope.dimension_sections"))
+                .and_then(|v| v.to_vec().ok())
+                .map(|vals| {
+                    vals.iter()
+                        .filter_map(|v| v.to_i32().ok().map(|x| usize::try_from(x).unwrap_or(0)))
+                        .collect()
+                })
+                .unwrap_or_default();
+        let num_v_heads = md.usize(&key("ssm.time_step_rank"))?;
+        let inner_size = md.usize(&key("ssm.inner_size"))?;
 
         // Vocab from the embedding table shape (metadata has no vocab_size).
         let vocab_size = gg
@@ -309,7 +291,7 @@ impl Qwen3_5TextModel {
                     .tensor_infos
                     .get(&format!("blk.{i}.attn_q.weight"))
                     .map_or(0, |info| info.shape.dims()[0]);
-                let num_heads = md_u32_or(&gg, "attention.head_count", 0);
+                let num_heads = md.opt_usize(&key("attention.head_count")).unwrap_or(0);
                 q_rows == 2 * num_heads * head_dim
             });
 
@@ -322,12 +304,14 @@ impl Qwen3_5TextModel {
             head_dim,
             vocab_size,
             hidden_size,
-            intermediate_size: md_u32(&gg, "feed_forward_length")?,
+            // MoE checkpoints have no dense FFN width; their layers load
+            // `ffn_gate_inp` + experts instead (see `DecoderLayer::from_gguf`).
+            intermediate_size: md.opt_usize(&key("feed_forward_length")).unwrap_or(0),
             num_hidden_layers,
-            num_attention_heads: md_u32(&gg, "attention.head_count")?,
-            num_key_value_heads: md_u32(&gg, "attention.head_count_kv")?,
+            num_attention_heads: md.usize(&key("attention.head_count"))?,
+            num_key_value_heads: md.usize(&key("attention.head_count_kv"))?,
             hidden_act: HiddenAct::Silu,
-            max_position_embeddings: md_u32_or(&gg, "context_length", 262_144),
+            max_position_embeddings: md.opt_usize(&key("context_length")).unwrap_or(262_144),
             rms_norm_eps,
             rope_parameters: RopeParameters {
                 rope_theta,
@@ -335,17 +319,23 @@ impl Qwen3_5TextModel {
                 partial_rotary_factor,
                 mrope_interleaved: true,
             },
-            full_attention_interval: md_u32_or(&gg, "full_attention_interval", 4),
-            linear_conv_kernel_dim: md_u32(&gg, "ssm.conv_kernel")?,
-            linear_key_head_dim: md_u32(&gg, "ssm.state_size")?,
+            full_attention_interval: md.opt_usize(&key("full_attention_interval")).unwrap_or(4),
+            linear_conv_kernel_dim: md.usize(&key("ssm.conv_kernel"))?,
+            linear_key_head_dim: md.usize(&key("ssm.state_size"))?,
             linear_value_head_dim: inner_size / num_v_heads,
-            linear_num_key_heads: md_u32(&gg, "ssm.group_count")?,
+            linear_num_key_heads: md.usize(&key("ssm.group_count"))?,
             linear_num_value_heads: num_v_heads,
             tie_word_embeddings,
             attn_output_gate,
             // GGUF carries no gate-activation key; the conversion only ever
             // targets the swish gate this code implements.
             output_gate_type: None,
+            // Zero for a dense model (key absent or 0).
+            num_experts: md.opt_usize(&key("expert_count")).unwrap_or(0),
+            num_experts_per_tok: md.opt_usize(&key("expert_used_count")).unwrap_or(0),
+            moe_intermediate_size: md
+                .opt_usize(&key("expert_feed_forward_length"))
+                .unwrap_or(0),
         };
 
         // The 248k-row table is the single largest dequantization in the
@@ -355,7 +345,7 @@ impl Qwen3_5TextModel {
         let mut layers = Vec::with_capacity(num_hidden_layers);
         for (idx, &layer_type) in layer_types.iter().enumerate() {
             layers.push(DecoderLayer::from_gguf(
-                &text_cfg, layer_type, &mut gg, idx,
+                &text_cfg, layer_type, &mut gg, idx, device,
             )?);
         }
 
@@ -690,7 +680,7 @@ fn build_layer_caches(
 /// metadata field can only hold one id, so a GGUF-only export (no sidecar
 /// `generation_config.json`) silently drops whichever canonical stop token the
 /// exporter didn't pick.
-fn merge_canonical_eos_ids(
+pub(crate) fn merge_canonical_eos_ids(
     eos_token_ids: &mut Vec<u32>,
     vocab: &std::collections::HashMap<String, u32>,
 ) {
@@ -706,7 +696,7 @@ fn merge_canonical_eos_ids(
 /// Read EOS token id(s) from `generation_config.json` (preferred) then
 /// `config.json`. The field may be a single integer or a list; returns an empty
 /// vec if absent.
-fn read_eos_token_ids(model_path: &str) -> Vec<u32> {
+pub(crate) fn read_eos_token_ids(model_path: &str) -> Vec<u32> {
     fn from_value(v: &serde_json::Value) -> Vec<u32> {
         match v {
             serde_json::Value::Number(n) => n
@@ -866,10 +856,7 @@ impl Model {
         // other canonical stop token by name (see `merge_canonical_eos_ids`).
         let mut eos_token_ids = read_eos_token_ids(&parent.to_string_lossy());
         if eos_token_ids.is_empty()
-            && let Some(id) = ct
-                .metadata
-                .get("tokenizer.ggml.eos_token_id")
-                .and_then(|v| v.to_u32().ok())
+            && let Some(id) = GgufMetadata::new(&ct.metadata).opt_u32("tokenizer.ggml.eos_token_id")
         {
             eos_token_ids.push(id);
         }

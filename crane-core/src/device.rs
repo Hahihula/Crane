@@ -102,6 +102,82 @@ impl From<&DeviceAssignment> for DeviceAssignment {
     }
 }
 
+/// Synchronize the device and return memory the backend holds for reuse
+/// (freed-but-cached and deferred-free buffers) to the driver. Called at the
+/// natural boundaries of a long prefill (each layer, attention slice and
+/// `MoE` GEMM batch).
+///
+/// Only SYCL needs it, for two reasons:
+/// - The candle SYCL fork pools freed buffers by exact size and defers the
+///   frees it declines; a prefill that frees many 100 MB-scale temporaries
+///   can leave GBs unreleased, and oneMKL's and Level Zero's own allocations
+///   cannot make it drain. (Bounding the deferred frees by bytes in the fork
+///   fixes this part.)
+/// - Without syncs, a long prefill hands the GPU work that runs past the xe
+///   driver's per-job timeout (`job_timeout_ms`, 5 s by default), which
+///   wedges the device until a reboot. The syncs keep each job short, and
+///   prefill is faster with them (125 vs 102 tok/s on a 20k-token prompt).
+///
+/// A no-op on other backends.
+pub fn release_cached_memory(device: &Device) {
+    #[cfg(feature = "sycl")]
+    if let Ok(dev) = device.as_sycl_device() {
+        dev.queue().drain_pool();
+    }
+    #[cfg(not(feature = "sycl"))]
+    let _ = device;
+}
+
+/// Host memory the kernel reports as available for new allocations without
+/// swapping, in bytes: `MemAvailable` in `/proc/meminfo` on Linux; on macOS
+/// the free, inactive, purgeable and speculative pages of the Mach VM
+/// statistics (memory the kernel hands out without compressing or swapping).
+/// `None` where that is unavailable (other OSes, or the query fails).
+#[must_use]
+pub fn available_host_memory() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_available_memory()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib * 1024)
+    }
+}
+
+#[cfg(target_os = "macos")]
+// libc marks its Mach bindings deprecated in favour of the `mach2` crate;
+// these two are stable system calls, not worth another dependency.
+#[allow(deprecated)]
+fn macos_available_memory() -> Option<u64> {
+    // SAFETY: `host_statistics64` fills at most `count` integers of `stats`,
+    // which is a plain-data struct valid when zeroed.
+    let stats = unsafe {
+        let mut stats: libc::vm_statistics64 = std::mem::zeroed();
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        let status = libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            (&raw mut stats).cast(),
+            &raw mut count,
+        );
+        if status != libc::KERN_SUCCESS {
+            return None;
+        }
+        stats
+    };
+    // SAFETY: plain `sysconf` query.
+    let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+    let pages = u64::from(stats.free_count)
+        + u64::from(stats.inactive_count)
+        + u64::from(stats.purgeable_count)
+        + u64::from(stats.speculative_count);
+    Some(pages * page)
+}
+
 /// Live-queries `(free_bytes, total_bytes)` for `device`.
 ///
 /// `None` for CPU, or for a GPU backend with no query support here (e.g.
@@ -166,6 +242,28 @@ pub fn format_budget(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Verifies the host-memory query answers on Linux and macOS, with a
+    // value between zero and the machine's physical memory.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_host_memory_is_plausible() {
+        let avail = available_host_memory().expect("host memory query");
+        assert!(avail > 0);
+        #[cfg(target_os = "macos")]
+        {
+            let out = std::process::Command::new("sysctl")
+                .args(["-n", "hw.memsize"])
+                .output()
+                .unwrap();
+            let total: u64 = String::from_utf8(out.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(avail <= total, "{avail} > {total}");
+        }
+    }
 
     // Verifies `uniform` assigns the same device to both fields.
     #[test]
