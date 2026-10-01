@@ -23,6 +23,9 @@ use super::model::special_tokens::SPEECH_DIFFUSION_ID;
 /// generated latent frame is exactly `3200` audio samples at 24kHz.
 pub const SPEECH_COMPRESSION_RATIO: usize = 3200;
 
+/// Output sample rate in Hz, fixed by the VAE architecture.
+pub const SAMPLE_RATE: u32 = 24_000;
+
 /// Output of [`build_prompt`]: the full token sequence (voice-prompt frames
 /// represented by `speech_diffusion_id` placeholders) plus where those
 /// placeholders are, so the caller can splice in real voice-prompt

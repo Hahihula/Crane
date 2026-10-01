@@ -244,6 +244,12 @@ impl KugelAudioModel {
         self.dtype
     }
 
+    /// Output sample rate in Hz (24 kHz, fixed by the VAE architecture).
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        super::prompt::SAMPLE_RATE
+    }
+
     /// Text-token embedding lookup. `input_ids`: `[batch, seq_len]` →
     /// `[batch, seq_len, hidden_size]`.
     pub fn embed_text_tokens(&self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
