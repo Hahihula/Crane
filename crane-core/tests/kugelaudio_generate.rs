@@ -4,28 +4,24 @@
 //! finite non-empty audio) — not output *correctness* (no HF reference
 //! comparison yet).
 //!
-//! Gated by `CRANE_KUGELAUDIO_DIR` and `CRANE_KUGELAUDIO_TOKENIZER` (see
-//! `prompt.rs` for why the tokenizer must be Qwen2-VL-family).
+//! Gated by `CRANE_KUGELAUDIO_DIR`. See `prompt.rs` for why the tokenizer
+//! must be Qwen2-VL-family -- `KugelAudioModel::from_pretrained` loads it
+//! from `<dir>/tokenizer.json`.
 
 #![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
 
 #[test]
-#[ignore = "needs a local KugelAudio checkpoint + tokenizer.json (CRANE_KUGELAUDIO_DIR, CRANE_KUGELAUDIO_TOKENIZER)"]
+#[ignore = "needs a local KugelAudio checkpoint (CRANE_KUGELAUDIO_DIR)"]
 fn kugelaudio_generate_is_well_formed() {
     #[cfg(feature = "cuda")]
     use crane_core::cuda_is_available;
     use crane_core::models::kugelaudio::model::special_tokens::{
         EOS_TOKEN_ID, SPEECH_DIFFUSION_ID, SPEECH_END_ID, SPEECH_START_ID,
     };
-    use crane_core::models::kugelaudio::{
-        KugelAudioGenerationConfig, KugelAudioModel, build_prompt,
-    };
+    use crane_core::models::kugelaudio::{KugelAudioGenerationConfig, KugelAudioModel};
     use crane_core::{DType, Device};
-    use tokenizers::Tokenizer;
 
     let dir = std::env::var("CRANE_KUGELAUDIO_DIR").expect("set CRANE_KUGELAUDIO_DIR");
-    let tokenizer_path =
-        std::env::var("CRANE_KUGELAUDIO_TOKENIZER").expect("set CRANE_KUGELAUDIO_TOKENIZER");
 
     // CUDA → CUDA BF16; macOS → Metal F16; everything else → CPU F32.
     #[cfg(feature = "cuda")]
@@ -39,13 +35,13 @@ fn kugelaudio_generate_is_well_formed() {
     #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
     let (device, dtype) = (Device::Cpu, DType::F32);
 
-    let tokenizer = Tokenizer::from_file(&tokenizer_path).expect("load tokenizer.json");
-    let prompt =
-        build_prompt(&tokenizer, "Hello there, this is a short test.", None).expect("build_prompt");
-    assert!(prompt.speech_input_mask.iter().all(|&b| !b));
-
     let mut model =
         KugelAudioModel::from_pretrained(&dir, &device, dtype).expect("from_pretrained");
+
+    let prompt = model
+        .build_prompt("Hello there, this is a short test.", None)
+        .expect("build_prompt");
+    assert!(prompt.speech_input_mask.iter().all(|&b| !b));
 
     let gen_cfg = KugelAudioGenerationConfig {
         cfg_scale: 1.0, // no CFG for this smoke run

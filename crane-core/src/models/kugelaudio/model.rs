@@ -43,7 +43,9 @@ use candle_core::quantized::GgmlDType;
 use candle_core::{D, DType, Device, Module, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
+use tokenizers::Tokenizer;
 
+use crate::utils::tokenizer_utils::load_tokenizer_from_model_dir;
 use crate::utils::utils::get_safetensors_files;
 
 use super::config::{KugelAudioConfig, load_config};
@@ -66,8 +68,8 @@ pub mod special_tokens {
     pub const EOS_TOKEN_ID: u32 = 151_643;
 }
 
-/// Every sub-network wired to one checkpoint's weights, plus the config
-/// values callers need.
+/// Every sub-network wired to one checkpoint's weights, the Qwen2-VL-family
+/// tokenizer, plus the config values callers need.
 pub struct KugelAudioModel {
     pub config: KugelAudioConfig,
     decoder: KugelAudioDecoder,
@@ -88,6 +90,7 @@ pub struct KugelAudioModel {
     speech_bias_factor: f64,
     device: Device,
     dtype: DType,
+    tokenizer: Tokenizer,
 }
 
 /// Read the in-situ quantization level from `CRANE_ISQ` (e.g. `q4_0`,
@@ -106,16 +109,17 @@ fn isq_from_env() -> Option<GgmlDType> {
 
 impl KugelAudioModel {
     /// Load every sub-network from `model_dir` (a directory containing
-    /// `config.json` and `model.safetensors.index.json` + shards). Verified
-    /// against the real checkpoint in `crane-core/tests/kugelaudio_load.rs`.
+    /// `config.json`, `model.safetensors.index.json` + shards, and a
+    /// Qwen2-VL-family `tokenizer.json`). Verified against the real
+    /// checkpoint in `crane-core/tests/kugelaudio_load.rs`.
     ///
     /// In-situ quantization is picked up from `CRANE_ISQ`; use
     /// [`Self::from_pretrained_with_quant`] to set it explicitly.
     ///
     /// # Errors
     ///
-    /// Returns an error if the config can't be read, weights can't be
-    /// mmaped, or any sub-network fails to construct.
+    /// Returns an error if the config can't be read, the tokenizer can't be
+    /// loaded, weights can't be mmaped, or any sub-network fails to construct.
     pub fn from_pretrained(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
         Self::from_pretrained_with_quant(model_dir, device, dtype, isq_from_env())
     }
@@ -129,8 +133,8 @@ impl KugelAudioModel {
     ///
     /// # Errors
     ///
-    /// Returns an error if the config can't be read, weights can't be
-    /// mmaped, or any sub-network fails to construct.
+    /// Returns an error if the config can't be read, the tokenizer can't be
+    /// loaded, weights can't be mmaped, or any sub-network fails to construct.
     pub fn from_pretrained_with_quant(
         model_dir: &str,
         device: &Device,
@@ -140,6 +144,11 @@ impl KugelAudioModel {
         let config_path = std::path::Path::new(model_dir).join("config.json");
         let config = load_config(config_path.to_str().context("non-UTF8 model path")?)
             .context("kugelaudio: load config.json")?;
+
+        // Load before the (potentially multi-minute, ~18.7GB) checkpoint
+        // below so a missing/bad tokenizer.json fails fast.
+        let tokenizer = load_tokenizer_from_model_dir(model_dir)
+            .context("kugelaudio: load Qwen2-VL-family tokenizer.json from model directory")?;
 
         let filenames = get_safetensors_files(model_dir)?;
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, device)? };
@@ -231,6 +240,7 @@ impl KugelAudioModel {
             speech_bias_factor,
             device: device.clone(),
             dtype,
+            tokenizer,
         })
     }
 
@@ -248,6 +258,24 @@ impl KugelAudioModel {
     #[must_use]
     pub fn sample_rate(&self) -> u32 {
         super::prompt::SAMPLE_RATE
+    }
+
+    /// The Qwen2-VL-family tokenizer loaded from `<model_dir>/tokenizer.json`.
+    /// See `prompt.rs`'s module doc comment for why that specific vocab is
+    /// required.
+    #[must_use]
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
+    /// Build a generation prompt for `text` using this model's own
+    /// tokenizer. See [`super::prompt::build_prompt`].
+    pub fn build_prompt(
+        &self,
+        text: &str,
+        voice_audio_num_samples: Option<usize>,
+    ) -> Result<PromptResult> {
+        super::prompt::build_prompt(&self.tokenizer, text, voice_audio_num_samples)
     }
 
     /// Text-token embedding lookup. `input_ids`: `[batch, seq_len]` →

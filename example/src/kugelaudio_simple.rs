@@ -9,25 +9,20 @@
 //! Unlike Crane's other TTS checkpoints, `KugelAudio` ships **no tokenizer of
 //! its own** — it needs a Qwen2-VL-family `tokenizer.json` (only the
 //! Qwen2-VL vocab defines `<|vision_start/end/pad|>` at the fixed ids this
-//! port hardcodes as speech control tokens). Download one once, e.g.:
-//!
-//! ```bash
-//! curl -L -o tokenizer.json \
-//!   https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/resolve/main/tokenizer.json
-//! ```
-//!
-//! See `crane_core::models::kugelaudio::prompt` for the full explanation.
+//! port hardcodes as speech control tokens). `KugelAudioModel::from_pretrained`
+//! loads it automatically from `<model_path>/tokenizer.json`. See
+//! `crane_core::models::kugelaudio::prompt` for the full explanation.
 //!
 //! # Usage
 //!
 //! ```bash
 //! # Zero-shot, built-in example sentence
 //! cargo run --bin kugelaudio_simple --release --features cuda -- \
-//!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json
+//!     checkpoints/kugelaudio-0-open
 //!
 //! # Voice cloning from a reference clip (no transcript needed)
 //! cargo run --bin kugelaudio_simple --release --features cuda -- \
-//!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json "Text to speak" --ref-wav ref.wav
+//!     checkpoints/kugelaudio-0-open "Text to speak" --ref-wav ref.wav
 //!
 //! # macOS: use --features metal instead of --features cuda
 //!
@@ -35,7 +30,7 @@
 //! # (~7B parameters, the bulk of the ~18.7GB checkpoint) — works with
 //! # either --features cuda or --features metal
 //! cargo run --bin kugelaudio_simple --release --features metal -- \
-//!     checkpoints/kugelaudio-0-open --tokenizer tokenizer.json --quant q4_0
+//!     checkpoints/kugelaudio-0-open --quant q4_0
 //! ```
 //!
 //! **Quantization caveat**: `--quant`/`CRANE_ISQ` is unit-tested on CPU
@@ -58,12 +53,9 @@ use clap::Parser;
 #[command(about = "KugelAudio TTS demo: zero-shot or reference-audio-conditioned (voice cloning)")]
 struct Args {
     /// Path to the KugelAudio checkpoint directory (must contain
-    /// config.json + model-*.safetensors / model.safetensors.index.json).
+    /// config.json + model-*.safetensors / model.safetensors.index.json,
+    /// plus a Qwen2-VL-family tokenizer.json — see module doc comment).
     model_path: String,
-    /// Path to a Qwen2-VL-family tokenizer.json — see module doc comment.
-    /// Defaults to `<model_path>/tokenizer.json` if present.
-    #[arg(long)]
-    tokenizer: Option<String>,
     /// Text to synthesize.
     #[arg(default_value = "Hello! I am Crane, an ultra-fast inference engine written in Rust.")]
     text: String,
@@ -101,30 +93,13 @@ struct Args {
     quant: Option<String>,
 }
 
-const SAMPLE_RATE: u32 = 24_000;
-
 fn main() -> anyhow::Result<()> {
     use crane_core::candle_core::{DType, Device, Tensor};
-    use crane_core::models::kugelaudio::{
-        KugelAudioGenerationConfig, KugelAudioModel, build_prompt,
-    };
+    use crane_core::models::kugelaudio::prompt::SAMPLE_RATE;
+    use crane_core::models::kugelaudio::{KugelAudioGenerationConfig, KugelAudioModel};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokenizers::Tokenizer;
 
     let args = Args::parse();
-
-    let tokenizer_path = args
-        .tokenizer
-        .clone()
-        .unwrap_or_else(|| format!("{}/tokenizer.json", args.model_path));
-    if !std::path::Path::new(&tokenizer_path).exists() {
-        anyhow::bail!(
-            "no tokenizer.json found at {tokenizer_path:?}. KugelAudio ships no tokenizer of its \
-             own -- download a Qwen2-VL-family one and pass --tokenizer, e.g.:\n\n\
-             curl -L -o tokenizer.json \
-             https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/resolve/main/tokenizer.json"
-        );
-    }
 
     let (device, dtype) = if args.cpu {
         (Device::Cpu, DType::F32)
@@ -174,15 +149,6 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("invalid CRANE_ISQ: {e}"))?,
     };
 
-    println!("Loading KugelAudio from: {}", args.model_path);
-    println!("Device: {device:?}  dtype: {dtype:?}  quant: {quant:?}");
-    let mut model =
-        KugelAudioModel::from_pretrained_with_quant(&args.model_path, &device, dtype, quant)?;
-
-    println!("Loading tokenizer from: {tokenizer_path}");
-    let tokenizer = Tokenizer::from_file(&tokenizer_path)
-        .map_err(|e| anyhow::anyhow!("load tokenizer.json: {e}"))?;
-
     let voice_waveform = args
         .ref_wav
         .as_deref()
@@ -194,6 +160,11 @@ fn main() -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    println!("Loading KugelAudio from: {}", args.model_path);
+    println!("Device: {device:?}  dtype: {dtype:?}  quant: {quant:?}");
+    let mut model =
+        KugelAudioModel::from_pretrained_with_quant(&args.model_path, &device, dtype, quant)?;
+
     println!(
         "Mode: {}",
         if voice_waveform.is_some() {
@@ -204,11 +175,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!("Text: {}", args.text);
 
-    let prompt = build_prompt(
-        &tokenizer,
-        &args.text,
-        voice_waveform.as_ref().map(|(_, n)| *n),
-    )?;
+    let prompt = model.build_prompt(&args.text, voice_waveform.as_ref().map(|(_, n)| *n))?;
 
     let gen_cfg = KugelAudioGenerationConfig {
         cfg_scale: args.cfg_scale,
