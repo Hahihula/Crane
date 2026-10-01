@@ -39,6 +39,7 @@ pub enum ModelType {
     VoxtralTTS,
     Kokoro,
     VoxCpm2,
+    KugelAudio,
     PaddleOcrVl,
     Qwen3ASR,
 }
@@ -76,6 +77,7 @@ impl ModelType {
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
             "kokoro" | "kokoro_tts" | "kokoro-tts" | "kokoro-82m" => Self::Kokoro,
             "voxcpm2" | "voxcpm-2" | "voxcpm_2" | "voxcpm" => Self::VoxCpm2,
+            "kugelaudio" | "kugel_audio" | "kugel-audio" | "kugel" => Self::KugelAudio,
             "paddleocr_vl" | "paddleocrv" | "paddleocr" | "paddle_ocr_vl" | "paddleocrvl" => {
                 Self::PaddleOcrVl
             },
@@ -102,6 +104,7 @@ impl ModelType {
             Self::VoxtralTTS => "voxtral_tts",
             Self::Kokoro => "kokoro_tts",
             Self::VoxCpm2 => "voxcpm2",
+            Self::KugelAudio => "kugelaudio",
             Self::PaddleOcrVl => "paddleocr_vl",
             Self::Qwen3ASR => "qwen3_asr",
         }
@@ -121,7 +124,7 @@ impl ModelType {
     pub fn is_tts(&self) -> bool {
         matches!(
             self,
-            Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro | Self::VoxCpm2
+            Self::Qwen3TTS | Self::VoxtralTTS | Self::Kokoro | Self::VoxCpm2 | Self::KugelAudio
         )
     }
 
@@ -239,6 +242,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
                 "qwen3_asr" | "qwen3asr" => return ModelType::Qwen3ASR,
                 "style_text_to_speech_2" => return ModelType::Kokoro,
+                "kugelaudio" => return ModelType::KugelAudio,
                 m if m.contains("hunyuan") => return ModelType::HunyuanDense,
                 m if m.contains("paddleocr") => return ModelType::PaddleOcrVl,
                 _ => {},
@@ -272,6 +276,9 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 }
                 if a.contains("qwen3asrforconditional") || a.contains("qwen3_asr") {
                     return ModelType::Qwen3ASR;
+                }
+                if a.contains("kugelaudioforconditional") {
+                    return ModelType::KugelAudio;
                 }
                 // Qwen3_5ForConditionalGeneration is the multimodal class;
                 // Qwen3_5ForCausalLM (or any other Qwen3_5*) is text-only.
@@ -339,6 +346,8 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         ModelType::Kokoro
     } else if path_lower.contains("voxcpm") {
         ModelType::VoxCpm2
+    } else if path_lower.contains("kugelaudio") {
+        ModelType::KugelAudio
     } else if path_lower.contains("paddleocr") {
         ModelType::PaddleOcrVl
     } else if path_lower.contains("gemma4") || path_lower.contains("gemma-4") {
@@ -630,6 +639,11 @@ pub fn create_backend(
         ModelType::VoxCpm2 => {
             anyhow::bail!("VoxCPM2 is a TTS model — use create_tts() instead of create_backend()")
         },
+        ModelType::KugelAudio => {
+            anyhow::bail!(
+                "KugelAudio is a TTS model — use create_tts() instead of create_backend()"
+            )
+        },
         ModelType::Qwen3ASR => {
             anyhow::bail!(
                 "Qwen3-ASR is an ASR model — use create_asr() instead of create_backend()"
@@ -709,6 +723,9 @@ pub fn create_vlm_model(
 ///
 /// Unified entrypoint for all TTS model types; the returned `Box<dyn Tts + Send>`
 /// can be moved into a dedicated thread without model-specific branching.
+/// `quant` requests in-situ quantization of a safetensors checkpoint; only
+/// `KugelAudio` currently supports it, every other TTS model warns and
+/// ignores it rather than failing to load an otherwise-valid checkpoint.
 ///
 /// # Errors
 ///
@@ -720,12 +737,19 @@ pub fn create_tts(
     device: &Device,
     dtype: &DType,
     voice_dir: Option<&std::path::Path>,
+    quant: Option<&str>,
 ) -> Result<Box<dyn crane::audio::Tts + Send>> {
     tracing::info!(
         "Creating {} model from: {}",
         model_type.display_name(),
         model_path
     );
+    if quant.is_some() && model_type != ModelType::KugelAudio {
+        tracing::warn!(
+            "--quant is not supported for {}; ignoring",
+            model_type.display_name()
+        );
+    }
     match model_type {
         ModelType::Qwen3TTS => {
             let model = crane_core::models::qwen3_tts::Model::new(model_path, device, dtype)?;
@@ -748,6 +772,16 @@ pub fn create_tts(
                 device,
             )?;
             Ok(Box::new(tts))
+        },
+        ModelType::KugelAudio => {
+            let quant = quant
+                .map(crane_core::ops::linear::parse_ggml_dtype)
+                .transpose()?;
+            let model =
+                crane_core::models::kugelaudio::KugelAudioModel::from_pretrained_with_quant(
+                    model_path, device, *dtype, quant,
+                )?;
+            Ok(Box::new(model))
         },
         other => anyhow::bail!("{other:?} is not a TTS model type"),
     }
@@ -1029,6 +1063,48 @@ mod tests {
     }
 
     #[test]
+    fn model_type_from_str_kugelaudio_variants() {
+        assert_eq!(ModelType::from_str("kugelaudio"), ModelType::KugelAudio);
+        assert_eq!(ModelType::from_str("kugel_audio"), ModelType::KugelAudio);
+        assert_eq!(ModelType::from_str("kugel-audio"), ModelType::KugelAudio);
+        assert_eq!(ModelType::from_str("kugel"), ModelType::KugelAudio);
+        assert_eq!(ModelType::from_str("KUGELAUDIO"), ModelType::KugelAudio);
+    }
+
+    #[test]
+    fn model_type_is_tts_includes_kugelaudio() {
+        assert!(ModelType::KugelAudio.is_tts());
+    }
+
+    #[test]
+    fn detect_from_config_json_model_type_kugelaudio() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"model_type": "kugelaudio"}"#).unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::KugelAudio);
+    }
+
+    #[test]
+    fn detect_from_config_json_architectures_kugelaudio() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"architectures": ["KugelAudioForConditionalGeneration"]}"#,
+        )
+        .unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::KugelAudio);
+    }
+
+    #[test]
+    fn detect_path_heuristic_kugelaudio() {
+        let result = detect_model_type("/models/kugelaudio-0-open");
+        assert_eq!(result, ModelType::KugelAudio);
+    }
+
+    #[test]
     fn model_type_from_str_auto_fallback() {
         assert_eq!(ModelType::from_str("auto"), ModelType::Auto);
         assert_eq!(ModelType::from_str("unknown"), ModelType::Auto);
@@ -1040,6 +1116,7 @@ mod tests {
         assert!(ModelType::Qwen3TTS.is_tts());
         assert!(ModelType::VoxtralTTS.is_tts());
         assert!(ModelType::Kokoro.is_tts());
+        assert!(ModelType::KugelAudio.is_tts());
         assert!(!ModelType::Qwen3.is_tts());
     }
 
