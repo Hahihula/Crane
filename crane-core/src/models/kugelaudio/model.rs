@@ -38,6 +38,8 @@
 )]
 // //: stylistic; matches the codebase's prevailing style elsewhere
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use candle_core::quantized::GgmlDType;
 use candle_core::{D, DType, Device, Module, Tensor};
@@ -55,6 +57,7 @@ use super::decoder::KugelAudioDecoder;
 use super::diffusion_head::DiffusionHead;
 use super::dpm_solver::DpmSolverScheduler;
 use super::prompt::PromptResult;
+use super::voices::{KugelAudioVoice, load_voices};
 
 use crate::models::with_tracing::{Linear, linear_no_bias};
 
@@ -91,6 +94,7 @@ pub struct KugelAudioModel {
     device: Device,
     dtype: DType,
     tokenizer: Tokenizer,
+    voices: HashMap<String, KugelAudioVoice>,
 }
 
 /// Read the in-situ quantization level from `CRANE_ISQ` (e.g. `q4_0`,
@@ -149,6 +153,9 @@ impl KugelAudioModel {
         // below so a missing/bad tokenizer.json fails fast.
         let tokenizer = load_tokenizer_from_model_dir(model_dir)
             .context("kugelaudio: load Qwen2-VL-family tokenizer.json from model directory")?;
+
+        let voices = load_voices(std::path::Path::new(model_dir), &config, device)
+            .context("kugelaudio: load preset voices")?;
 
         let filenames = get_safetensors_files(model_dir)?;
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, device)? };
@@ -241,6 +248,7 @@ impl KugelAudioModel {
             device: device.clone(),
             dtype,
             tokenizer,
+            voices,
         })
     }
 
@@ -276,6 +284,13 @@ impl KugelAudioModel {
         voice_audio_num_samples: Option<usize>,
     ) -> Result<PromptResult> {
         super::prompt::build_prompt(&self.tokenizer, text, voice_audio_num_samples)
+    }
+
+    /// Preset voices loaded from `<model_dir>/voices/voices.json`, keyed by
+    /// name. Empty if the checkpoint ships no preset voices.
+    #[must_use]
+    pub fn available_voices(&self) -> &HashMap<String, KugelAudioVoice> {
+        &self.voices
     }
 
     /// Text-token embedding lookup. `input_ids`: `[batch, seq_len]` →
