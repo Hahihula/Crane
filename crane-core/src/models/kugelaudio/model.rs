@@ -286,6 +286,25 @@ impl KugelAudioModel {
         super::prompt::build_prompt(&self.tokenizer, text, voice_audio_num_samples)
     }
 
+    /// Build a generation prompt for `text` conditioned on the preset voice
+    /// `voice_name` (see [`Self::available_voices`]). The voice-prompt frame
+    /// count is read directly from the preset's own latent tensor, so no
+    /// sample-to-frame conversion is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `voice_name` is not a loaded preset voice.
+    pub fn build_prompt_for_voice(&self, text: &str, voice_name: &str) -> Result<PromptResult> {
+        let voice = self.voices.get(voice_name).with_context(|| {
+            format!(
+                "kugelaudio: unknown voice '{voice_name}' (available: {:?})",
+                self.voices.keys().collect::<Vec<_>>()
+            )
+        })?;
+        let frame_count = voice.acoustic_mean.dim(2)?;
+        super::prompt::build_prompt_with_frame_count(&self.tokenizer, text, frame_count)
+    }
+
     /// Preset voices loaded from `<model_dir>/voices/voices.json`, keyed by
     /// name. Empty if the checkpoint ships no preset voices.
     #[must_use]
@@ -493,10 +512,21 @@ impl KugelAudioModel {
     /// results for a position whether computed via a streaming cache or
     /// full recompute) but `O(steps²)` instead of `O(steps)`. Fine for
     /// short clips; revisit for long-form generation.
+    ///
+    /// `voice_latents` and `voice_waveform` are mutually exclusive voice
+    /// sources: `voice_latents` is `(acoustic_mean, semantic_mean)`
+    /// pre-encoded latents from a preset voice (see
+    /// [`Self::available_voices`]), each `[1, vae_dim, T]` — the same shape
+    /// [`Self::encode_acoustic`]/[`Self::encode_semantic`] return — and
+    /// skips the VAE encoder calls entirely. `voice_waveform` is a raw
+    /// reference clip for voice cloning, run through both encoders. Passing
+    /// both is an error; passing neither falls back to the model-internal
+    /// zero-shot default.
     #[allow(clippy::too_many_lines)]
     pub fn generate(
         &mut self,
         prompt: &PromptResult,
+        voice_latents: Option<(&Tensor, &Tensor)>,
         voice_waveform: Option<&Tensor>,
         cfg: &KugelAudioGenerationConfig,
     ) -> Result<KugelAudioGenerationOutput> {
@@ -510,17 +540,39 @@ impl KugelAudioModel {
         let mut text_embeds = self.embed_text_tokens(&ids_tensor)?;
 
         if prompt.voice_frame_count > 0 {
-            let waveform = voice_waveform
-                .context("kugelaudio generate: prompt has voice-prompt frames but no voice_waveform was given")?;
-            let acoustic = self
-                .encode_acoustic(waveform)?
-                .transpose(1, 2)?
-                .contiguous()?; // [1, T, vae_dim]
+            anyhow::ensure!(
+                voice_latents.is_none() || voice_waveform.is_none(),
+                "kugelaudio generate: voice_latents and voice_waveform are mutually exclusive \
+                 -- pass pre-encoded latents (preset voice) or a raw waveform (voice cloning), not both"
+            );
+            // Obtain raw [1, vae_dim, T] acoustic/semantic latents, either
+            // from a preset's pre-encoded tensors (cheap Arc-clone, no VAE
+            // encoder call) or by encoding a raw waveform. The rest of the
+            // pipeline below is identical for both sources. Preset latents
+            // are stored as BF16 (see voices.rs) and must be cast to
+            // self.dtype, same as encode_acoustic/encode_semantic already
+            // do for the waveform path -- otherwise the connector matmuls
+            // below (typed to self.dtype) fail on CPU/Metal.
+            let (acoustic_raw, semantic_raw) = if let Some((acoustic_mean, semantic_mean)) =
+                voice_latents
+            {
+                (
+                    acoustic_mean.to_dtype(self.dtype)?,
+                    semantic_mean.to_dtype(self.dtype)?,
+                )
+            } else {
+                let waveform = voice_waveform.context(
+                    "kugelaudio generate: prompt has voice-prompt frames but neither voice_latents nor voice_waveform was given",
+                )?;
+                (
+                    self.encode_acoustic(waveform)?,
+                    self.encode_semantic(waveform)?,
+                )
+            };
+
+            let acoustic = acoustic_raw.transpose(1, 2)?.contiguous()?; // [1, T, vae_dim]
             let acoustic_scaled = self.scale_acoustic_latent(&acoustic)?;
-            let semantic = self
-                .encode_semantic(waveform)?
-                .transpose(1, 2)?
-                .contiguous()?; // [1, T_sem, sem_dim]
+            let semantic = semantic_raw.transpose(1, 2)?.contiguous()?; // [1, T_sem, sem_dim]
             let semantic = Self::align_time_len(&semantic, acoustic_scaled.dim(1)?)?;
             let acoustic_embed = self
                 .acoustic_connector

@@ -49,7 +49,9 @@ fn kugelaudio_generate_is_well_formed() {
         do_sample: false,
         temperature: 1.0,
     };
-    let out = model.generate(&prompt, None, &gen_cfg).expect("generate");
+    let out = model
+        .generate(&prompt, None, None, &gen_cfg)
+        .expect("generate");
 
     eprintln!(
         "generated {} control tokens, {} audio samples",

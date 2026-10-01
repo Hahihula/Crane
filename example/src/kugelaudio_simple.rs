@@ -24,6 +24,11 @@
 //! cargo run --bin kugelaudio_simple --release --features cuda -- \
 //!     checkpoints/kugelaudio-0-open "Text to speak" --ref-wav ref.wav
 //!
+//! # Preset voice shipped with the checkpoint (--ref-wav and --voice are
+//! # mutually exclusive)
+//! cargo run --bin kugelaudio_simple --release --features cuda -- \
+//!     checkpoints/kugelaudio-0-open "Text to speak" --voice english_female
+//!
 //! # macOS: use --features metal instead of --features cuda
 //!
 //! # Low-VRAM/low-RAM: 4-bit in-situ quantization of the decoder backbone
@@ -60,9 +65,15 @@ struct Args {
     #[arg(default_value = "Hello! I am Crane, an ultra-fast inference engine written in Rust.")]
     text: String,
     /// Reference audio clip for voice cloning (raw audio, resampled to
-    /// 24kHz internally — no transcript needed).
-    #[arg(long)]
+    /// 24kHz internally — no transcript needed). Mutually exclusive with
+    /// --voice.
+    #[arg(long, conflicts_with = "voice")]
     ref_wav: Option<String>,
+    /// Preset voice name from the checkpoint's voices/ directory (e.g.
+    /// "default", "clear", "english_female", "english_male"). Mutually
+    /// exclusive with --ref-wav.
+    #[arg(long)]
+    voice: Option<String>,
     #[arg(long, default_value = "data/audio/output")]
     output_dir: String,
     /// CFG scale (1.0 disables CFG). Matches the checkpoint's own default.
@@ -165,17 +176,40 @@ fn main() -> anyhow::Result<()> {
     let mut model =
         KugelAudioModel::from_pretrained_with_quant(&args.model_path, &device, dtype, quant)?;
 
+    // Tensor::clone() is Arc::clone (no data copy) -- needed here so the
+    // preset's borrowed tensors outlive the &self lookup, since generate()
+    // below needs &mut self.
+    let voice_latents = args
+        .voice
+        .as_deref()
+        .map(|name| -> anyhow::Result<_> {
+            let voice = model.available_voices().get(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown voice '{name}' (available: {:?})",
+                    model.available_voices().keys().collect::<Vec<_>>()
+                )
+            })?;
+            Ok((voice.acoustic_mean.clone(), voice.semantic_mean.clone()))
+        })
+        .transpose()?;
+
     println!(
         "Mode: {}",
-        if voice_waveform.is_some() {
-            "voice cloning (--ref-wav)"
+        if let Some(name) = args.voice.as_deref() {
+            format!("preset voice '{name}'")
+        } else if voice_waveform.is_some() {
+            "voice cloning (--ref-wav)".to_string()
         } else {
-            "zero-shot"
+            "zero-shot".to_string()
         }
     );
     println!("Text: {}", args.text);
 
-    let prompt = model.build_prompt(&args.text, voice_waveform.as_ref().map(|(_, n)| *n))?;
+    let prompt = if let Some(name) = args.voice.as_deref() {
+        model.build_prompt_for_voice(&args.text, name)?
+    } else {
+        model.build_prompt(&args.text, voice_waveform.as_ref().map(|(_, n)| *n))?
+    };
 
     let gen_cfg = KugelAudioGenerationConfig {
         cfg_scale: args.cfg_scale,
@@ -185,7 +219,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     let start = std::time::Instant::now();
-    let out = model.generate(&prompt, voice_waveform.as_ref().map(|(w, _)| w), &gen_cfg)?;
+    let out = model.generate(
+        &prompt,
+        voice_latents.as_ref().map(|(a, s)| (a, s)),
+        voice_waveform.as_ref().map(|(w, _)| w),
+        &gen_cfg,
+    )?;
     println!(
         "Generated {} control tokens, {:.2}s audio in {:.1?}",
         out.token_ids.len(),
