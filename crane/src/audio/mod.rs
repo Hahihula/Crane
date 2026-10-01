@@ -9,6 +9,7 @@ pub mod tts;
 mod tts_client;
 #[cfg(feature = "onnx")]
 mod tts_kokoro;
+mod tts_kugelaudio;
 mod tts_qwen3;
 mod tts_voxcpm2;
 mod tts_voxtral;
