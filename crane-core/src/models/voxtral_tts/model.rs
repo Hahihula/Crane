@@ -15,6 +15,7 @@ use super::modeling::{
     AcousticTransformer, AudioCodebookEmbedding, VoxtralLlm, rename_voxtral_transformer_keys,
 };
 use crate::generation::SpeechOptions;
+use crate::models::modules::voice_embedding::load_pt_tensor_bytes;
 
 // ── Token IDs ──────────────────────────────────────────────────────────────
 
@@ -255,40 +256,15 @@ const EMBED_DIM: usize = 3072;
 ///
 /// The file is a `PyTorch` ZIP archive containing a single BF16 tensor of
 /// shape `[N, 3072]`, where N is the number of reference audio frames for
-/// the chosen voice.  The archive entry is tried at several conventional
-/// `PyTorch` paths.  Returns the tensor on `device` in BF16.
+/// the chosen voice. Returns the tensor on `device` in BF16.
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened, the ZIP structure is invalid,
-/// no known tensor entry is found, or tensor construction fails.
+/// no tensor entry is found, or tensor construction fails.
 ///
 pub fn load_voice_embedding(path: &Path, device: &Device) -> Result<Tensor> {
-    use std::io::Read as _;
-    let file =
-        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
-        .with_context(|| format!("failed to read ZIP in {}", path.display()))?;
-
-    // PyTorch saves the raw tensor data at one of these paths inside the archive.
-    let candidates = ["voice_embed/data/0", "archive/data/0", "data/0"];
-    let mut bytes = Vec::new();
-    let mut found = false;
-    for &name in &candidates {
-        if let Ok(mut entry) = archive.by_name(name) {
-            entry
-                .read_to_end(&mut bytes)
-                .with_context(|| format!("failed to read '{}' from {}", name, path.display()))?;
-            found = true;
-            break;
-        }
-    }
-    anyhow::ensure!(
-        found,
-        "could not find tensor data entry in {}; tried {:?}",
-        path.display(),
-        candidates
-    );
+    let bytes = load_pt_tensor_bytes(path, 0)?;
 
     // Each BF16 element is 2 bytes; the tensor is [N, EMBED_DIM].
     anyhow::ensure!(
