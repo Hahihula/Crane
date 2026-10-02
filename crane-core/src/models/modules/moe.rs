@@ -397,7 +397,12 @@ impl PackedIQuantExperts {
         // sync and index upload are paid once per layer. Gate and up share
         // one gather of the input, and everything stays in the plan's order
         // until the combine reads it back by pair (see `GemmPlan`).
-        #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+        #[cfg(any(
+            feature = "cuda",
+            feature = "sycl",
+            feature = "metal",
+            feature = "rocm"
+        ))]
         {
             use crate::ops::quant_iq::PlanLayout;
             let layouts = [PlanLayout::Rows(top_k), PlanLayout::PlanOrder];
@@ -5380,11 +5385,25 @@ mod tests {
         packed_iquant_experts_match_dequantized_reference(&Device::new_metal(0)?)
     }
 
+    #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+    #[test]
+    fn rocm_packed_iquant_experts_match_dequantized_reference() -> Result<()> {
+        let Ok(device) = Device::new_rocm(0) else {
+            return Ok(());
+        };
+        packed_iquant_experts_match_dequantized_reference(&device)
+    }
+
     /// Packed i-quant experts on `device` (IQ2_S gate, IQ3_XXS up, Q2_0 down,
     /// as in Qwen3.8-Flash-Next) against routing and experts recomputed here
     /// from the CPU decoders: 3 tokens take the by-id matvec, 1100 (2200
     /// pairs) the shared `GemmPlan` of the batched-GEMM path.
-    #[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+    #[cfg(any(
+        feature = "sycl",
+        feature = "metal",
+        feature = "cuda",
+        feature = "rocm"
+    ))]
     fn packed_iquant_experts_match_dequantized_reference(device: &Device) -> Result<()> {
         use crate::quantized::extended_gguf::read_content_lenient;
         use crate::quantized::iquant::IQuantType;
