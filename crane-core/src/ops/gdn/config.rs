@@ -101,6 +101,12 @@ pub trait GdnConfig {
     fn linear_value_head_dim(&self) -> usize;
     fn linear_num_key_heads(&self) -> usize;
     fn linear_num_value_heads(&self) -> usize;
+    /// Activation of the output gate in [`super::RmsNormGated`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config names an unsupported activation.
+    fn output_gate_activation(&self) -> candle_core::Result<super::GateActivation>;
 
     fn linear_key_dim(&self) -> usize {
         self.linear_num_key_heads() * self.linear_key_head_dim()

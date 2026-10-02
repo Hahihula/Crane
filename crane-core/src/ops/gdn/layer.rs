@@ -60,7 +60,12 @@ impl GatedDeltaNet {
         let dt_bias = vb_la.get(dims.num_v_heads, "dt_bias")?;
         let a_log = vb_la.get(dims.num_v_heads, "A_log")?;
 
-        let norm = RmsNormGated::new(dims.head_v_dim, cfg.rms_norm_eps(), vb_la.pp("norm"))?;
+        let norm = RmsNormGated::new(
+            dims.head_v_dim,
+            cfg.rms_norm_eps(),
+            cfg.output_gate_activation()?,
+            vb_la.pp("norm"),
+        )?;
         let out_proj = linear_layer(
             dims.value_dim,
             dims.hidden_size,
@@ -77,6 +82,74 @@ impl GatedDeltaNet {
             out_proj,
             &dims,
         )
+    }
+
+    /// Load linear-attention block `layer_idx` from a GGUF file in llama.cpp's
+    /// delta-net layout (`qwen35`, `qwen4exp`), returning it with its dims.
+    ///
+    /// The split projections are `attn_qkv` (Q|K|V), `attn_gate` (z),
+    /// `ssm_beta` (β) and `ssm_alpha` (A); `ssm_conv1d` is 2-D
+    /// `[conv_dim, kernel]`, `ssm_a` stores `-exp(A_log)` and `ssm_dt.bias` is
+    /// `dt_bias`; the gated `ssm_norm` is a plain weight as in HF.
+    ///
+    /// The converter orders the value-head axis differently from HF
+    /// ([`VHeadOrder::Chunked`] vs `Interleaved`); rather than permuting the
+    /// affected weights — which would mean dequantizing and re-quantizing
+    /// them, and `Q6_K`'s quantizer is not idempotent — the returned dims
+    /// record the order and the Q/K expansion adapts to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required tensor is missing or the config names an
+    /// unsupported gate activation.
+    pub fn from_gguf<R: std::io::Read + std::io::Seek>(
+        gg: &mut crate::quantized::gguf_file::Gguf<R>,
+        layer_idx: usize,
+        cfg: &dyn GdnConfig,
+    ) -> Result<(Self, GdnDims)> {
+        let prefix = format!("blk.{layer_idx}");
+        let dims = GdnDims::new(cfg).with_v_head_order(VHeadOrder::Chunked);
+        let dense =
+            |gg: &mut crate::quantized::gguf_file::Gguf<R>, name: &str| -> Result<LinearLayer> {
+                Ok(LinearLayer::Standard(candle_nn::Linear::new(
+                    gg.dequant_tensor(&format!("{prefix}.{name}"))?,
+                    None,
+                )))
+            };
+        let in_proj_b = dense(gg, "ssm_beta.weight")?;
+        let in_proj_a = dense(gg, "ssm_alpha.weight")?;
+        let input_proj = GdnInputProjection::Split {
+            in_proj_qkv: gg.linear(&format!("{prefix}.attn_qkv.weight"))?,
+            in_proj_z: gg.linear(&format!("{prefix}.attn_gate.weight"))?,
+            in_proj_b,
+            in_proj_a,
+        };
+        // GGUF stores the conv kernel 2-D; crane expects HF's
+        // `[conv_dim, 1, kernel]`.
+        let conv1d_weight = gg
+            .dequant_tensor(&format!("{prefix}.ssm_conv1d.weight"))?
+            .unsqueeze(1)?;
+        let dt_bias = gg.dequant_tensor(&format!("{prefix}.ssm_dt.bias"))?;
+        let a_log = gg
+            .dequant_tensor(&format!("{prefix}.ssm_a"))?
+            .neg()?
+            .log()?;
+        let norm = RmsNormGated::from_weight(
+            gg.dequant_tensor(&format!("{prefix}.ssm_norm.weight"))?,
+            cfg.rms_norm_eps(),
+            cfg.output_gate_activation()?,
+        );
+        let out_proj = gg.linear(&format!("{prefix}.ssm_out.weight"))?;
+        let gdn = Self::with_derived(
+            input_proj,
+            conv1d_weight,
+            dt_bias,
+            a_log,
+            norm,
+            out_proj,
+            &dims,
+        )?;
+        Ok((gdn, dims))
     }
 
     /// Assemble from already-loaded parts, deriving the per-token constants.

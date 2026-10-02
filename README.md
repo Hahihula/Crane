@@ -31,6 +31,7 @@ A high-performance inference framework leveraging Rust's Candle for maximum spee
 - [ ] Audio8-TTS;
 - [x] PaddleOCR-v6;
 - [x] **[Bonsai 2 Ternary 27B](https://modelscope.cn/models/prism-ml/Ternary-Bonsai-2-27B-gguf)** (native Prism PTQ1_0 + PQ2_0 GGUF, automatic detection, CPU/CUDA, `chat_cli` + `crane-serve`)
+- [x] **Qwen3.8-Flash-Next** (`qwen4_exp`: 177B MoE with hyper-connections, n-gram PLE and QSA sparse attention; [GSQ-RCO Coder GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF) on a single 32 GB Intel Arc Pro B70 via SYCL)
 - [x] Qwen 3.6 / Qwen 3.8 (27B dense, text + vision, thinking control) — same architecture as Qwen 3.5, scaled up
 - [x] Qwen 3.5 (0.8B; hybrid Gated Delta Net + softmax attention, CPU/CUDA/Metal) + Ornith-1.0-9B (agentic, tool calling)
 - [x] Hunyuan Dense
@@ -662,6 +663,40 @@ and load the same checkpoint directory as a plain text model instead.
 `Qwen3_5TextModel` only ever reads `language_model.*` tensors, so the vision
 weights are never even loaded into memory; this path also unlocks `--quant`,
 which is not available on the VLM load path.
+
+
+### Qwen3.8-Flash-Next (`qwen4_exp`)
+
+A preview of the Qwen4 architecture (`model_type: "qwen4_exp"`, GGUF
+`general.architecture = "qwen4exp"`): Qwen 3.5-style GDN + softmax layers
+with a 512-expert MoE, four hyper-connection residual streams, a per-layer
+n-gram embedding (PLE) looked up from a ~320M-row hashed table, and QSA
+sparse attention (a 2048-token budget of pooled key blocks). Crane runs the
+[ISTA-DASLab GSQ-RCO Coder GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
+(256 of 512 experts, IQ2_S / IQ3_XXS / IQ3_S / IQ4_NL / IQ4_XS / Q2_0) with
+the 29.6 GB first shard on the GPU and the 28.8 GB n-gram table from the
+second shard kept on the host.
+
+```bash
+# fetch both shards (58 GB)
+./data/crane-model-download --model qwen3.8-flash-next-coder-gguf --path ~/models
+
+# pass the first shard; the second is found next to it
+./target/release/crane-serve -m /path/to/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf
+cargo run --release --no-default-features --features sycl -p crane-examples \
+  --bin qwen4_exp_simple -- /path/to/...-00001-of-00002.gguf "Reverse a string in Rust."
+```
+
+`CRANE_PLE_RAM=auto|1|0` controls the n-gram table: `auto` (default) copies
+it into RAM when available memory covers it plus 4 GiB, otherwise it is
+memory-mapped. Keep it in RAM (or the model on an SSD): every token reads 16
+random rows, which on a spinning disk drops decode to ~1 tok/s. Prefill runs
+in chunks of 1024 tokens by default (`CRANE_PREFILL_CHUNK`): the packed
+experts cost mostly per chunk, but a chunk's temporaries must fit in the
+~2.7 GiB the weights leave on a 32 GB card. On an Arc Pro B70 with the table
+in RAM: ~15 tok/s decode on short prompts, ~10 tok/s at 4k context and ~4 tok/s
+at 20k; prefill ~120–130 tok/s (a 20k-token prompt in under 3 minutes). Text only for now; the vision tower (`mmproj`) and the MTP
+head are not loaded.
 
 ### MuScriptor (Automatic Music Transcription)
 

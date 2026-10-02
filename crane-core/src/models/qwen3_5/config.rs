@@ -12,7 +12,8 @@
 use candle_core::Result;
 use serde::Deserialize;
 
-use crate::ops::gdn::{GdnConfig, defaults};
+use crate::models::modules::moe::MoeConfig;
+use crate::ops::gdn::{GateActivation, GdnConfig, defaults};
 
 /// Whether a transformer block at layer index `i` is full (softmax) attention
 /// or linear (Gated Delta Net) attention.
@@ -49,6 +50,9 @@ pub struct TextConfig {
     pub head_dim: usize,
     pub vocab_size: usize,
     pub hidden_size: usize,
+    /// Dense FFN width. Absent (0) in `MoE` configs, which size their FFNs via
+    /// `moe_intermediate_size` instead.
+    #[serde(default)]
     pub intermediate_size: usize,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
@@ -79,11 +83,20 @@ pub struct TextConfig {
     /// *not* the softmax-attention gate above — that one is always sigmoid.
     ///
     /// Absent in Qwen 3.5 (implicitly swish); the Qwen 3.6/3.8 27B configs
-    /// spell it out as `"swish"`. Only swish/silu is supported, which is what
-    /// [`crate::ops::gdn::RmsNormGated`] already computes, so a present-and-
-    /// swish value is a no-op. Validated by [`TextConfig::validate`].
+    /// spell it out as `"swish"`. Parsed by
+    /// [`crate::ops::gdn::GateActivation::from_name`] and validated by
+    /// [`TextConfig::validate`].
     #[serde(default)]
     pub output_gate_type: Option<String>,
+
+    /// Routed-expert count; 0 for the dense models. Every layer is `MoE` when
+    /// non-zero, each with a shared expert alongside the routed ones.
+    #[serde(default)]
+    pub num_experts: usize,
+    #[serde(default)]
+    pub num_experts_per_tok: usize,
+    #[serde(default)]
+    pub moe_intermediate_size: usize,
 }
 
 fn default_true() -> bool {
@@ -189,24 +202,32 @@ pub enum HiddenAct {
 }
 
 impl TextConfig {
+    /// `MoE` routing config, or `None` for a dense model.
+    #[must_use]
+    pub fn moe_config(&self) -> Option<MoeConfig> {
+        (self.num_experts > 0).then_some(MoeConfig {
+            num_experts: self.num_experts,
+            num_experts_per_tok: self.num_experts_per_tok,
+            moe_intermediate_size: self.moe_intermediate_size,
+            // Qwen3.5-MoE renormalizes the top-K weights (HF `norm_topk_prob`
+            // is always true here); the shared expert is gated separately.
+            norm_topk_prob: true,
+            decoder_sparse_step: None,
+        })
+    }
+
     /// Reject configs whose semantics this implementation does not match.
     ///
-    /// The only such knob today is [`Self::output_gate_type`]: the GDN gate is
-    /// hardwired to swish, so any other activation would silently produce
-    /// wrong activations rather than fail loudly.
+    /// The only such knob today is [`Self::output_gate_type`]: an activation
+    /// the GDN gate does not implement must fail loudly, not silently produce
+    /// wrong activations.
     ///
     /// # Errors
     ///
     /// Returns an error if `output_gate_type` is set to an unsupported activation.
     pub fn validate(&self) -> Result<()> {
-        if let Some(gate) = &self.output_gate_type
-            && !matches!(gate.as_str(), "swish" | "silu")
-        {
-            candle_core::bail!(
-                "[qwen3_5] unsupported output_gate_type {gate:?}: the GDN output gate is \
-                 implemented as swish (== silu) only"
-            );
-        }
+        self.output_gate_activation()
+            .map_err(|e| candle_core::Error::Msg(format!("[qwen3_5] output_gate_type: {e}")))?;
         Ok(())
     }
 
@@ -276,6 +297,11 @@ impl TextConfig {
 impl GdnConfig for TextConfig {
     fn hidden_size(&self) -> usize {
         self.hidden_size
+    }
+    fn output_gate_activation(&self) -> Result<GateActivation> {
+        self.output_gate_type
+            .as_deref()
+            .map_or(Ok(GateActivation::Silu), GateActivation::from_name)
     }
     fn rms_norm_eps(&self) -> f64 {
         self.rms_norm_eps
@@ -387,8 +413,8 @@ mod tests {
         assert_eq!(cfg.linear_num_value_heads / cfg.linear_num_key_heads, 3);
     }
 
-    /// `output_gate_type` names the GDN gate, which is swish-only here. Qwen
-    /// 3.5 omits the key entirely.
+    /// `output_gate_type` names the GDN gate: silu/swish or sigmoid. Qwen 3.5
+    /// omits the key entirely, which means silu.
     #[test]
     fn output_gate_type_accepts_swish_and_absent() {
         assert_eq!(qwen3_8().output_gate_type.as_deref(), Some("swish"));
@@ -400,13 +426,47 @@ mod tests {
 
         cfg.output_gate_type = None;
         cfg.validate().unwrap();
+        assert_eq!(cfg.output_gate_activation().unwrap(), GateActivation::Silu);
+
+        cfg.output_gate_type = Some("sigmoid".into());
+        assert_eq!(
+            cfg.output_gate_activation().unwrap(),
+            GateActivation::Sigmoid
+        );
     }
 
     #[test]
     fn output_gate_type_rejects_unimplemented_activation() {
         let mut cfg = qwen3_8();
-        cfg.output_gate_type = Some("sigmoid".into());
+        cfg.output_gate_type = Some("gelu".into());
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("output_gate_type"), "unexpected error: {err}");
+    }
+
+    /// A `MoE` `text_config` carries no dense `intermediate_size`; the expert
+    /// keys alone switch on `moe_config`, while dense configs stay `None`.
+    #[test]
+    fn moe_keys_parse_into_moe_config() {
+        assert!(qwen3_8().moe_config().is_none());
+
+        let moe_json = QWEN3_8_27B_TEXT
+            .replace("\"intermediate_size\": 17408,", "")
+            .replace(
+                "\"head_dim\": 256,",
+                "\"head_dim\": 256, \"num_experts\": 256, \
+                 \"num_experts_per_tok\": 8, \"moe_intermediate_size\": 512,",
+            );
+        let cfg: TextConfig = serde_json::from_str(&moe_json).expect("parse MoE text_config");
+        let moe = cfg.moe_config().expect("MoE config");
+        assert_eq!(
+            (
+                moe.num_experts,
+                moe.num_experts_per_tok,
+                moe.moe_intermediate_size
+            ),
+            (256, 8, 512)
+        );
+        assert!(moe.norm_topk_prob);
+        assert_eq!(cfg.intermediate_size, 0);
     }
 }

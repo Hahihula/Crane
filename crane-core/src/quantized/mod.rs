@@ -6,5 +6,9 @@
 
 pub mod extended_gguf;
 pub mod gguf_file;
+pub mod gguf_metadata;
 pub mod iquant;
+mod iquant_grids;
 pub mod ternary;
+#[cfg(test)]
+pub(crate) mod test_util;

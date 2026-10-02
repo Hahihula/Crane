@@ -14,6 +14,7 @@
 use anyhow::Result;
 use crane_core::device::DeviceAssignment;
 use crane_core::{DType, Device, Tensor, bail};
+use std::path::Path;
 
 /// Per-layer KV cache for one sequence: `(K, V)` per layer, or `None` for
 /// layers with no cached state yet.
@@ -658,6 +659,67 @@ impl ModelBackend for Qwen3_5Backend {
 
     // supports_kv_swap defaults to false → engine caps max_concurrent to 1.
     // Batch decode is not yet implemented for hybrid layer types.
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Qwen4-Exp Backend
+// ─────────────────────────────────────────────────────────────
+
+/// Engine wrapper around `crane_core::models::qwen4_exp::Model`
+/// (e.g. Qwen3.8-Flash-Next GGUF).
+///
+/// Single-sequence like [`Qwen3_5Backend`]: the hybrid layers keep one set
+/// of caches, so the engine caps `max_concurrent` to 1. The model picks its
+/// own compute dtype from the device, as the GGUF loaders do.
+pub struct Qwen4ExpBackend {
+    pub model: crane_core::models::qwen4_exp::Model,
+}
+
+impl Qwen4ExpBackend {
+    /// `model_path` is the GGUF (first shard of a split one).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model fails to load from `model_path`.
+    pub fn new(model_path: &str, device: &Device) -> Result<Self> {
+        let model =
+            crane_core::models::qwen4_exp::Model::from_gguf_file(Path::new(model_path), device)?;
+        Ok(Self { model })
+    }
+}
+
+impl ModelBackend for Qwen4ExpBackend {
+    fn forward_step(&mut self, input_ids: &[u32], start_pos: usize) -> Result<Tensor> {
+        self.model.forward_step(input_ids, start_pos)
+    }
+
+    fn clear_kv_cache(&mut self) -> Result<()> {
+        self.model.clear_kv_cache()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.model.inner.config().num_hidden_layers
+    }
+
+    fn device(&self) -> &Device {
+        self.model.inner.device()
+    }
+
+    fn dtype(&self) -> DType {
+        self.model.inner.dtype()
+    }
+
+    fn tokenizer(&self) -> &tokenizers::Tokenizer {
+        &self.model.tokenizer.tokenizer
+    }
+
+    fn eos_token_id(&self) -> Vec<u32> {
+        self.model.eos_token_ids().to_vec()
+    }
+
+    fn warmup(&mut self) {
+        self.model.warmup();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

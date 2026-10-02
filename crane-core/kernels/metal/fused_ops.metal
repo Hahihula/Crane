@@ -13,6 +13,10 @@
 // cheap to encode and the source is exactly one `[[kernel]]` function per
 // (op, dtype).
 //
+// Buffer slots are explicit and must match the launchers' `set_*_buffer` /
+// `set_bytes` indices (inputs 0 and 1, output 2, `n` 3): without them MSL
+// numbers the parameters in declaration order.
+//
 // Each kernel is a flat one-thread-per-element pass. The caller
 // (Rust-side) makes `gate`/`up` (or `x`/`alpha`) contiguous and
 // matching-shape before dispatch — same contract as the CUDA/ROCm kernels.
@@ -30,10 +34,10 @@ using namespace metal;
 // ----------------------------------------------------------------------------
 
 kernel void crane_swiglu_f32(
-    constant uint &n,
-    device const float *gate,
-    device const float *up,
-    device float *out,
+    device const float *gate [[buffer(0)]],
+    device const float *up [[buffer(1)]],
+    device float *out [[buffer(2)]],
+    constant uint &n [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= n) return;
@@ -43,10 +47,10 @@ kernel void crane_swiglu_f32(
 }
 
 kernel void crane_swiglu_f16(
-    constant uint &n,
-    device const half *gate,
-    device const half *up,
-    device half *out,
+    device const half *gate [[buffer(0)]],
+    device const half *up [[buffer(1)]],
+    device half *out [[buffer(2)]],
+    constant uint &n [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= n) return;
@@ -56,10 +60,10 @@ kernel void crane_swiglu_f16(
 }
 
 kernel void crane_swiglu_bf16(
-    constant uint &n,
-    device const bfloat *gate,
-    device const bfloat *up,
-    device bfloat *out,
+    device const bfloat *gate [[buffer(0)]],
+    device const bfloat *up [[buffer(1)]],
+    device bfloat *out [[buffer(2)]],
+    constant uint &n [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= n) return;
@@ -73,10 +77,10 @@ kernel void crane_swiglu_bf16(
 // ----------------------------------------------------------------------------
 
 kernel void crane_snake_f32(
-    constant uint &n,
-    device const float *x,
-    device const float *alpha,
-    device float *out,
+    device const float *x [[buffer(0)]],
+    device const float *alpha [[buffer(1)]],
+    device float *out [[buffer(2)]],
+    constant uint &n [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= n) return;
@@ -87,10 +91,10 @@ kernel void crane_snake_f32(
 }
 
 kernel void crane_snake_f16(
-    constant uint &n,
-    device const half *x,
-    device const half *alpha,
-    device half *out,
+    device const half *x [[buffer(0)]],
+    device const half *alpha [[buffer(1)]],
+    device half *out [[buffer(2)]],
+    constant uint &n [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= n) return;
@@ -101,10 +105,10 @@ kernel void crane_snake_f16(
 }
 
 kernel void crane_snake_bf16(
-    constant uint &n,
-    device const bfloat *x,
-    device const bfloat *alpha,
-    device bfloat *out,
+    device const bfloat *x [[buffer(0)]],
+    device const bfloat *alpha [[buffer(1)]],
+    device bfloat *out [[buffer(2)]],
+    constant uint &n [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= n) return;

@@ -14,7 +14,7 @@
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use crane_core::models::qwen3_5::Qwen35RmsNorm;
 use crane_core::ops::gdn::{
-    GdnGateConsts, RmsNormGated, compute_beta_g, l2_alpha, l2_norm, l2_norm_fused,
+    GateActivation, GdnGateConsts, RmsNormGated, compute_beta_g, l2_alpha, l2_norm, l2_norm_fused,
 };
 use crane_core::{candle_core, candle_nn};
 
@@ -167,7 +167,8 @@ fn l2_norm_is_not_rms_norm() -> Result<()> {
     Ok(())
 }
 
-/// The gated GDN norm: `rms_norm(x) * weight * silu(gate)`, HF order.
+/// The gated GDN norm: `rms_norm(x) * weight * act(gate)`, HF order, for
+/// both gate activations (silu: Qwen 3.5, sigmoid: Qwen4-Exp).
 #[test]
 fn gated_rms_norm_matches_the_op_chain() -> Result<()> {
     const SIZE: usize = 128;
@@ -177,18 +178,26 @@ fn gated_rms_norm_matches_the_op_chain() -> Result<()> {
         let gate = Tensor::from_vec(values(10 * SIZE, 0.9), (10, SIZE), &dev)?;
         let w = Tensor::from_vec(values(SIZE, 1.0), SIZE, &dev)?;
 
-        let got = RmsNormGated::from_weight(w.clone(), eps).forward(&x, &gate)?;
-
         // The op chain this replaced, in f32 throughout.
         let xf = x.to_dtype(DType::F32)?;
         let var = xf.sqr()?.mean_keepdim(D::Minus1)?;
         let normed = xf
             .broadcast_div(&(var + eps)?.sqrt()?)?
             .broadcast_mul(&w.to_dtype(DType::F32)?)?;
-        let want = normed.broadcast_mul(&candle_nn::ops::silu(&gate.to_dtype(DType::F32)?)?)?;
+        let gate_f32 = gate.to_dtype(DType::F32)?;
 
-        let diff = max_abs_diff(&got, &want)?;
-        assert!(diff < 1e-4, "{dev:?}: gated norm differs by {diff}");
+        for (activation, act) in [
+            (GateActivation::Silu, candle_nn::ops::silu(&gate_f32)?),
+            (GateActivation::Sigmoid, candle_nn::ops::sigmoid(&gate_f32)?),
+        ] {
+            let got = RmsNormGated::from_weight(w.clone(), eps, activation).forward(&x, &gate)?;
+            let want = normed.broadcast_mul(&act)?;
+            let diff = max_abs_diff(&got, &want)?;
+            assert!(
+                diff < 1e-4,
+                "{dev:?} {activation:?}: gated norm differs by {diff}"
+            );
+        }
     }
     Ok(())
 }

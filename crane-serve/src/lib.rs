@@ -49,7 +49,7 @@ pub struct Args {
     /// Model architecture. Usually auto-detected from the model's
     /// `config.json`; set this only if auto-detection picks the wrong one.
     /// Known values: `auto`, `gemma4`, `gemma4_vl`, `hunyuan`, `minicpm5`,
-    /// `minicpmv46`, `minicpmo`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`,
+    /// `minicpmv46`, `minicpmo`, `qwen25`, `qwen3`, `qwen3_5`, `qwen3_5_vl`, `qwen4_exp`,
     /// `qwen3_tts`, `voxtral_tts`, `kokoro`, `voxcpm2`, `paddleocr_vl`,
     /// `qwen3_asr`.
     #[arg(long, default_value = "auto", help_heading = "Model")]

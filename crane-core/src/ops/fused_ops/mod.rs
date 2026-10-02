@@ -26,9 +26,11 @@
 //! - [`snake`] — fused Snake periodic activation
 //! - [`atan2`] — fused two-argument arctangent
 //! - [`topk_moe`] — fused top-K `MoE` routing (softmax + top-K + normalize)
+//! - [`qsa_mask`] — QSA indexer block selection (top-k scores to attention mask)
 //! - [`swiglu`] — fused `SwiGLU` activation (silu(gate) * up)
 
 pub mod atan2;
+pub mod qsa_mask;
 pub mod snake;
 pub mod swiglu;
 pub mod topk_moe;

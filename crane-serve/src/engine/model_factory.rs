@@ -13,7 +13,7 @@ use std::path::Path;
 
 use super::backend::{
     ExpertPromotionPolicy, Gemma4Backend, HunyuanBackend, Minicpm5Backend, ModelBackend,
-    Qwen3_5Backend, Qwen3Backend, Qwen25Backend,
+    Qwen3_5Backend, Qwen3Backend, Qwen4ExpBackend, Qwen25Backend,
 };
 use crate::chat_template::{AutoChatTemplate, ChatTemplateProcessor, HunyuanChatTemplate};
 
@@ -35,6 +35,8 @@ pub enum ModelType {
     Qwen3,
     Qwen3_5,
     Qwen3_5VL,
+    /// Qwen4-Exp (e.g. Qwen3.8-Flash-Next); GGUF only.
+    Qwen4Exp,
     Qwen3TTS,
     VoxtralTTS,
     Kokoro,
@@ -72,6 +74,7 @@ impl ModelType {
             "qwen3_5_vl" | "qwen3.5_vl" | "qwen3_5-vl" | "qwen3_5vl" | "qwen35_vl"
             | "qwen3_6_vl" | "qwen3.6_vl" | "qwen36_vl" | "qwen3_8_vl" | "qwen3.8_vl"
             | "qwen38_vl" => Self::Qwen3_5VL,
+            "qwen4_exp" | "qwen4exp" | "qwen4-exp" | "qwen4" => Self::Qwen4Exp,
             "qwen3_tts" | "qwen3tts" | "qwen3-tts" | "tts" => Self::Qwen3TTS,
             "voxtral_tts" | "voxtral-tts" | "voxtral" | "voxtral_4b" => Self::VoxtralTTS,
             "kokoro" | "kokoro_tts" | "kokoro-tts" | "kokoro-82m" => Self::Kokoro,
@@ -98,6 +101,7 @@ impl ModelType {
             Self::Qwen3 => "qwen3",
             Self::Qwen3_5 => "qwen3_5",
             Self::Qwen3_5VL => "qwen3_5_vl",
+            Self::Qwen4Exp => "qwen4_exp",
             Self::Qwen3TTS => "qwen3_tts",
             Self::VoxtralTTS => "voxtral_tts",
             Self::Kokoro => "kokoro_tts",
@@ -234,6 +238,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                         ModelType::Qwen3_5
                     };
                 },
+                "qwen4_exp" | "qwen4_exp_text" => return ModelType::Qwen4Exp,
                 "minicpmv4_6" | "minicpmv4.6" => return ModelType::MinicpmV46,
                 "minicpmo" => return ModelType::MiniCpmODuplex,
                 "qwen3_tts" | "qwen3tts" => return ModelType::Qwen3TTS,
@@ -266,6 +271,9 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 // architectures value on the checkpoint).
                 if a.contains("minicpmo") {
                     return ModelType::MiniCpmODuplex;
+                }
+                if a.contains("qwen4exp") || a.contains("qwen4_exp") {
+                    return ModelType::Qwen4Exp;
                 }
                 if a.contains("qwen3ttsforconditional") || a.contains("qwen3_tts") {
                     return ModelType::Qwen3TTS;
@@ -488,6 +496,7 @@ fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
         "qwen35" | "qwen3_5" | "qwen3.5" | "qwen36" | "qwen3_6" | "qwen3.6" | "qwen38"
         | "qwen3_8" | "qwen3.8" => Some(ModelType::Qwen3_5),
         "qwen3" | "qwen3moe" => Some(ModelType::Qwen3),
+        "qwen4exp" => Some(ModelType::Qwen4Exp),
         "qwen2" => Some(ModelType::Qwen25),
         a if a.starts_with("hunyuan") => Some(ModelType::HunyuanDense),
         // Deliberately specific (not bare "llama") — MiniCPM5 GGUF
@@ -592,6 +601,12 @@ pub fn create_backend(
             Ok(Box::new(Qwen3_5Backend::new_with_options(
                 model_path, device, dtype, q35_fmt, quant,
             )?))
+        },
+        ModelType::Qwen4Exp => {
+            if format == ModelFormat::Safetensors {
+                anyhow::bail!("qwen4_exp is only supported from GGUF (pass the first shard)");
+            }
+            Ok(Box::new(Qwen4ExpBackend::new(model_path, device)?))
         },
         ModelType::PaddleOcrVl => {
             anyhow::bail!(
@@ -1097,6 +1112,44 @@ mod tests {
         std::fs::write(&config, r#"{"model_type": "qwen2"}"#).unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::Qwen25);
+    }
+
+    #[test]
+    fn detect_from_config_json_model_type_qwen4_exp() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"model_type": "qwen4_exp", "architectures": ["Qwen4ExpForConditionalGeneration"]}"#,
+        )
+        .unwrap();
+        let result = detect_model_type(dir.path().to_str().unwrap());
+        assert_eq!(result, ModelType::Qwen4Exp);
+    }
+
+    /// llama.cpp names the architecture `qwen4exp` in the GGUF header.
+    #[test]
+    fn detect_qwen4_exp_from_gguf_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Model-00001-of-00002.gguf");
+        let mut file = b"GGUF".to_vec();
+        file.extend(3u32.to_le_bytes());
+        file.extend(0u64.to_le_bytes()); // tensors
+        file.extend(1u64.to_le_bytes()); // metadata
+        let key = b"general.architecture";
+        file.extend((key.len() as u64).to_le_bytes());
+        file.extend(key);
+        file.extend(8u32.to_le_bytes()); // string
+        let value = b"qwen4exp";
+        file.extend((value.len() as u64).to_le_bytes());
+        file.extend(value);
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(
+            detect_model_type(path.to_str().unwrap()),
+            ModelType::Qwen4Exp
+        );
+        assert_eq!(ModelType::from_str("qwen4_exp"), ModelType::Qwen4Exp);
+        assert_eq!(ModelType::Qwen4Exp.display_name(), "qwen4_exp");
     }
 
     #[test]

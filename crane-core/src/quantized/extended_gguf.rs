@@ -30,7 +30,7 @@ pub struct IQuantTensorInfo {
 pub struct ExtendedGgufInfo {
     /// Prism ternary (`PTQ1_0`/`PQ2_0`) tensors.
     pub tensors: HashMap<String, ExtendedTensorInfo>,
-    /// llama.cpp i-quant (`IQ4_XS`, `IQ4_NL`) tensors.
+    /// llama.cpp i-quant (and `Q2_0`) tensors, see [`IQuantType`].
     pub iquant: HashMap<String, IQuantTensorInfo>,
 }
 

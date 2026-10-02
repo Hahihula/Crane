@@ -3,6 +3,7 @@
 use crate::device::{format_budget, query_gpu_memory};
 use crate::models::hunyuan_dense::modeling::Gguf;
 use crate::ops::linear::LinearLayer;
+use crate::quantized::iquant::IQuantExperts;
 use crate::utils::DeviceExt;
 use crate::utils::prof::{self, Span};
 use candle_core::quantized::k_quants::{
@@ -190,6 +191,59 @@ impl Module for MoeExpert {
     }
 }
 
+/// Always-on shared expert (Qwen3.5-MoE): a dense `SwiGLU` MLP added to the
+/// routed output, scaled per token by `sigmoid(gate . x)`.
+struct SharedExpert {
+    gate_proj: LinearLayer,
+    up_proj: LinearLayer,
+    down_proj: LinearLayer,
+    /// `[1, hidden]` scalar gate producing one logit per token.
+    gate: LinearLayer,
+}
+
+impl SharedExpert {
+    /// HF layout: `shared_expert.{gate,up,down}_proj.weight` plus a
+    /// `[1, hidden]` `shared_expert_gate.weight`. Widths come from the
+    /// tensors, so no shared-expert size needs to be configured.
+    fn load(vb: &VarBuilder) -> Result<Self> {
+        let layer = |name: &str| -> Result<LinearLayer> {
+            Ok(LinearLayer::Standard(Linear::new(
+                vb.get_unchecked(name)?,
+                None,
+            )))
+        };
+        Ok(Self {
+            gate_proj: layer("shared_expert.gate_proj.weight")?,
+            up_proj: layer("shared_expert.up_proj.weight")?,
+            down_proj: layer("shared_expert.down_proj.weight")?,
+            gate: layer("shared_expert_gate.weight")?,
+        })
+    }
+
+    fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, layer_idx: usize) -> Result<Self> {
+        let prefix = format!("blk.{layer_idx}");
+        let gate_weight = gg
+            .dequant_tensor(&format!("{prefix}.ffn_gate_inp_shexp.weight"))?
+            .unsqueeze(0)?;
+        Ok(Self {
+            gate_proj: gg.linear(&format!("{prefix}.ffn_gate_shexp.weight"))?,
+            up_proj: gg.linear(&format!("{prefix}.ffn_up_shexp.weight"))?,
+            down_proj: gg.linear(&format!("{prefix}.ffn_down_shexp.weight"))?,
+            gate: LinearLayer::Standard(Linear::new(gate_weight, None)),
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let h = crate::ops::fused_ops::swiglu::swiglu(
+            &self.gate_proj.forward(xs)?,
+            &self.up_proj.forward(xs)?,
+        )?;
+        let out = self.down_proj.forward(&h)?;
+        let gate = candle_nn::ops::sigmoid(&self.gate.forward(xs)?)?;
+        out.broadcast_mul(&gate)
+    }
+}
+
 /// Mixture-of-Experts routing + dispatch block.
 ///
 /// Routes each token to its top-K experts (by router-gate logits), runs only
@@ -226,6 +280,62 @@ pub struct SparseMoeBlock {
     /// `SparseMoeBlock` stays `Sync`; lock contention is a non-issue since
     /// nothing calls `forward` concurrently on the same block today.
     routing: Mutex<MoeRouting>,
+    /// Shared expert added to every token's routed output; `None` for
+    /// plain Qwen3-style `MoE`.
+    shared_expert: Option<Box<SharedExpert>>,
+    /// Packed i-quant experts run by expert id on the device (SYCL); when
+    /// set, `experts` is empty. See [`PackedIQuantExperts`].
+    iquant_experts: Option<PackedIQuantExperts>,
+}
+
+/// Every expert's gate, up and down projections kept in their packed
+/// i-quant encoding (e.g. `IQ2_S` gate/up, `Q2_0` down), run with one
+/// by-id kernel launch per projection. Loaded instead of re-quantizing when
+/// the device has native kernels for all three types.
+pub struct PackedIQuantExperts {
+    gate: IQuantExperts,
+    up: IQuantExperts,
+    down: IQuantExperts,
+}
+
+impl PackedIQuantExperts {
+    /// # Errors
+    ///
+    /// Returns an error if the three projections disagree in expert count or
+    /// shape.
+    pub fn new(gate: IQuantExperts, up: IQuantExperts, down: IQuantExperts) -> Result<Self> {
+        let experts = gate.experts();
+        if up.experts() != experts || down.experts() != experts {
+            candle_core::bail!(
+                "packed experts disagree in count: gate {}, up {}, down {}",
+                experts,
+                up.experts(),
+                down.experts()
+            );
+        }
+        if up.rows() != gate.rows() {
+            candle_core::bail!(
+                "gate and up experts have {} and {} rows",
+                gate.rows(),
+                up.rows()
+            );
+        }
+        Ok(Self { gate, up, down })
+    }
+
+    /// Routed output `(tokens, top_k, hidden)` for `xs_f32` `(tokens,
+    /// hidden)` and the router's `(tokens, top_k)` `U32` ids.
+    fn forward(&self, xs_f32: &Tensor, topk_ids: &Tensor) -> Result<Tensor> {
+        let (tokens, top_k) = topk_ids.dims2()?;
+        let ids = topk_ids.flatten_all()?;
+        // Every routed expert of a token reads that token's row.
+        let gate = self.gate.forward_indexed(xs_f32, &ids, top_k)?;
+        let up = self.up.forward_indexed(xs_f32, &ids, top_k)?;
+        let hidden = crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?;
+        self.down
+            .forward_indexed(&hidden, &ids, 1)?
+            .reshape((tokens, top_k, ()))
+    }
 }
 
 impl SparseMoeBlock {
@@ -258,16 +368,25 @@ impl SparseMoeBlock {
         let gate = Linear::new(gate_weight, None);
         // Redirect the builder before loading experts so their weights land
         // on `expert_device` rather than `vb`'s (main) device.
-        let expert_vb = vb.set_device(expert_device.clone());
-        let experts = (0..config.num_experts)
-            .map(|i| {
-                MoeExpert::new(
-                    hidden_size,
-                    config.moe_intermediate_size,
-                    expert_vb.pp(format!("experts.{i}")),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let expert_vb = vb.clone().set_device(expert_device.clone());
+        let experts = if expert_vb.contains_tensor("experts.gate_up_proj") {
+            Self::load_stacked_experts(config, &expert_vb.pp("experts"))?
+        } else {
+            (0..config.num_experts)
+                .map(|i| {
+                    MoeExpert::new(
+                        hidden_size,
+                        config.moe_intermediate_size,
+                        expert_vb.pp(format!("experts.{i}")),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let shared_expert = if vb.contains_tensor("shared_expert.gate_proj.weight") {
+            Some(Box::new(SharedExpert::load(&vb)?))
+        } else {
+            None
+        };
         let block = Self {
             layer_idx,
             gate: LinearLayer::Standard(gate),
@@ -278,9 +397,38 @@ impl SparseMoeBlock {
             packed_gate_up_exps: None,
             packed_down_exps: None,
             routing: Mutex::new(MoeRouting::new()),
+            shared_expert,
+            iquant_experts: None,
         };
         block.log_dispatch_decision();
         Ok(block)
+    }
+
+    /// Experts stored stacked, as newer HF exports do: `gate_up_proj`
+    /// `[num_experts, 2 * moe_intermediate, hidden]` (gate half first) and
+    /// `down_proj` `[num_experts, hidden, moe_intermediate]`. `vb` is scoped
+    /// to `experts`.
+    fn load_stacked_experts(config: &MoeConfig, vb: &VarBuilder) -> Result<Vec<MoeExpert>> {
+        let gate_up = vb.get_unchecked("gate_up_proj")?;
+        let down = vb.get_unchecked("down_proj")?;
+        let (num_experts, gate_up_out, _) = gate_up.dims3()?;
+        if num_experts != config.num_experts || gate_up_out != 2 * config.moe_intermediate_size {
+            candle_core::bail!(
+                "stacked gate_up_proj is {:?}, expected [{}, {}, hidden]",
+                gate_up.dims(),
+                config.num_experts,
+                2 * config.moe_intermediate_size,
+            );
+        }
+        (0..num_experts)
+            .map(|i| {
+                Ok(MoeExpert::from_layers(
+                    LinearLayer::Standard(Linear::new(narrow_packed_expert(&gate_up, i)?, None)),
+                    LinearLayer::Standard(Linear::new(narrow_packed_expert(&down, i)?, None)),
+                    config.moe_intermediate_size,
+                ))
+            })
+            .collect()
     }
 
     /// Create a `MoE` block from a GGUF checkpoint.
@@ -314,17 +462,26 @@ impl SparseMoeBlock {
 
         let packed_name = format!("{prefix}.ffn_gate_exps.weight");
         let fused_packed_name = format!("{prefix}.ffn_gate_up_exps.weight");
-        let (experts, packed_gate_up_exps, packed_down_exps) =
-            if gg.contains_tensor(&packed_name) || gg.contains_tensor(&fused_packed_name) {
-                Self::load_packed_experts(gg, &prefix, config.num_experts, expert_device)?
-            } else {
-                let experts = (0..config.num_experts)
-                    .map(|expert_idx| {
-                        MoeExpert::new_from_gguf(gg, layer_idx, expert_idx, expert_device)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                (experts, None, None)
-            };
+        let iquant_experts = Self::load_iquant_experts(gg, &prefix, expert_device)?;
+        let (experts, packed_gate_up_exps, packed_down_exps) = if iquant_experts.is_some() {
+            (Vec::new(), None, None)
+        } else if gg.contains_tensor(&packed_name) || gg.contains_tensor(&fused_packed_name) {
+            Self::load_packed_experts(gg, &prefix, config.num_experts, expert_device)?
+        } else {
+            let experts = (0..config.num_experts)
+                .map(|expert_idx| {
+                    MoeExpert::new_from_gguf(gg, layer_idx, expert_idx, expert_device)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (experts, None, None)
+        };
+
+        // llama.cpp `*_shexp` layout (Qwen3.5-MoE); absent for Qwen3.
+        let shared_expert = if gg.contains_tensor(&format!("{prefix}.ffn_gate_shexp.weight")) {
+            Some(Box::new(SharedExpert::from_gguf(gg, layer_idx)?))
+        } else {
+            None
+        };
 
         let block = Self {
             layer_idx,
@@ -336,9 +493,34 @@ impl SparseMoeBlock {
             packed_gate_up_exps,
             packed_down_exps,
             routing: Mutex::new(MoeRouting::new()),
+            shared_expert,
+            iquant_experts,
         };
         block.log_dispatch_decision();
         Ok(block)
+    }
+
+    /// The packed gate/up/down experts as [`PackedIQuantExperts`], if all
+    /// three are i-quants with native kernels on `expert_device`; `None`
+    /// otherwise (they then load through [`Self::load_packed_experts`]).
+    fn load_iquant_experts<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        prefix: &str,
+        expert_device: &Device,
+    ) -> Result<Option<PackedIQuantExperts>> {
+        let names = ["gate", "up", "down"].map(|p| format!("{prefix}.ffn_{p}_exps.weight"));
+        if !names
+            .iter()
+            .all(|n| gg.has_native_iquant_experts(n, expert_device))
+        {
+            return Ok(None);
+        }
+        let mut load = |name: &str| -> Result<IQuantExperts> {
+            gg.iquant_experts(name, expert_device)?
+                .ok_or_else(|| candle_core::Error::Msg(format!("{name} is not packed")))
+        };
+        let [gate, up, down] = &names;
+        PackedIQuantExperts::new(load(gate)?, load(up)?, load(down)?).map(Some)
     }
 
     /// Load the packed (Unsloth-style) `_exps` expert tensor layout: each
@@ -1970,6 +2152,16 @@ fn batched_promote(
 
 impl Module for SparseMoeBlock {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let routed = self.routed_forward(xs)?;
+        match &self.shared_expert {
+            Some(shared) => routed + shared.forward(xs)?,
+            None => Ok(routed),
+        }
+    }
+}
+
+impl SparseMoeBlock {
+    fn routed_forward(&self, xs: &Tensor) -> Result<Tensor> {
         let original_dims = xs.dims().to_vec();
         let Some(&hidden_size) = original_dims.last() else {
             candle_core::bail!("SparseMoeBlock input must have at least one dimension");
@@ -1990,6 +2182,13 @@ impl Module for SparseMoeBlock {
                     self.norm_topk_prob,
                 )
             })?;
+
+        if let Some(packed) = &self.iquant_experts {
+            return prof::timed(Span::MoeFused, || {
+                let routed = packed.forward(&xs_f32, &topk_ids)?;
+                Self::combine_expert_outputs(&routed, &topk_weights, original_dtype, &original_dims)
+            });
+        }
 
         // Batched packed-tensor MoE dispatch (GPU fused or CPU batched): 2
         // dispatches (gate+up, down) instead of the per-expert loop below.
@@ -3157,6 +3356,159 @@ mod tests {
         candle_nn::VarBuilder::from_tensors(tensors, DType::F32, device)
     }
 
+    /// Deterministic, non-degenerate weights.
+    fn wave(len: usize, seed: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| ((i as f32 + 1.0) * 0.37 + seed).sin() * 0.5)
+            .collect()
+    }
+
+    fn tensor(data: Vec<f32>, dims: (usize, usize)) -> Tensor {
+        Tensor::from_vec(data, dims, &Device::Cpu).expect("tensor")
+    }
+
+    fn moe_config(
+        num_experts: usize,
+        num_experts_per_tok: usize,
+        intermediate: usize,
+    ) -> MoeConfig {
+        MoeConfig {
+            num_experts,
+            num_experts_per_tok,
+            moe_intermediate_size: intermediate,
+            norm_topk_prob: true,
+            decoder_sparse_step: None,
+        }
+    }
+
+    // With every routed expert zeroed the routed output is exactly 0, so the
+    // block's output is the shared expert alone: `sigmoid(g . x) *
+    // down(silu(gate x) * up x)`, checked against a scalar reference.
+    #[test]
+    fn test_shared_expert_output_matches_reference() {
+        let (hidden, inter, experts) = (4, 3, 2);
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        tensors.insert(
+            "gate.weight".into(),
+            tensor(wave(experts * hidden, 0.1), (experts, hidden)),
+        );
+        for i in 0..experts {
+            for (name, dims) in [
+                ("gate_proj", (inter, hidden)),
+                ("up_proj", (inter, hidden)),
+                ("down_proj", (hidden, inter)),
+            ] {
+                tensors.insert(
+                    format!("experts.{i}.{name}.weight"),
+                    tensor(vec![0.0; dims.0 * dims.1], dims),
+                );
+            }
+        }
+        let (sg, su, sd, sgate) = (
+            wave(inter * hidden, 1.0),
+            wave(inter * hidden, 2.0),
+            wave(hidden * inter, 3.0),
+            wave(hidden, 4.0),
+        );
+        tensors.insert(
+            "shared_expert.gate_proj.weight".into(),
+            tensor(sg.clone(), (inter, hidden)),
+        );
+        tensors.insert(
+            "shared_expert.up_proj.weight".into(),
+            tensor(su.clone(), (inter, hidden)),
+        );
+        tensors.insert(
+            "shared_expert.down_proj.weight".into(),
+            tensor(sd.clone(), (hidden, inter)),
+        );
+        tensors.insert(
+            "shared_expert_gate.weight".into(),
+            tensor(sgate.clone(), (1, hidden)),
+        );
+        let vb = candle_nn::VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let moe = SparseMoeBlock::new(&moe_config(experts, 1, inter), 0, hidden, vb, &Device::Cpu)
+            .expect("SparseMoeBlock::new");
+
+        let x = wave(2 * hidden, 5.0);
+        let out = moe
+            .forward(&tensor(x.clone(), (2, hidden)))
+            .expect("forward")
+            .to_vec2::<f32>()
+            .expect("to_vec2");
+
+        let dot = |w: &[f32], row: &[f32]| w.iter().zip(row).map(|(a, b)| a * b).sum::<f32>();
+        for (t, row) in x.chunks(hidden).enumerate() {
+            let h: Vec<f32> = (0..inter)
+                .map(|j| {
+                    let g = dot(&sg[j * hidden..(j + 1) * hidden], row);
+                    let u = dot(&su[j * hidden..(j + 1) * hidden], row);
+                    g / (1.0 + (-g).exp()) * u
+                })
+                .collect();
+            let gate = 1.0 / (1.0 + (-dot(&sgate, row)).exp());
+            for d in 0..hidden {
+                let want = gate * dot(&sd[d * inter..(d + 1) * inter], &h);
+                assert!(
+                    (out[t][d] - want).abs() < 1e-5,
+                    "token {t} dim {d}: {} vs {want}",
+                    out[t][d]
+                );
+            }
+        }
+    }
+
+    // The stacked `experts.gate_up_proj` / `experts.down_proj` layout must
+    // load to the same block as per-expert tensors holding the same values.
+    #[test]
+    fn test_stacked_expert_layout_matches_per_expert_layout() {
+        let (hidden, inter, experts, k) = (4, 3, 4, 2);
+        let gate = wave(experts * hidden, 0.1);
+        let expert_data: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = (0..experts)
+            .map(|i| {
+                let seed = i as f32 * 10.0;
+                (
+                    wave(inter * hidden, seed + 1.0),
+                    wave(inter * hidden, seed + 2.0),
+                    wave(hidden * inter, seed + 3.0),
+                )
+            })
+            .collect();
+        let per_expert =
+            make_sparse_moe(hidden, inter, experts, k, true, gate.clone(), &expert_data);
+
+        let gate_up: Vec<f32> = expert_data
+            .iter()
+            .flat_map(|(g, u, _)| g.iter().chain(u.iter()).copied())
+            .collect();
+        let down: Vec<f32> = expert_data
+            .iter()
+            .flat_map(|(_, _, d)| d.iter().copied())
+            .collect();
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        tensors.insert("gate.weight".into(), tensor(gate, (experts, hidden)));
+        tensors.insert(
+            "experts.gate_up_proj".into(),
+            Tensor::from_vec(gate_up, (experts, 2 * inter, hidden), &Device::Cpu).expect("gate_up"),
+        );
+        tensors.insert(
+            "experts.down_proj".into(),
+            Tensor::from_vec(down, (experts, hidden, inter), &Device::Cpu).expect("down"),
+        );
+        let vb = candle_nn::VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let stacked =
+            SparseMoeBlock::new(&moe_config(experts, k, inter), 0, hidden, vb, &Device::Cpu)
+                .expect("stacked SparseMoeBlock::new");
+
+        let x = tensor(wave(3 * hidden, 7.0), (3, hidden));
+        let a = per_expert.forward(&x).expect("per-expert forward");
+        let b = stacked.forward(&x).expect("stacked forward");
+        let max_diff = (a - b)
+            .and_then(|d| d.abs()?.max_all()?.to_scalar::<f32>())
+            .expect("diff");
+        assert!(max_diff < 1e-6, "layouts diverge by {max_diff}");
+    }
+
     fn make_sparse_moe(
         hidden: usize,
         moe_intermediate_size: usize,
@@ -3236,6 +3588,8 @@ mod tests {
                 QTensor::quantize(&down_packed, GgmlDType::F32).expect("quantize down"),
             )),
             routing: Mutex::new(MoeRouting::new()),
+            shared_expert: None,
+            iquant_experts: None,
         }
     }
 
@@ -4562,5 +4916,154 @@ mod tests {
                 "mismatch at index {i}: got {g}, expected {e}"
             );
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_packed_iquant_experts_match_dequantized_reference() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        packed_iquant_experts_match_dequantized_reference(&device)
+    }
+
+    #[cfg(feature = "sycl")]
+    #[test]
+    fn sycl_packed_iquant_experts_match_dequantized_reference() -> Result<()> {
+        if !candle_core::utils::sycl_is_available() {
+            return Ok(());
+        }
+        packed_iquant_experts_match_dequantized_reference(&Device::new_sycl(0)?)
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_packed_iquant_experts_match_dequantized_reference() -> Result<()> {
+        if !candle_core::utils::metal_is_available() {
+            return Ok(());
+        }
+        packed_iquant_experts_match_dequantized_reference(&Device::new_metal(0)?)
+    }
+
+    /// Packed i-quant experts on `device` (IQ2_S gate, IQ3_XXS up, Q2_0 down,
+    /// as in Qwen3.8-Flash-Next) against routing and experts recomputed here
+    /// from the CPU decoders.
+    #[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+    fn packed_iquant_experts_match_dequantized_reference(device: &Device) -> Result<()> {
+        use crate::quantized::extended_gguf::read_content_lenient;
+        use crate::quantized::iquant::IQuantType;
+        use crate::quantized::test_util::{random_blocks, write_gguf};
+
+        let (experts, hidden, inter, top_k, tokens) = (4usize, 512usize, 64usize, 2usize, 3usize);
+        let types = [IQuantType::Iq2S, IQuantType::Iq3Xxs, IQuantType::Q2_0];
+        let shapes = [
+            [experts, inter, hidden],
+            [experts, inter, hidden],
+            [experts, hidden, inter],
+        ];
+        let packed: Vec<Vec<u8>> = types
+            .iter()
+            .zip(&shapes)
+            .enumerate()
+            .map(|(i, (ty, shape))| {
+                random_blocks(
+                    *ty,
+                    shape.iter().product::<usize>() / ty.block_size(),
+                    11 + i as u32,
+                )
+            })
+            .collect();
+        let router: Vec<f32> = (0..experts * hidden)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 400.0)
+            .collect();
+        let router_bytes: Vec<u8> = router.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let ggml_id = |ty: IQuantType| match ty {
+            IQuantType::Iq2S => 22,
+            IQuantType::Iq3Xxs => 18,
+            _ => 42,
+        };
+        let bytes = write_gguf(&[
+            (
+                "blk.0.ffn_gate_inp.weight",
+                &[experts, hidden],
+                0,
+                router_bytes,
+            ),
+            (
+                "blk.0.ffn_gate_exps.weight",
+                &shapes[0],
+                ggml_id(types[0]),
+                packed[0].clone(),
+            ),
+            (
+                "blk.0.ffn_up_exps.weight",
+                &shapes[1],
+                ggml_id(types[1]),
+                packed[1].clone(),
+            ),
+            (
+                "blk.0.ffn_down_exps.weight",
+                &shapes[2],
+                ggml_id(types[2]),
+                packed[2].clone(),
+            ),
+        ]);
+        let ct = read_content_lenient(&bytes)?;
+        let mut gg = Gguf::new(
+            ct,
+            std::io::Cursor::new(&bytes[..]),
+            device.clone(),
+            DType::F32,
+        );
+        let config = MoeConfig {
+            num_experts: experts,
+            num_experts_per_tok: top_k,
+            moe_intermediate_size: inter,
+            norm_topk_prob: true,
+            decoder_sparse_step: None,
+        };
+        let block = SparseMoeBlock::new_from_gguf(&config, &mut gg, 0, device)?;
+        assert!(
+            block.iquant_experts.is_some(),
+            "experts must stay packed on {device:?}"
+        );
+        assert!(block.experts.is_empty());
+
+        let x = Tensor::randn(0f32, 1.0, (tokens, hidden), &Device::Cpu)?;
+        let got = block
+            .forward(&x.to_device(device)?)?
+            .to_device(&Device::Cpu)?;
+
+        // Reference: dense weights from the CPU decoders.
+        let dense = |i: usize| -> Result<Tensor> {
+            let mut w = vec![0f32; shapes[i].iter().product()];
+            types[i].dequantize(&packed[i], &mut w);
+            Tensor::from_vec(w, shapes[i].to_vec(), &Device::Cpu)
+        };
+        let (gate_w, up_w, down_w) = (dense(0)?, dense(1)?, dense(2)?);
+        let router = Tensor::from_vec(router, (experts, hidden), &Device::Cpu)?;
+        let probs = candle_nn::ops::softmax_last_dim(&x.matmul(&router.t()?)?)?.to_vec2::<f32>()?;
+        let mut want = Vec::new();
+        for t in 0..tokens {
+            let mut order: Vec<usize> = (0..experts).collect();
+            order.sort_by(|&a, &b| probs[t][b].total_cmp(&probs[t][a]));
+            let chosen = &order[..top_k];
+            let norm: f32 = chosen.iter().map(|&e| probs[t][e]).sum();
+            let xt = x.narrow(0, t, 1)?;
+            let mut acc = Tensor::zeros((1, hidden), DType::F32, &Device::Cpu)?;
+            for &e in chosen {
+                let g = xt.matmul(&gate_w.get(e)?.t()?)?;
+                let u = xt.matmul(&up_w.get(e)?.t()?)?;
+                let h = (candle_nn::ops::silu(&g)? * u)?;
+                let y = h.matmul(&down_w.get(e)?.t()?)?;
+                acc = (acc + (y * f64::from(probs[t][e] / norm))?)?;
+            }
+            want.push(acc);
+        }
+        let want = Tensor::cat(&want, 0)?;
+        let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+        let diff = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(diff / scale < 1e-4, "rel diff {}", diff / scale);
+        Ok(())
     }
 }

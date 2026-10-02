@@ -123,6 +123,22 @@ MODELS = {
         "default_quant": "PTQ1_0",
         "description": "Bonsai 2 27B, Qwen3.8-27B hybrid-attention backbone natively quantized to ternary GGUF (PTQ1_0/PQ2_0, ~5.95-7.21GB) (Apache-2.0)",
     },
+    "qwen3.8-flash-next-coder-gguf": {
+        "repo_id": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
+        "dirname": "Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
+        "kind": "llm",
+        # Two shards, both required: transformer weights (29.6 GB, on the GPU)
+        # and the PLE n-gram table (28.8 GB, kept on the host). Pass the
+        # first; crane finds the second next to it.
+        "files": {
+            "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf":
+                "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+            "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf":
+                "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf",
+        },
+        "usage_hint": "crane-serve --model-path {target}/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+        "description": "Qwen3.8-Flash-Next (qwen4_exp) GSQ-RCO Coder, 256/512 experts, 58 GB in 2 shards; fits a 32 GB GPU + RAM (Apache-2.0)",
+    },
     "gemma-4-e2b-it-gguf": {
         "repo_id": "unsloth/gemma-4-E2B-it-GGUF",
         "dirname": "gemma-4-E2B-it-GGUF",

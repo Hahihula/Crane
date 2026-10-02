@@ -14,19 +14,20 @@
 mod config;
 mod conv3d_temporal_2;
 mod kv_cache;
-mod model;
+pub(crate) mod model;
 mod modeling;
 mod prefill;
 pub mod processor;
 pub mod vision;
 pub mod vlm;
 
-pub use config::{Config, LayerType, TextConfig, VisionConfig, load_config};
+pub use config::{Config, LayerType, RopeParameters, TextConfig, VisionConfig, load_config};
 pub use kv_cache::{KvCache, KvCacheBackend, KvCacheKind};
 pub use model::StateSnapshot;
 pub use model::{Model, ModelFormat, Qwen3_5TextModel};
 pub use modeling::{
-    DecoderLayer, FullAttention, MRotaryEmbedding, Mlp, Qwen35RmsNorm, RopeSlice, apply_mrope,
+    AttentionDims, DecoderLayer, FullAttention, MRotaryEmbedding, Mlp, Qwen35RmsNorm, RopeSlice,
+    apply_mrope,
 };
 pub use prefill::{
     DEFAULT_CHUNK as DEFAULT_PREFILL_CHUNK, chunk_size as prefill_chunk_size,

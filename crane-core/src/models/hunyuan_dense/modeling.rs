@@ -1,5 +1,6 @@
 use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::rotary::RotaryEmbedding;
+use crate::quantized::gguf_metadata::GgufMetadata;
 use crate::utils::DeviceExt;
 use candle_core::quantized::gguf_file;
 use candle_core::{D, DType, Device, Module, Result, Tensor};
@@ -783,47 +784,25 @@ impl HunYuanDenseV1 {
             DType::F32
         };
         let mut gg = Gguf::new(ct, reader, device.clone(), dtype);
-        let md_get = |s: &str| match gg.metadata().get(s) {
-            None => candle_core::bail!("cannot find {s} in GGUF metadata"),
-            Some(v) => Ok(v.clone()),
-        };
-
         // Detect architecture prefix (e.g. "qwen2", "qwen3", "llama")
-        let arch = gg
-            .metadata()
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok())
-            .cloned()
+        let md = GgufMetadata::new(gg.metadata());
+        let arch = md
+            .opt_string("general.architecture")
             .unwrap_or_else(|| "qwen2".to_string());
+        let key = |k: &str| format!("{arch}.{k}");
 
-        let num_attention_heads =
-            md_get(&format!("{arch}.attention.head_count"))?.to_u32()? as usize;
-        let num_kv_heads = md_get(&format!("{arch}.attention.head_count_kv"))?.to_u32()? as usize;
-        let head_dim = gg
-            .metadata()
-            .get(&format!("{arch}.attention.key_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(128) as usize;
-        let num_hidden_layers = md_get(&format!("{arch}.block_count"))?.to_u32()? as usize;
-        let hidden_size = md_get(&format!("{arch}.embedding_length"))?.to_u32()? as usize;
-        let intermediate_size = md_get(&format!("{arch}.feed_forward_length"))?.to_u32()? as usize;
-        let max_position_embeddings = gg
-            .metadata()
-            .get(&format!("{arch}.context_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(32768) as usize;
+        let num_attention_heads = md.usize(&key("attention.head_count"))?;
+        let num_kv_heads = md.usize(&key("attention.head_count_kv"))?;
+        let head_dim = md.opt_usize(&key("attention.key_length")).unwrap_or(128);
+        let num_hidden_layers = md.usize(&key("block_count"))?;
+        let hidden_size = md.usize(&key("embedding_length"))?;
+        let intermediate_size = md.usize(&key("feed_forward_length"))?;
+        let max_position_embeddings = md.opt_usize(&key("context_length")).unwrap_or(32768);
         let rms_norm_eps = f64::from(
-            gg.metadata()
-                .get(&format!("{arch}.attention.layer_norm_rms_epsilon"))
-                .and_then(|v| v.to_f32().ok())
+            md.opt_f32(&key("attention.layer_norm_rms_epsilon"))
                 .unwrap_or(1e-6),
         );
-        let rope_theta = f64::from(
-            gg.metadata()
-                .get(&format!("{arch}.rope.freq_base"))
-                .and_then(|v| v.to_f32().ok())
-                .unwrap_or(10_000.0),
-        );
+        let rope_theta = f64::from(md.opt_f32(&key("rope.freq_base")).unwrap_or(10_000.0));
 
         // Check for QK norm by probing tensor existence
         let use_qk_norm = gg.ct.tensor_infos.contains_key("blk.0.attn_q_norm.weight");

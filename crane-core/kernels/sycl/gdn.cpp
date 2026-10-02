@@ -26,6 +26,8 @@
 //   y_t     = sum_k S[k,:] * q_t[k]
 #include <sycl/sycl.hpp>
 
+#include <cstdio>
+
 #define GDN_MAX_K 256
 
 template <int KT>
@@ -114,6 +116,9 @@ extern "C" int crane_gdn_recurrence_sycl(void *queue, const float *q,
     // correctly ordered against every later op the launcher queues on it.
     return 0;
   } catch (const sycl::exception &) {
+    return 1;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
     return 1;
   } catch (...) {
     return 1;
