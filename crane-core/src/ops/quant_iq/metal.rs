@@ -5,7 +5,7 @@
 //! Mirrors [`super::sycl`]: activations are not quantized to int8 for a
 //! `dp4a`-style dot product — both entry points decode weights on the fly and
 //! accumulate a plain float dot product. Every [`IQuantType`] has a Metal
-//! kernel, including the by-expert-id matvec packed `MoE` experts need.
+//! kernel (the k-quants are only reached by packed `MoE` experts), including the by-expert-id matvec packed `MoE` experts need.
 //! F32 / F16 / BF16 outputs are supported; on older Macs without `bfloat`
 //! (Metal < 3.0) the BF16 kernels are absent from the compiled library and
 //! the BF16 path returns an error so the caller can fall back to the CPU
@@ -66,10 +66,9 @@ fn type_tag(ty: IQuantType) -> &'static str {
         IQuantType::Iq3Xxs => "iq3_xxs",
         IQuantType::Iq3S => "iq3_s",
         IQuantType::Q2_0 => "q2_0",
-        // `IQuantType::has_native_kernel` keeps k-quants off this backend.
-        IQuantType::Q4K | IQuantType::Q5K | IQuantType::Q6K => {
-            unreachable!("no Metal kernel for {}", ty.name())
-        },
+        IQuantType::Q4K => "q4_k",
+        IQuantType::Q5K => "q5_k",
+        IQuantType::Q6K => "q6_k",
     }
 }
 

@@ -22,7 +22,7 @@ hound = "3"
 rubato = "5.0"
 audioadapter-buffers = "5.0"
 symphonia = { version = "0.5", features = ["mp3"] }
-ribo = "0.1.3"
+ribo = "0.1.4"
 tokenizers = { workspace = true }
 
 [features]
