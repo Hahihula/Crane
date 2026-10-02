@@ -16,7 +16,9 @@ pub mod diffusion_head;
 pub mod dpm_solver;
 pub mod model;
 pub mod prompt;
+pub mod voices;
 
 pub use config::{KugelAudioConfig, load_config};
 pub use model::{KugelAudioGenerationConfig, KugelAudioGenerationOutput, KugelAudioModel};
-pub use prompt::{PromptResult, build_prompt};
+pub use prompt::{PromptResult, build_prompt, build_prompt_with_frame_count};
+pub use voices::KugelAudioVoice;

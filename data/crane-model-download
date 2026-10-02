@@ -298,7 +298,8 @@ MODELS = {
         # a Qwen2-VL-family tokenizer by default -- plain Qwen2.5's doesn't
         # define the <|vision_start/end/pad|> ids this port hardcodes as
         # speech control tokens). Pulled from a second repo into the same
-        # directory so `--tokenizer <dirname>/tokenizer.json` just works.
+        # directory so KugelAudioModel::from_pretrained finds it
+        # automatically at <dirname>/tokenizer.json.
         # See crane_core::models::kugelaudio::prompt's doc comment.
         "extra_files": {
             "Qwen/Qwen2-VL-2B-Instruct": {
@@ -310,7 +311,7 @@ MODELS = {
         # binary can run it so far.
         "usage_hint": (
             "cargo run -p crane-examples --release --features cuda "
-            "--bin kugelaudio_simple -- {target} --tokenizer {target}/tokenizer.json"
+            "--bin kugelaudio_simple -- {target}"
         ),
         "description": "KugelAudio, Qwen2-backbone AR + diffusion-head TTS, voice cloning via reference audio (MIT)",
     },

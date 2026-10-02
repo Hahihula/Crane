@@ -103,8 +103,9 @@ pub struct Args {
     #[arg(long, default_value = "auto", help_heading = "Model")]
     pub format: String,
     /// Quantize the model on load to reduce memory usage (e.g. `q4k`,
-    /// `q8_0`). Only supported for Qwen 3.5 models with safetensors
-    /// weights. Overrides `CRANE_ISQ`.
+    /// `q8_0`). Supported for Qwen 3.5 and KugelAudio models with
+    /// safetensors weights. Other models ignore it with a warning.
+    /// Overrides `CRANE_ISQ`.
     #[arg(long, help_heading = "Model")]
     pub quant: Option<String>,
     /// Floating-point precision for inference: `f16` (half), `bf16`
@@ -1156,6 +1157,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         );
         let model_path_clone = args.model_path.clone();
         let voice_dir_clone = args.voice_dir.clone();
+        let quant_clone = args.quant.clone();
         // `device` already resolves cuda -> rocm -> metal -> cpu (and honors
         // `args.cpu`); re-deriving CPU-vs-GPU here only checked the `cuda`
         // feature, so it silently forced CPU on rocm/metal builds.
@@ -1172,6 +1174,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                     &tts_device,
                     &tts_dtype,
                     Some(&voice_dir_clone),
+                    quant_clone.as_deref(),
                 ) {
                     Ok(m) => m,
                     Err(e) => {

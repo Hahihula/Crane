@@ -38,12 +38,16 @@
 )]
 // //: stylistic; matches the codebase's prevailing style elsewhere
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use candle_core::quantized::GgmlDType;
 use candle_core::{D, DType, Device, Module, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
+use tokenizers::Tokenizer;
 
+use crate::utils::tokenizer_utils::load_tokenizer_from_model_dir;
 use crate::utils::utils::get_safetensors_files;
 
 use super::config::{KugelAudioConfig, load_config};
@@ -53,6 +57,7 @@ use super::decoder::KugelAudioDecoder;
 use super::diffusion_head::DiffusionHead;
 use super::dpm_solver::DpmSolverScheduler;
 use super::prompt::PromptResult;
+use super::voices::{KugelAudioVoice, load_voices};
 
 use crate::models::with_tracing::{Linear, linear_no_bias};
 
@@ -66,8 +71,8 @@ pub mod special_tokens {
     pub const EOS_TOKEN_ID: u32 = 151_643;
 }
 
-/// Every sub-network wired to one checkpoint's weights, plus the config
-/// values callers need.
+/// Every sub-network wired to one checkpoint's weights, the Qwen2-VL-family
+/// tokenizer, plus the config values callers need.
 pub struct KugelAudioModel {
     pub config: KugelAudioConfig,
     decoder: KugelAudioDecoder,
@@ -88,6 +93,8 @@ pub struct KugelAudioModel {
     speech_bias_factor: f64,
     device: Device,
     dtype: DType,
+    tokenizer: Tokenizer,
+    voices: HashMap<String, KugelAudioVoice>,
 }
 
 /// Read the in-situ quantization level from `CRANE_ISQ` (e.g. `q4_0`,
@@ -106,16 +113,17 @@ fn isq_from_env() -> Option<GgmlDType> {
 
 impl KugelAudioModel {
     /// Load every sub-network from `model_dir` (a directory containing
-    /// `config.json` and `model.safetensors.index.json` + shards). Verified
-    /// against the real checkpoint in `crane-core/tests/kugelaudio_load.rs`.
+    /// `config.json`, `model.safetensors.index.json` + shards, and a
+    /// Qwen2-VL-family `tokenizer.json`). Verified against the real
+    /// checkpoint in `crane-core/tests/kugelaudio_load.rs`.
     ///
     /// In-situ quantization is picked up from `CRANE_ISQ`; use
     /// [`Self::from_pretrained_with_quant`] to set it explicitly.
     ///
     /// # Errors
     ///
-    /// Returns an error if the config can't be read, weights can't be
-    /// mmaped, or any sub-network fails to construct.
+    /// Returns an error if the config can't be read, the tokenizer can't be
+    /// loaded, weights can't be mmaped, or any sub-network fails to construct.
     pub fn from_pretrained(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
         Self::from_pretrained_with_quant(model_dir, device, dtype, isq_from_env())
     }
@@ -129,8 +137,8 @@ impl KugelAudioModel {
     ///
     /// # Errors
     ///
-    /// Returns an error if the config can't be read, weights can't be
-    /// mmaped, or any sub-network fails to construct.
+    /// Returns an error if the config can't be read, the tokenizer can't be
+    /// loaded, weights can't be mmaped, or any sub-network fails to construct.
     pub fn from_pretrained_with_quant(
         model_dir: &str,
         device: &Device,
@@ -140,6 +148,14 @@ impl KugelAudioModel {
         let config_path = std::path::Path::new(model_dir).join("config.json");
         let config = load_config(config_path.to_str().context("non-UTF8 model path")?)
             .context("kugelaudio: load config.json")?;
+
+        // Load before the (potentially multi-minute, ~18.7GB) checkpoint
+        // below so a missing/bad tokenizer.json fails fast.
+        let tokenizer = load_tokenizer_from_model_dir(model_dir)
+            .context("kugelaudio: load Qwen2-VL-family tokenizer.json from model directory")?;
+
+        let voices = load_voices(std::path::Path::new(model_dir), &config, device)
+            .context("kugelaudio: load preset voices")?;
 
         let filenames = get_safetensors_files(model_dir)?;
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, device)? };
@@ -231,6 +247,8 @@ impl KugelAudioModel {
             speech_bias_factor,
             device: device.clone(),
             dtype,
+            tokenizer,
+            voices,
         })
     }
 
@@ -242,6 +260,56 @@ impl KugelAudioModel {
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// Output sample rate in Hz (24 kHz, fixed by the VAE architecture).
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        super::prompt::SAMPLE_RATE
+    }
+
+    /// The Qwen2-VL-family tokenizer loaded from `<model_dir>/tokenizer.json`.
+    /// See `prompt.rs`'s module doc comment for why that specific vocab is
+    /// required.
+    #[must_use]
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
+    /// Build a generation prompt for `text` using this model's own
+    /// tokenizer. See [`super::prompt::build_prompt`].
+    pub fn build_prompt(
+        &self,
+        text: &str,
+        voice_audio_num_samples: Option<usize>,
+    ) -> Result<PromptResult> {
+        super::prompt::build_prompt(&self.tokenizer, text, voice_audio_num_samples)
+    }
+
+    /// Build a generation prompt for `text` conditioned on the preset voice
+    /// `voice_name` (see [`Self::available_voices`]). The voice-prompt frame
+    /// count is read directly from the preset's own latent tensor, so no
+    /// sample-to-frame conversion is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `voice_name` is not a loaded preset voice.
+    pub fn build_prompt_for_voice(&self, text: &str, voice_name: &str) -> Result<PromptResult> {
+        let voice = self.voices.get(voice_name).with_context(|| {
+            format!(
+                "kugelaudio: unknown voice '{voice_name}' (available: {:?})",
+                self.voices.keys().collect::<Vec<_>>()
+            )
+        })?;
+        let frame_count = voice.acoustic_mean.dim(2)?;
+        super::prompt::build_prompt_with_frame_count(&self.tokenizer, text, frame_count)
+    }
+
+    /// Preset voices loaded from `<model_dir>/voices/voices.json`, keyed by
+    /// name. Empty if the checkpoint ships no preset voices.
+    #[must_use]
+    pub fn available_voices(&self) -> &HashMap<String, KugelAudioVoice> {
+        &self.voices
     }
 
     /// Text-token embedding lookup. `input_ids`: `[batch, seq_len]` →
@@ -444,10 +512,21 @@ impl KugelAudioModel {
     /// results for a position whether computed via a streaming cache or
     /// full recompute) but `O(steps²)` instead of `O(steps)`. Fine for
     /// short clips; revisit for long-form generation.
+    ///
+    /// `voice_latents` and `voice_waveform` are mutually exclusive voice
+    /// sources: `voice_latents` is `(acoustic_mean, semantic_mean)`
+    /// pre-encoded latents from a preset voice (see
+    /// [`Self::available_voices`]), each `[1, vae_dim, T]` — the same shape
+    /// [`Self::encode_acoustic`]/[`Self::encode_semantic`] return — and
+    /// skips the VAE encoder calls entirely. `voice_waveform` is a raw
+    /// reference clip for voice cloning, run through both encoders. Passing
+    /// both is an error; passing neither falls back to the model-internal
+    /// zero-shot default.
     #[allow(clippy::too_many_lines)]
     pub fn generate(
         &mut self,
         prompt: &PromptResult,
+        voice_latents: Option<(&Tensor, &Tensor)>,
         voice_waveform: Option<&Tensor>,
         cfg: &KugelAudioGenerationConfig,
     ) -> Result<KugelAudioGenerationOutput> {
@@ -461,17 +540,39 @@ impl KugelAudioModel {
         let mut text_embeds = self.embed_text_tokens(&ids_tensor)?;
 
         if prompt.voice_frame_count > 0 {
-            let waveform = voice_waveform
-                .context("kugelaudio generate: prompt has voice-prompt frames but no voice_waveform was given")?;
-            let acoustic = self
-                .encode_acoustic(waveform)?
-                .transpose(1, 2)?
-                .contiguous()?; // [1, T, vae_dim]
+            anyhow::ensure!(
+                voice_latents.is_none() || voice_waveform.is_none(),
+                "kugelaudio generate: voice_latents and voice_waveform are mutually exclusive \
+                 -- pass pre-encoded latents (preset voice) or a raw waveform (voice cloning), not both"
+            );
+            // Obtain raw [1, vae_dim, T] acoustic/semantic latents, either
+            // from a preset's pre-encoded tensors (cheap Arc-clone, no VAE
+            // encoder call) or by encoding a raw waveform. The rest of the
+            // pipeline below is identical for both sources. Preset latents
+            // are stored as BF16 (see voices.rs) and must be cast to
+            // self.dtype, same as encode_acoustic/encode_semantic already
+            // do for the waveform path -- otherwise the connector matmuls
+            // below (typed to self.dtype) fail on CPU/Metal.
+            let (acoustic_raw, semantic_raw) = if let Some((acoustic_mean, semantic_mean)) =
+                voice_latents
+            {
+                (
+                    acoustic_mean.to_dtype(self.dtype)?,
+                    semantic_mean.to_dtype(self.dtype)?,
+                )
+            } else {
+                let waveform = voice_waveform.context(
+                    "kugelaudio generate: prompt has voice-prompt frames but neither voice_latents nor voice_waveform was given",
+                )?;
+                (
+                    self.encode_acoustic(waveform)?,
+                    self.encode_semantic(waveform)?,
+                )
+            };
+
+            let acoustic = acoustic_raw.transpose(1, 2)?.contiguous()?; // [1, T, vae_dim]
             let acoustic_scaled = self.scale_acoustic_latent(&acoustic)?;
-            let semantic = self
-                .encode_semantic(waveform)?
-                .transpose(1, 2)?
-                .contiguous()?; // [1, T_sem, sem_dim]
+            let semantic = semantic_raw.transpose(1, 2)?.contiguous()?; // [1, T_sem, sem_dim]
             let semantic = Self::align_time_len(&semantic, acoustic_scaled.dim(1)?)?;
             let acoustic_embed = self
                 .acoustic_connector

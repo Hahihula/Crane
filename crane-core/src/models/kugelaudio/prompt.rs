@@ -23,6 +23,9 @@ use super::model::special_tokens::SPEECH_DIFFUSION_ID;
 /// generated latent frame is exactly `3200` audio samples at 24kHz.
 pub const SPEECH_COMPRESSION_RATIO: usize = 3200;
 
+/// Output sample rate in Hz, fixed by the VAE architecture.
+pub const SAMPLE_RATE: u32 = 24_000;
+
 /// Output of [`build_prompt`]: the full token sequence (voice-prompt frames
 /// represented by `speech_diffusion_id` placeholders) plus where those
 /// placeholders are, so the caller can splice in real voice-prompt
@@ -55,6 +58,29 @@ pub fn build_prompt(
     text: &str,
     voice_audio_num_samples: Option<usize>,
 ) -> Result<PromptResult> {
+    let voice_frame_count =
+        voice_audio_num_samples.map_or(0, |n| n.div_ceil(SPEECH_COMPRESSION_RATIO));
+    build_prompt_inner(tokenizer, text, voice_frame_count)
+}
+
+/// Build a KugelAudio prompt for `text` conditioned on a voice prompt of
+/// exactly `voice_frame_count` acoustic-latent frames — e.g. a preset
+/// voice's `acoustic_mean.dim(2)?`, which needs no sample-to-frame
+/// conversion. Pass `0` for zero-shot (equivalent to [`build_prompt`] with
+/// `None`).
+pub fn build_prompt_with_frame_count(
+    tokenizer: &Tokenizer,
+    text: &str,
+    voice_frame_count: usize,
+) -> Result<PromptResult> {
+    build_prompt_inner(tokenizer, text, voice_frame_count)
+}
+
+fn build_prompt_inner(
+    tokenizer: &Tokenizer,
+    text: &str,
+    voice_frame_count: usize,
+) -> Result<PromptResult> {
     const SYSTEM_PROMPT: &str = " Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.\n";
 
     let formatted_text = if text.trim_start().starts_with("Speaker") {
@@ -65,12 +91,11 @@ pub fn build_prompt(
 
     let mut token_ids = Vec::new();
     let mut speech_input_mask = Vec::new();
-    let mut voice_frame_count = 0usize;
 
     token_ids.extend(encode(tokenizer, SYSTEM_PROMPT)?);
     speech_input_mask.resize(token_ids.len(), false);
 
-    if let Some(num_samples) = voice_audio_num_samples {
+    if voice_frame_count > 0 {
         let voice_input_tokens = encode(tokenizer, " Voice input:\n")?;
         token_ids.extend(&voice_input_tokens);
         speech_input_mask.resize(token_ids.len(), false);
@@ -79,7 +104,6 @@ pub fn build_prompt(
         token_ids.extend(&speaker_prefix);
         speech_input_mask.resize(token_ids.len(), false);
 
-        voice_frame_count = num_samples.div_ceil(SPEECH_COMPRESSION_RATIO);
         token_ids.extend(std::iter::repeat_n(SPEECH_DIFFUSION_ID, voice_frame_count));
         speech_input_mask.extend(std::iter::repeat_n(true, voice_frame_count));
 
@@ -167,5 +191,32 @@ mod tests {
         let tok = tiny_tokenizer();
         let result = build_prompt(&tok, "hi", Some(3200 * 2 + 1)).expect("build_prompt");
         assert_eq!(result.voice_frame_count, 3);
+    }
+
+    // Verifies build_prompt_with_frame_count(tok, text, n) matches
+    // build_prompt(tok, text, Some(n * SPEECH_COMPRESSION_RATIO)) exactly,
+    // since both should produce the same n-frame voice prompt.
+    #[test]
+    fn build_prompt_with_frame_count_matches_build_prompt() {
+        let tok = tiny_tokenizer();
+        let by_samples = build_prompt(&tok, "hello there", Some(3200 * 5)).expect("build_prompt");
+        let by_frames =
+            build_prompt_with_frame_count(&tok, "hello there", 5).expect("build_prompt");
+        assert_eq!(by_samples.token_ids, by_frames.token_ids);
+        assert_eq!(by_samples.speech_input_mask, by_frames.speech_input_mask);
+        assert_eq!(by_samples.voice_frame_count, by_frames.voice_frame_count);
+    }
+
+    // Verifies frame count 0 is treated as "no voice", matching
+    // build_prompt(tok, text, None).
+    #[test]
+    fn build_prompt_with_frame_count_zero_is_no_voice() {
+        let tok = tiny_tokenizer();
+        let no_voice = build_prompt(&tok, "hello there", None).expect("build_prompt");
+        let zero_frames =
+            build_prompt_with_frame_count(&tok, "hello there", 0).expect("build_prompt");
+        assert_eq!(no_voice.token_ids, zero_frames.token_ids);
+        assert_eq!(no_voice.speech_input_mask, zero_frames.speech_input_mask);
+        assert_eq!(zero_frames.voice_frame_count, 0);
     }
 }
