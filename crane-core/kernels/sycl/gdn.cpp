@@ -126,6 +126,118 @@ void gdn_sg_launch(sycl::queue &q, const float *qp, const float *kp, const float
 // exposed, more spills.
 constexpr int SG_COLS = 4;
 
+// The fused form of `gdn_sg_launch` for the model's own tensors: it reads Q,
+// K and V straight from the conv output and computes everything the caller
+// would otherwise launch one candle op each for (~20 per GDN layer per
+// token, which bounds decode on SYCL): the key-head to value-head mapping,
+// the L2 norms of Q and K, the `1/sqrt(K)` query scale, `beta = sigmoid(b)`
+// and `g = -exp(A_log) * softplus(a + dt_bias)`. Activations and `y` are `T`
+// (the model dtype); the state and all arithmetic are f32.
+//
+//   qkv     : [B, S, conv_dim]  Q (Hk heads), then K (Hk heads), then V
+//   a, b    : [B, S, Hv]
+//   neg_a, dt_bias : [Hv] f32 (`-exp(A_log)`, `dt_bias`)
+//   y       : [B, S, Hv, V]
+//   state   : [B, Hv, K, V] f32
+//
+// Value head `h` reads key head `h % Hk` when `chunked` (llama.cpp GGUF
+// order), `h / (Hv / Hk)` otherwise (HF order).
+template <int R, int C, typename T>
+void gdn_fused_launch(sycl::queue &q, const T *qkv, const T *ap, const T *bp, const float *neg_a,
+                      const float *dt_bias, const float *st_in, float *st_out, T *yp, int B,
+                      int S, int Hk, int Hv, int V, int conv_dim, int key_dim, bool chunked) {
+  constexpr int K = R * SG;
+  const int tiles = V / C;
+  const size_t sgs = size_t(B) * Hv * tiles;
+  const size_t wgs = (sgs + SG_PER_WG - 1) / SG_PER_WG;
+  const int per_group = Hv / Hk;
+  q.parallel_for(
+      sycl::nd_range<1>(wgs * SG_PER_WG * SG, SG_PER_WG * SG),
+      [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG)]] {
+        const auto sg = it.get_sub_group();
+        const size_t id = it.get_group(0) * SG_PER_WG + sg.get_group_linear_id();
+        if (id >= sgs) {
+          return;
+        }
+        const int lane = int(sg.get_local_linear_id());
+        const size_t bh = id / size_t(tiles);
+        const int col0 = int(id % size_t(tiles)) * C;
+        const int b = int(bh / size_t(Hv));
+        const int h = int(bh % size_t(Hv));
+        const int kh = chunked ? h % Hk : h / per_group;
+        const float q_scale = sycl::rsqrt(float(K));
+        const float na = neg_a[h];
+        const float dtb = dt_bias[h];
+
+        float st[C][R];
+        const float *sti = st_in + bh * K * V;
+        for (int r = 0; r < R; ++r) {
+          for (int c = 0; c < C; ++c) {
+            st[c][r] = sti[size_t(lane + SG * r) * V + col0 + c];
+          }
+        }
+
+        for (int t = 0; t < S; ++t) {
+          const size_t row = size_t(b) * S + t;
+          const T *xr = qkv + row * conv_dim;
+          float kt[R], qt[R];
+          float ssk = 0.f, ssq = 0.f;
+          for (int r = 0; r < R; ++r) {
+            kt[r] = static_cast<float>(xr[key_dim + kh * K + lane + SG * r]);
+            qt[r] = static_cast<float>(xr[kh * K + lane + SG * r]);
+            ssk += kt[r] * kt[r];
+            ssq += qt[r] * qt[r];
+          }
+          const float k_inv = sycl::rsqrt(sycl::reduce_over_group(sg, ssk, sycl::plus<float>()) + 1e-6f);
+          const float q_inv =
+              q_scale * sycl::rsqrt(sycl::reduce_over_group(sg, ssq, sycl::plus<float>()) + 1e-6f);
+          for (int r = 0; r < R; ++r) {
+            kt[r] *= k_inv;
+            qt[r] *= q_inv;
+          }
+          const float beta_t = 1.f / (1.f + sycl::exp(-static_cast<float>(bp[row * Hv + h])));
+          const float x = static_cast<float>(ap[row * Hv + h]) + dtb;
+          // softplus, without the overflow of a literal log(1 + exp(x)).
+          const float softplus = x > 20.f ? x : sycl::log1p(sycl::exp(x));
+          const float decay = sycl::exp(na * softplus);
+
+          const T *vr = xr + 2 * key_dim + size_t(h) * V + col0;
+          float kv[C];
+          for (int c = 0; c < C; ++c) {
+            float acc = 0.f;
+            for (int r = 0; r < R; ++r) {
+              st[c][r] *= decay;
+              acc += st[c][r] * kt[r];
+            }
+            kv[c] = sycl::reduce_over_group(sg, acc, sycl::plus<float>());
+          }
+          float y[C];
+          for (int c = 0; c < C; ++c) {
+            const float delta = (static_cast<float>(vr[c]) - kv[c]) * beta_t;
+            float acc = 0.f;
+            for (int r = 0; r < R; ++r) {
+              st[c][r] += kt[r] * delta;
+              acc += st[c][r] * qt[r];
+            }
+            y[c] = sycl::reduce_over_group(sg, acc, sycl::plus<float>());
+          }
+          T *yr = yp + (row * Hv + h) * V + col0;
+          for (int c = 0; c < C; ++c) {
+            if (lane == c) {
+              yr[c] = static_cast<T>(y[c]);
+            }
+          }
+        }
+
+        float *sto = st_out + bh * K * V;
+        for (int r = 0; r < R; ++r) {
+          for (int c = 0; c < C; ++c) {
+            sto[size_t(lane + SG * r) * V + col0 + c] = st[c][r];
+          }
+        }
+      });
+}
+
 } // namespace
 
 template <int KT>
@@ -224,6 +336,47 @@ extern "C" int crane_gdn_recurrence_sycl(void *queue, const float *q,
     return 0;
   } catch (const sycl::exception &) {
     return 1;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
+    return 1;
+  } catch (...) {
+    return 1;
+  }
+}
+
+// The fused step (`gdn_fused_launch`). `dtype` tags `qkv`, `a`, `b` and `y`:
+// 0 = f32, 1 = f16. Returns 0 on success, 1 on a SYCL error, 2 for an
+// unsupported head dim, value width or dtype (the caller then takes the
+// unfused path).
+extern "C" int crane_gdn_fused_sycl(void *queue, int dtype, const void *qkv, const void *a,
+                                    const void *b, const float *neg_a, const float *dt_bias,
+                                    const float *state_in, float *state_out, void *y, int B,
+                                    int S, int Hk, int Hv, int K, int V, int conv_dim,
+                                    int key_dim, int chunked) {
+  try {
+    auto &sq = *static_cast<sycl::queue *>(queue);
+    if (V % SG_COLS != 0 || Hk <= 0 || Hv % Hk != 0 || (dtype != 0 && dtype != 1)) {
+      return 2;
+    }
+    auto run = [&]<int R, typename T>() {
+      gdn_fused_launch<R, SG_COLS, T>(sq, static_cast<const T *>(qkv), static_cast<const T *>(a),
+                                      static_cast<const T *>(b), neg_a, dt_bias, state_in,
+                                      state_out, static_cast<T *>(y), B, S, Hk, Hv, V, conv_dim,
+                                      key_dim, chunked != 0);
+    };
+    auto by_dtype = [&]<int R>() {
+      if (dtype == 0) {
+        run.template operator()<R, float>();
+      } else {
+        run.template operator()<R, sycl::half>();
+      }
+    };
+    switch (K) {
+    case 64: by_dtype.template operator()<4>(); return 0;
+    case 128: by_dtype.template operator()<8>(); return 0;
+    case 256: by_dtype.template operator()<16>(); return 0;
+    default: return 2;
+    }
   } catch (const std::exception &e) {
     std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
     return 1;

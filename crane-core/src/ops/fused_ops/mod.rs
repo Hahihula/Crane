@@ -28,8 +28,10 @@
 //! - [`topk_moe`] — fused top-K `MoE` routing (softmax + top-K + normalize)
 //! - [`qsa_mask`] — QSA indexer block selection (top-k scores to attention mask)
 //! - [`swiglu`] — fused `SwiGLU` activation (silu(gate) * up)
+//! - [`moe_combine`] — fused `MoE` combine (router-weighted sum of routed outputs)
 
 pub mod atan2;
+pub mod moe_combine;
 pub mod qsa_mask;
 pub mod snake;
 pub mod swiglu;

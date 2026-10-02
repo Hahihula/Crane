@@ -324,18 +324,59 @@ impl PackedIQuantExperts {
         Ok(Self { gate, up, down })
     }
 
-    /// Routed output `(tokens, top_k, hidden)` for `xs_f32` `(tokens,
-    /// hidden)` and the router's `(tokens, top_k)` `U32` ids.
-    fn forward(&self, xs_f32: &Tensor, topk_ids: &Tensor) -> Result<Tensor> {
-        let (tokens, top_k) = topk_ids.dims2()?;
+    /// The routed experts' combined output `(tokens, hidden)` in `out_dtype`
+    /// for `xs_f32` `(tokens, hidden)` and the router's `(tokens, top_k)`
+    /// `U32` ids and F32 weights.
+    fn forward(
+        &self,
+        xs_f32: &Tensor,
+        topk_ids: &Tensor,
+        topk_weights: &Tensor,
+        out_dtype: DType,
+    ) -> Result<Tensor> {
+        use crate::ops::fused_ops::moe_combine::moe_combine;
+        use crate::ops::fused_ops::swiglu::swiglu;
+
+        let top_k = topk_ids.dim(1)?;
         let ids = topk_ids.flatten_all()?;
+        // Prefill: one routing plan for all three projections, so its host
+        // sync and index upload are paid once per layer. Gate and up share
+        // one gather of the input, and everything stays in the plan's order
+        // until the combine reads it back by pair (see `GemmPlan`).
+        #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+        {
+            use crate::ops::quant_iq::PlanLayout;
+            let layouts = [PlanLayout::Rows(top_k), PlanLayout::PlanOrder];
+            if let Some(plan) = self.gate.gemm_plan(&ids, &layouts)? {
+                let [gate, up]: [Tensor; 2] = IQuantExperts::forward_planned(
+                    &[&self.gate, &self.up],
+                    xs_f32,
+                    &plan,
+                    PlanLayout::Rows(top_k),
+                )?
+                .try_into()
+                .map_err(|_| candle_core::Error::Msg("expected gate and up outputs".into()))?;
+                let hidden = swiglu(&gate, &up)?;
+                let mut down = IQuantExperts::forward_planned(
+                    &[&self.down],
+                    &hidden,
+                    &plan,
+                    PlanLayout::PlanOrder,
+                )?;
+                return moe_combine(
+                    &down.remove(0),
+                    Some(&plan.position()?),
+                    topk_weights,
+                    out_dtype,
+                );
+            }
+        }
         // Every routed expert of a token reads that token's row.
         let gate = self.gate.forward_indexed(xs_f32, &ids, top_k)?;
         let up = self.up.forward_indexed(xs_f32, &ids, top_k)?;
-        let hidden = crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?;
-        self.down
-            .forward_indexed(&hidden, &ids, 1)?
-            .reshape((tokens, top_k, ()))
+        let hidden = swiglu(&gate, &up)?;
+        let down = self.down.forward_indexed(&hidden, &ids, 1)?;
+        moe_combine(&down, None, topk_weights, out_dtype)
     }
 }
 
@@ -2187,8 +2228,9 @@ impl SparseMoeBlock {
 
         if let Some(packed) = &self.iquant_experts {
             return prof::timed(Span::MoeFused, || {
-                let routed = packed.forward(&xs_f32, &topk_ids)?;
-                Self::combine_expert_outputs(&routed, &topk_weights, original_dtype, &original_dims)
+                packed
+                    .forward(&xs_f32, &topk_ids, &topk_weights, original_dtype)?
+                    .reshape(original_dims.as_slice())
             });
         }
 
@@ -4949,14 +4991,15 @@ mod tests {
 
     /// Packed i-quant experts on `device` (IQ2_S gate, IQ3_XXS up, Q2_0 down,
     /// as in Qwen3.8-Flash-Next) against routing and experts recomputed here
-    /// from the CPU decoders.
+    /// from the CPU decoders: 3 tokens take the by-id matvec, 1100 (2200
+    /// pairs) the shared `GemmPlan` of the batched-GEMM path.
     #[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
     fn packed_iquant_experts_match_dequantized_reference(device: &Device) -> Result<()> {
         use crate::quantized::extended_gguf::read_content_lenient;
         use crate::quantized::iquant::IQuantType;
         use crate::quantized::test_util::{random_blocks, write_gguf};
 
-        let (experts, hidden, inter, top_k, tokens) = (4usize, 512usize, 64usize, 2usize, 3usize);
+        let (experts, hidden, inter, top_k) = (4usize, 512usize, 64usize, 2usize);
         let types = [IQuantType::Iq2S, IQuantType::Iq3Xxs, IQuantType::Q2_0];
         let shapes = [
             [experts, inter, hidden],
@@ -5031,11 +5074,6 @@ mod tests {
         );
         assert!(block.experts.is_empty());
 
-        let x = Tensor::randn(0f32, 1.0, (tokens, hidden), &Device::Cpu)?;
-        let got = block
-            .forward(&x.to_device(device)?)?
-            .to_device(&Device::Cpu)?;
-
         // Reference: dense weights from the CPU decoders.
         let dense = |i: usize| -> Result<Tensor> {
             let mut w = vec![0f32; shapes[i].iter().product()];
@@ -5044,28 +5082,42 @@ mod tests {
         };
         let (gate_w, up_w, down_w) = (dense(0)?, dense(1)?, dense(2)?);
         let router = Tensor::from_vec(router, (experts, hidden), &Device::Cpu)?;
-        let probs = candle_nn::ops::softmax_last_dim(&x.matmul(&router.t()?)?)?.to_vec2::<f32>()?;
-        let mut want = Vec::new();
-        for t in 0..tokens {
-            let mut order: Vec<usize> = (0..experts).collect();
-            order.sort_by(|&a, &b| probs[t][b].total_cmp(&probs[t][a]));
-            let chosen = &order[..top_k];
-            let norm: f32 = chosen.iter().map(|&e| probs[t][e]).sum();
-            let xt = x.narrow(0, t, 1)?;
-            let mut acc = Tensor::zeros((1, hidden), DType::F32, &Device::Cpu)?;
-            for &e in chosen {
-                let g = xt.matmul(&gate_w.get(e)?.t()?)?;
-                let u = xt.matmul(&up_w.get(e)?.t()?)?;
-                let h = (candle_nn::ops::silu(&g)? * u)?;
-                let y = h.matmul(&down_w.get(e)?.t()?)?;
-                acc = (acc + (y * f64::from(probs[t][e] / norm))?)?;
+
+        for tokens in [3usize, 1100] {
+            let x = Tensor::randn(0f32, 1.0, (tokens, hidden), &Device::Cpu)?;
+            let got = block
+                .forward(&x.to_device(device)?)?
+                .to_device(&Device::Cpu)?;
+            let probs =
+                candle_nn::ops::softmax_last_dim(&x.matmul(&router.t()?)?)?.to_vec2::<f32>()?;
+            let mut want = Vec::new();
+            for t in 0..tokens {
+                let mut order: Vec<usize> = (0..experts).collect();
+                order.sort_by(|&a, &b| probs[t][b].total_cmp(&probs[t][a]));
+                let chosen = &order[..top_k];
+                let norm: f32 = chosen.iter().map(|&e| probs[t][e]).sum();
+                let xt = x.narrow(0, t, 1)?;
+                let mut acc = Tensor::zeros((1, hidden), DType::F32, &Device::Cpu)?;
+                for &e in chosen {
+                    let g = xt.matmul(&gate_w.get(e)?.t()?)?;
+                    let u = xt.matmul(&up_w.get(e)?.t()?)?;
+                    let h = (candle_nn::ops::silu(&g)? * u)?;
+                    let y = h.matmul(&down_w.get(e)?.t()?)?;
+                    acc = (acc + (y * f64::from(probs[t][e] / norm))?)?;
+                }
+                want.push(acc);
             }
-            want.push(acc);
+            let want = Tensor::cat(&want, 0)?;
+            let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+            let diff = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            // The GEMM path multiplies in f16.
+            let tol = if tokens * top_k >= 2048 { 5e-3 } else { 1e-4 };
+            assert!(
+                diff / scale < tol,
+                "tokens {tokens}: rel diff {}",
+                diff / scale
+            );
         }
-        let want = Tensor::cat(&want, 0)?;
-        let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
-        let diff = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
-        assert!(diff / scale < 1e-4, "rel diff {}", diff / scale);
         Ok(())
     }
 }

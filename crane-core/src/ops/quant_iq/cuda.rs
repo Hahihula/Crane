@@ -20,11 +20,6 @@ const MODULE_NAME: &str = "crane_quant_iq4";
 const GENERIC_MODULE: &str = "crane_quant_iq";
 /// Output rows per thread block in the matvec kernels (one warp each).
 const WARPS: usize = 4;
-/// Pair count from which [`matvec_indexed`] switches from the by-id matvec
-/// (ids stay on the device) to [`super::indexed_via_gemm`] (one host sync for
-/// the ids, then each routed expert is decoded once and multiplied by cuBLAS).
-/// The crossover SYCL and Metal use; not tuned on NVIDIA yet.
-const GEMM_MIN_PAIRS: usize = 2048;
 /// `ROWS_PER_BLOCK` in `quant_iq.cu`.
 const ROWS_PER_BLOCK: usize = 4;
 
@@ -344,7 +339,8 @@ fn ids_slice(ids: &Tensor) -> Result<(std::sync::RwLockReadGuard<'_, Storage>, u
 /// packed `[experts, output_rows, cols]` tensor) times activation row
 /// `p / x_div` of `input` (`[_, cols]`). Returns `[ids.len(), output_rows]`.
 ///
-/// Below [`GEMM_MIN_PAIRS`] pairs `ids` is never read on the host.
+/// `ids` is never read on the host. Prefill-sized routings take
+/// [`super::GemmPlan`] instead (see `IQuantExperts`).
 ///
 /// # Errors
 ///
@@ -366,11 +362,6 @@ pub fn matvec_indexed(
     }
     let ids = ids.flatten_all()?.contiguous()?;
     let pairs = ids.elem_count();
-    if pairs >= GEMM_MIN_PAIRS {
-        return super::indexed_via_gemm(input, &ids, x_div, output_rows, cols, out_dtype, |e| {
-            dequantize_experts(packed, ty, e, output_rows, cols, DType::F16)
-        });
-    }
     launch_matvec(
         input,
         packed,

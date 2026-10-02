@@ -67,4 +67,4 @@ pub use projection::{GdnInputProjection, GdnInputProjectionKind, GdnProjection};
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 pub use rocm_backend::gdn_recurrence_rocm;
 #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
-pub use sycl_backend::gdn_recurrence_sycl;
+pub use sycl_backend::{gdn_fused_sycl, gdn_recurrence_sycl};

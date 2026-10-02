@@ -846,6 +846,140 @@ impl IQuantExperts {
         self.packed.device()
     }
 
+    fn check_width(&self, xs: &Tensor) -> Result<()> {
+        let (_, cols) = xs.dims2()?;
+        if cols != self.cols {
+            bail!(
+                "{} experts expect input width {}, got {cols}",
+                self.ty.name(),
+                self.cols
+            )
+        }
+        Ok(())
+    }
+
+    /// Whether the device kernels run these experts (the by-id matvec, and
+    /// [`Self::gemm_plan`]'s dequantize-and-GEMM path).
+    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    fn on_native_device(&self) -> bool {
+        let device = self.packed.device();
+        (device.is_cuda() || device.is_sycl() || device.is_metal())
+            && self.ty.has_native_experts_kernel(device)
+    }
+
+    /// The batched-GEMM plan for the routing `ids` (`U32`, flattened), with
+    /// input layouts `layouts`, when the device takes that path for this
+    /// many pairs (prefill); `None` for decode-sized routings, which the
+    /// by-id matvec serves without reading `ids` on the host. Every
+    /// projection with the same routing can run on one plan
+    /// ([`Self::forward_planned`]), sharing its host sync and upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `ids` cannot be read.
+    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    pub(crate) fn gemm_plan(
+        &self,
+        ids: &Tensor,
+        layouts: &[crate::ops::quant_iq::PlanLayout],
+    ) -> Result<Option<crate::ops::quant_iq::GemmPlan>> {
+        if ids.elem_count() < crate::ops::quant_iq::GEMM_MIN_PAIRS || !self.on_native_device() {
+            return Ok(None);
+        }
+        crate::ops::quant_iq::GemmPlan::new(&ids.to_device(self.packed.device())?, layouts)
+            .map(Some)
+    }
+
+    /// Projections `experts` (all the same shape) of the same `xs` over a
+    /// [`Self::gemm_plan`], sharing the input gather
+    /// ([`GemmPlan::run`]): one `[pairs, rows]` f16 output per entry, in
+    /// the plan's order.
+    ///
+    /// [`GemmPlan::run`]: crate::ops::quant_iq::GemmPlan::run
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `experts` is empty or disagree in shape, the
+    /// shapes disagree with `xs`, `layout` was not planned, or a kernel
+    /// fails.
+    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    pub(crate) fn forward_planned(
+        experts: &[&Self],
+        xs: &Tensor,
+        plan: &crate::ops::quant_iq::GemmPlan,
+        layout: crate::ops::quant_iq::PlanLayout,
+    ) -> Result<Vec<Tensor>> {
+        let Some(first) = experts.first() else {
+            bail!("no experts to run")
+        };
+        if experts
+            .iter()
+            .any(|e| (e.rows, e.cols) != (first.rows, first.cols))
+        {
+            bail!("experts sharing a GEMM pass must have the same shape")
+        }
+        first.check_width(xs)?;
+        let dequantize: Vec<_> = experts
+            .iter()
+            .map(|e| move |ids: &Tensor| e.dequantize_experts_f16(ids))
+            .collect();
+        let dequantize: Vec<crate::ops::quant_iq::DequantizeExperts<'_>> = dequantize
+            .iter()
+            .map(|f| f as crate::ops::quant_iq::DequantizeExperts<'_>)
+            .collect();
+        plan.run(
+            &xs.to_device(first.packed.device())?,
+            layout,
+            first.rows,
+            first.cols,
+            &dequantize,
+        )
+    }
+
+    /// Experts `ids` decoded to f16 `[n, rows, cols]` by the device kernel.
+    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    fn dequantize_experts_f16(&self, ids: &Tensor) -> Result<Tensor> {
+        let (packed, ty, rows, cols) = (&self.packed, self.ty, self.rows, self.cols);
+        #[cfg(feature = "cuda")]
+        if packed.device().is_cuda() {
+            return crate::ops::quant_iq::cuda::dequantize_experts(
+                packed,
+                ty,
+                ids,
+                rows,
+                cols,
+                DType::F16,
+            );
+        }
+        #[cfg(feature = "sycl")]
+        if packed.device().is_sycl() {
+            return crate::ops::quant_iq::sycl::dequantize_experts(
+                packed,
+                ty,
+                ids,
+                rows,
+                cols,
+                DType::F16,
+            );
+        }
+        #[cfg(feature = "metal")]
+        if packed.device().is_metal() {
+            return crate::ops::quant_iq::metal::dequantize_experts(
+                packed,
+                ty,
+                ids,
+                rows,
+                cols,
+                DType::F16,
+            );
+        }
+        bail!(
+            "no device kernel decodes {} experts on {:?}",
+            ty.name(),
+            packed.device().location()
+        )
+    }
+
     /// For each pair `p` of `ids` (`U32`, any shape, flattened), expert
     /// `ids[p]` applied to row `p / x_div` of `xs` (`[_, cols]`). Returns
     /// `[pairs, rows]` in F32.
@@ -859,13 +993,15 @@ impl IQuantExperts {
     /// Returns an error if the shapes disagree, an id is out of range (CPU
     /// path), or a kernel fails.
     pub fn forward_indexed(&self, xs: &Tensor, ids: &Tensor, x_div: usize) -> Result<Tensor> {
-        let (_, cols) = xs.dims2()?;
-        if cols != self.cols {
-            bail!(
-                "{} experts expect input width {}, got {cols}",
-                self.ty.name(),
-                self.cols
-            )
+        self.check_width(xs)?;
+
+        #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+        {
+            use crate::ops::quant_iq::PlanLayout;
+            if let Some(plan) = self.gemm_plan(ids, &[PlanLayout::Rows(x_div)])? {
+                let mut out = Self::forward_planned(&[self], xs, &plan, PlanLayout::Rows(x_div))?;
+                return plan.to_pair_order(&out.remove(0))?.to_dtype(DType::F32);
+            }
         }
 
         #[cfg(feature = "cuda")]

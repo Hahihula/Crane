@@ -14,7 +14,11 @@ use std::sync::Arc;
 
 use super::extended_gguf::{ExtendedGgufInfo, IQuantTensorInfo};
 use super::iquant::IQuantType;
+// `Device::is_sycl` is inherent on the SYCL candle fork; this extension only
+// supplies it (as a constant `false`) for builds without that fork.
 use super::ternary::{GdnPermutation, HadamardMode, TernaryLinear, TernaryWeight};
+#[cfg(not(feature = "sycl"))]
+use crate::utils::DeviceExt;
 
 /// Opens and memory-maps a GGUF file for zero-syscall tensor reads.
 ///
@@ -237,6 +241,23 @@ impl<R: Read + Seek> Gguf<R> {
                 info.shape[1],
                 device,
             )?;
+            return Ok(crate::ops::linear::LinearLayer::IQuant(layer));
+        }
+        // On SYCL, k-quant weights take Crane's packed kernels too: decode
+        // there is bound by kernel submission, and a matvec is one launch
+        // where Candle's `QMatMul` takes three (quantize the activation,
+        // partial dots, sum).
+        if cfg!(feature = "sycl")
+            && device.is_sycl()
+            && let Some(info) = self.ct.tensor_infos.get(name)
+            && info.shape.rank() == 2
+            && let Some(ty) = IQuantType::from_k_quant(info.ggml_dtype)
+        {
+            let (rows, cols) = info.shape.dims2()?;
+            let offset = info.offset;
+            let bytes = rows * cols / ty.block_size() * ty.block_bytes();
+            let packed = self.read_tensor_data(name, offset, bytes)?;
+            let layer = super::iquant::IQuantLinear::new(ty, packed, rows, cols, device)?;
             return Ok(crate::ops::linear::LinearLayer::IQuant(layer));
         }
         let ws = self.load_qtensor(name, device)?;

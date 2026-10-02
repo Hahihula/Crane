@@ -209,6 +209,28 @@ impl GatedDeltaNet {
             causal_conv1d(&mixed_qkv, &self.conv1d_weight, dims, cache)
         })?;
 
+        // 3-6 in one launch on SYCL.
+        #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
+        if mixed_qkv.device().is_sycl() && std::env::var("CRANE_GDN_PORTABLE").is_err() {
+            let fused = timed(Span::GdnRecur, || {
+                super::sycl_backend::gdn_fused_sycl(
+                    &mixed_qkv,
+                    &projected.a,
+                    &projected.b,
+                    &self.derived.gates.neg_exp_a_log,
+                    &self.derived.gates.dt_bias,
+                    &cache.recurrent_state,
+                    dims,
+                )
+            })?;
+            if let Some((y, state)) = fused {
+                cache.recurrent_state = state;
+                return timed(Span::GdnFinish, || {
+                    self.finish_forward(y, projected.z, batch_size, seq_len)
+                });
+            }
+        }
+
         // 3-5. Per-head split, QK L2-norm, and the β/g gates.
         let (q, k, v, beta, g) = timed(Span::GdnQkv, || -> Result<_> {
             // Split → per-head Q, K, V; expand K from num_k_heads → num_v_heads.
