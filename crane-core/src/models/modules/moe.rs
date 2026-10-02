@@ -283,15 +283,16 @@ pub struct SparseMoeBlock {
     /// Shared expert added to every token's routed output; `None` for
     /// plain Qwen3-style `MoE`.
     shared_expert: Option<Box<SharedExpert>>,
-    /// Packed i-quant experts run by expert id on the device (SYCL); when
-    /// set, `experts` is empty. See [`PackedIQuantExperts`].
+    /// Packed i-quant (or, on SYCL, k-quant) experts run by expert id on the
+    /// device; when set, `experts` is empty. See [`PackedIQuantExperts`].
     iquant_experts: Option<PackedIQuantExperts>,
 }
 
 /// Every expert's gate, up and down projections kept in their packed
-/// i-quant encoding (e.g. `IQ2_S` gate/up, `Q2_0` down), run with one
-/// by-id kernel launch per projection. Loaded instead of re-quantizing when
-/// the device has native kernels for all three types.
+/// i-quant or k-quant encoding (e.g. `IQ2_S` gate/up and `Q2_0` down, or
+/// `Q4_K` gate/up and `Q6_K` down), run with one by-id kernel launch per
+/// projection. Loaded instead of re-quantizing or slicing per expert when the
+/// device has by-id kernels for all three types.
 pub struct PackedIQuantExperts {
     gate: IQuantExperts,
     up: IQuantExperts,
@@ -501,8 +502,9 @@ impl SparseMoeBlock {
     }
 
     /// The packed gate/up/down experts as [`PackedIQuantExperts`], if all
-    /// three are i-quants with native kernels on `expert_device`; `None`
-    /// otherwise (they then load through [`Self::load_packed_experts`]).
+    /// three have by-id kernels on `expert_device` (see
+    /// [`Gguf::iquant_experts`]); `None` otherwise (they then load through
+    /// [`Self::load_packed_experts`]).
     fn load_iquant_experts<R: Read + Seek>(
         gg: &mut Gguf<R>,
         prefix: &str,

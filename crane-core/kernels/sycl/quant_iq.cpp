@@ -1,12 +1,13 @@
 // llama.cpp i-quant weight kernels for the Intel SYCL backend: IQ4_NL,
-// IQ4_XS, IQ2_S, IQ3_XXS, IQ3_S and Q2_0 (see
-// `crane-core/src/quantized/iquant.rs` for the block layouts). Built into
+// IQ4_XS, IQ2_S, IQ3_XXS, IQ3_S and Q2_0, plus the k-quants Q4_K, Q5_K and
+// Q6_K for packed MoE experts (see `crane-core/src/quantized/iquant.rs` for
+// the block layouts). Built into
 // `libcrane_gdn_sycl.so` by `crane-core/build.rs` (icpx, `--features sycl`
 // only) and driven by `ops/quant_iq/sycl.rs`.
 //
 // Every format here splits a row into 32-value chunks that decode on their
-// own (an IQ4_NL block, a Q2_0 half-block, or one sub-block of a 256-value
-// super-block), so both entry points are written against one per-type
+// own (an IQ4_NL block, a Q2_0 half-block, or one 32-value group of a
+// 256-value super-block), so both entry points are written against one per-type
 // `decode32`:
 //
 // - `matvec`: one 16-lane sub-group per output row; lanes stride over the
@@ -35,7 +36,7 @@ constexpr int SG = 16;          // sub-group width
 constexpr int ROWS_PER_WG = 4;  // output rows (sub-groups) per work-group
 
 // Type tags match `IQuantType::sycl_tag` in `ops/quant_iq/sycl.rs`.
-enum Ty { IQ4_NL = 0, IQ4_XS = 1, IQ2_S = 2, IQ3_XXS = 3, IQ3_S = 4, Q2_0 = 5 };
+enum Ty { IQ4_NL = 0, IQ4_XS = 1, IQ2_S = 2, IQ3_XXS = 3, IQ3_S = 4, Q2_0 = 5, Q4_K = 6, Q5_K = 7, Q6_K = 8 };
 // dtype tags match `dtype_tag` there.
 enum { OUT_F32 = 0, OUT_F16 = 1 };
 
@@ -49,6 +50,9 @@ template <int TY> constexpr int block_bytes() {
   case IQ2_S: return 2 + QK_K / 4 + QK_K / 16;
   case IQ3_XXS: return 2 + 3 * QK_K / 8;
   case IQ3_S: return 2 + 13 * QK_K / 32 + QK_K / 64;
+  case Q4_K: return 2 + 2 + 12 + QK_K / 2;
+  case Q5_K: return 2 + 2 + 12 + QK_K / 8 + QK_K / 2;
+  case Q6_K: return QK_K / 2 + QK_K / 4 + QK_K / 16 + 2;
   default: return 2 + 64 / 4; // Q2_0
   }
 }
@@ -93,7 +97,8 @@ template <int TY> inline void decode32(const uint8_t *row, int c, float *w) {
   } else {
     const uint8_t *blk = row + size_t(c / 8) * block_bytes<TY>();
     const int ib = c % 8;
-    const float d = load_half(blk);
+    // Q6_K keeps its scale after the values.
+    const float d = load_half(blk + (TY == Q6_K ? block_bytes<TY>() - 2 : 0));
     if constexpr (TY == IQ4_XS) {
       const int scales_h = int(blk[2]) | (int(blk[3]) << 8);
       const int lo = (blk[4 + ib / 2] >> (4 * (ib % 2))) & 0xf;
@@ -133,6 +138,42 @@ template <int TY> inline void decode32(const uint8_t *row, int c, float *w) {
           w[8 * l + j] = signed_val(db * grid_byte(g1, j), s, j);
           w[8 * l + 4 + j] = signed_val(db * grid_byte(g2, j), s, j + 4);
         }
+      }
+    } else if constexpr (TY == Q4_K || TY == Q5_K) {
+      // ggml `get_scale_min_k4`: eight 6-bit scale/min pairs in 12 bytes.
+      const uint8_t *sc = blk + 4;
+      int s, m;
+      if (ib < 4) {
+        s = sc[ib] & 63;
+        m = sc[ib + 4] & 63;
+      } else {
+        s = (sc[ib + 4] & 0xf) | ((sc[ib - 4] >> 6) << 4);
+        m = (sc[ib + 4] >> 4) | ((sc[ib] >> 6) << 4);
+      }
+      const float dl = d * float(s);
+      const float ml = load_half(blk + 2) * float(m);
+      // Sub-blocks 2k and 2k+1 share 32 bytes: low nibbles, then high.
+      const uint8_t *q = blk + (TY == Q5_K ? 16 + QK_K / 8 : 16) + 32 * (ib / 2);
+      const int shift = 4 * (ib % 2);
+      for (int j = 0; j < 32; ++j) {
+        int v = (q[j] >> shift) & 0xf;
+        if constexpr (TY == Q5_K) {
+          v |= ((blk[16 + j] >> ib) & 1) << 4;
+        }
+        w[j] = dl * float(v) - ml;
+      }
+    } else if constexpr (TY == Q6_K) {
+      // Each half of the block covers 128 values in four groups of 32: group
+      // k takes the low (k < 2) or high nibbles of 32 `ql` bytes and bits
+      // 2k..2k+1 of 32 `qh` bytes, with one i8 scale per 16 values.
+      const int half = ib / 4;
+      const int k = ib % 4;
+      const uint8_t *ql = blk + 64 * half + 32 * (k & 1);
+      const uint8_t *qh = blk + QK_K / 2 + 32 * half;
+      const auto *sc = reinterpret_cast<const int8_t *>(blk + QK_K / 2 + QK_K / 4) + 8 * half + 2 * k;
+      for (int j = 0; j < 32; ++j) {
+        const int v = ((ql[j] >> (4 * (k >> 1))) & 0xf) | (((qh[j] >> (2 * k)) & 3) << 4);
+        w[j] = d * float(sc[j / 16]) * float(v - 32);
       }
     } else { // IQ3_S
       const uint8_t *qs = blk + 2 + 8 * ib;
@@ -235,6 +276,9 @@ template <typename F> bool dispatch_ty(int ty, F &&f) {
   case IQ3_XXS: f.template operator()<IQ3_XXS>(); return true;
   case IQ3_S: f.template operator()<IQ3_S>(); return true;
   case Q2_0: f.template operator()<Q2_0>(); return true;
+  case Q4_K: f.template operator()<Q4_K>(); return true;
+  case Q5_K: f.template operator()<Q5_K>(); return true;
+  case Q6_K: f.template operator()<Q6_K>(); return true;
   default: return false;
   }
 }

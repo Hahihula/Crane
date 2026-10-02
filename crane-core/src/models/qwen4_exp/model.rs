@@ -28,22 +28,12 @@ use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::moe::SparseMoeBlock;
 use crate::models::qwen3_5::{
     AttentionDims, FullAttention, KvCache, KvCacheKind, MRotaryEmbedding, RopeSlice,
+    attn_query_slice,
 };
 use crate::ops::gdn::{GatedDeltaNet, GdnDims, GdnInputProjectionKind, GdnLayerCache};
 use crate::ops::linear::LinearLayer;
 use crate::quantized::gguf_file::Gguf;
 use crate::utils::prof::{Span, timed};
-
-/// Most queries per softmax-attention call. Prefill chunks can be large (the
-/// `MoE` is cheapest per token in big chunks), but attention scores grow as
-/// `heads x queries x context`, so indexed attention walks a chunk in slices
-/// (each slice sees the ones before it through the caches), sized by
-/// [`attn_query_slice`].
-const ATTN_QUERY_CHUNK: usize = 512;
-
-/// Bytes of attention scores one slice may produce (f16 or f32 alike, as a
-/// bound): keeps a 512-query slice up to ~2.7k context and shrinks it beyond.
-const ATTN_SCORE_BUDGET: usize = 128 << 20;
 
 /// Default prefill chunk. The packed `MoE` decodes every routed expert once
 /// per chunk, so larger chunks amortize that (see `ops::quant_iq`), but a
@@ -254,7 +244,8 @@ impl DecoderLayer {
 }
 
 /// Softmax attention restricted by the QSA indexer, over `x` `[1, seq,
-/// hidden]` in slices of at most [`ATTN_QUERY_CHUNK`] queries.
+/// hidden]` in slices of [`attn_query_slice`] queries (each slice sees the
+/// ones before it through the caches): the indexer builds each slice's mask.
 fn indexed_attention(
     attn: &FullAttention,
     indexer: &QsaIndexer,
@@ -294,13 +285,6 @@ fn indexed_attention(
         }
     }
     Tensor::cat(&outs, 1)
-}
-
-/// Queries per attention slice for `cells` of context: at most
-/// [`ATTN_QUERY_CHUNK`], fewer once `heads x queries x cells` f32 scores would
-/// pass [`ATTN_SCORE_BUDGET`], and at least 16.
-fn attn_query_slice(heads: usize, cells: usize) -> usize {
-    (ATTN_SCORE_BUDGET / (heads * cells * 4).max(1)).clamp(16, ATTN_QUERY_CHUNK)
 }
 
 /// Block mixers are always loaded with injection weights.
@@ -505,7 +489,7 @@ impl Qwen4ExpTextModel {
 
     /// Feed the next `tokens` of the sequence and return the logits
     /// (`[vocab]`, F32) after its last token. Long inputs are prefilled in
-    /// chunks (`CRANE_PREFILL_CHUNK`, default 2048).
+    /// chunks (`CRANE_PREFILL_CHUNK`, default [`DEFAULT_PREFILL_CHUNK`]).
     ///
     /// # Errors
     ///
@@ -726,21 +710,5 @@ impl Model {
         if let Err(e) = self.inner.reset() {
             eprintln!("[qwen4_exp] warmup cache reset failed (non-fatal): {e}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Qwen3.8-Flash-Next has 24 query heads: full 512-query slices up to
-    /// ~2.7k cells, then shrinking so scores stay within the budget.
-    #[test]
-    fn attention_slices_shrink_with_context() {
-        assert_eq!(attn_query_slice(24, 1), ATTN_QUERY_CHUNK);
-        assert_eq!(attn_query_slice(24, 2048), ATTN_QUERY_CHUNK);
-        assert_eq!(attn_query_slice(24, 32_768), 42);
-        assert!(24 * attn_query_slice(24, 32_768) * 32_768 * 4 <= ATTN_SCORE_BUDGET);
-        assert_eq!(attn_query_slice(24, 1 << 20), 16);
     }
 }

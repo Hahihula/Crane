@@ -150,15 +150,21 @@ impl<R: Read + Seek> Gguf<R> {
         };
         let elems: usize = info.shape.iter().product();
         let bytes = elems / info.ty.block_size() * info.ty.block_bytes();
+        let packed = self.read_tensor_data(name, info.offset, bytes)?;
+        Ok(Some((info, packed)))
+    }
+
+    /// `bytes` of tensor data starting `offset` bytes into the data section.
+    fn read_tensor_data(&mut self, name: &str, offset: u64, bytes: usize) -> Result<Vec<u8>> {
         let absolute = self
             .ct
             .tensor_data_offset
-            .checked_add(info.offset)
+            .checked_add(offset)
             .ok_or_else(|| candle_core::Error::Msg(format!("tensor {name} offset overflow")))?;
         self.reader.seek(std::io::SeekFrom::Start(absolute))?;
-        let mut packed = vec![0u8; bytes];
-        self.reader.read_exact(&mut packed)?;
-        Ok(Some((info, packed)))
+        let mut data = vec![0u8; bytes];
+        self.reader.read_exact(&mut data)?;
+        Ok(data)
     }
 
     /// Load a quantized tensor and wrap as a `LinearLayer` (`QMatMul`).
@@ -242,16 +248,28 @@ impl<R: Read + Seek> Gguf<R> {
     /// Cheap: reads only the header.
     #[must_use]
     pub fn has_native_iquant_experts(&self, name: &str, device: &Device) -> bool {
-        self.iquant.get(name).is_some_and(|info| {
-            info.shape.len() == 3
-                && info.ty.has_native_experts_kernel(device)
-                && super::iquant::native_enabled()
-        })
+        self.packed_experts_type(name, device).is_some()
     }
 
-    /// A packed `[experts, rows, cols]` `MoE` tensor kept in its i-quant
-    /// encoding on `device`, or `None` when `name` is not an i-quant that has
-    /// a native kernel there (callers then load it as a regular `QTensor`).
+    /// The encoding a packed `[experts, rows, cols]` tensor keeps on
+    /// `device`: an i-quant, or a k-quant Candle parsed itself (see
+    /// [`IQuantType::from_k_quant`]), whenever a by-id kernel runs it there.
+    fn packed_experts_type(&self, name: &str, device: &Device) -> Option<IQuantType> {
+        let ty = if let Some(info) = self.iquant.get(name) {
+            (info.shape.len() == 3 && super::iquant::native_enabled()).then_some(info.ty)?
+        } else {
+            let info = self.ct.tensor_infos.get(name)?;
+            if info.shape.rank() != 3 {
+                return None;
+            }
+            IQuantType::from_k_quant(info.ggml_dtype)?
+        };
+        ty.has_native_experts_kernel(device).then_some(ty)
+    }
+
+    /// A packed `[experts, rows, cols]` `MoE` tensor kept in its i-quant or
+    /// k-quant encoding on `device`, or `None` when no by-id kernel runs it
+    /// there (callers then load it as a regular `QTensor`).
     ///
     /// # Errors
     ///
@@ -261,14 +279,22 @@ impl<R: Read + Seek> Gguf<R> {
         name: &str,
         device: &Device,
     ) -> Result<Option<super::iquant::IQuantExperts>> {
-        if !self.has_native_iquant_experts(name, device) {
-            return Ok(None);
-        }
-        let Some((info, packed)) = self.iquant_bytes(name)? else {
+        let Some(ty) = self.packed_experts_type(name, device) else {
             return Ok(None);
         };
-        let shape = [info.shape[0], info.shape[1], info.shape[2]];
-        super::iquant::IQuantExperts::new(info.ty, packed, shape, device).map(Some)
+        let (shape, packed) = if let Some((info, packed)) = self.iquant_bytes(name)? {
+            ([info.shape[0], info.shape[1], info.shape[2]], packed)
+        } else {
+            let info = &self.ct.tensor_infos[name];
+            let (experts, rows, cols) = info.shape.dims3()?;
+            let offset = info.offset;
+            let bytes = experts * rows * cols / ty.block_size() * ty.block_bytes();
+            (
+                [experts, rows, cols],
+                self.read_tensor_data(name, offset, bytes)?,
+            )
+        };
+        super::iquant::IQuantExperts::new(ty, packed, shape, device).map(Some)
     }
 
     fn ternary_linear(&mut self, name: &str) -> Result<TernaryLinear> {

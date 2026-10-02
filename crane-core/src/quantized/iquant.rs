@@ -8,10 +8,11 @@
 //! [`extended_gguf`](super::extended_gguf) probe hides these tensors from
 //! Candle; this module decodes them.
 //!
-//! Where a native kernel exists ([`IQuantType::has_native_kernel`]: every
-//! type on SYCL and Metal, `IQ4_XS` / `IQ4_NL` on CUDA), linear layers
-//! ([`IQuantLinear`]) and, on SYCL and Metal, packed `MoE` experts ([`IQuantExperts`])
-//! keep the packed encoding. Everything else (other devices and types,
+//! Where a native kernel exists ([`IQuantType::has_native_kernel`]), linear
+//! layers ([`IQuantLinear`]) and packed `MoE` experts ([`IQuantExperts`])
+//! keep the packed encoding. The k-quants `Q4_K` / `Q5_K` / `Q6_K` are listed
+//! too, for packed experts only: Candle runs them as linear layers itself,
+//! but has no by-expert-id kernel for them on SYCL. Everything else (other devices and types,
 //! embeddings) is dequantized on the CPU and re-quantized
 //! at load time to a Candle-native type (see [`requant_target`]), so every
 //! backend can still run it through its existing `QMatMul` kernels. Reference:
@@ -63,6 +64,15 @@ pub enum IQuantType {
     /// ggml type 42: 64-value blocks, `f16` scale + 2-bit codes mapping to
     /// `{-1, 0, 1, 2}`. Not an i-quant, but likewise unknown to Candle.
     Q2_0,
+    /// ggml type 12: 256-value super-blocks, `f16` scale and min, eight
+    /// 6-bit sub-block scale/min pairs and 128 bytes of 4-bit values.
+    Q4K,
+    /// ggml type 13: `Q4_K` plus 32 bytes holding each value's fifth bit.
+    Q5K,
+    /// ggml type 14: 256-value super-blocks of 6-bit values (low nibbles,
+    /// then high bit pairs), sixteen `i8` sub-block scales and a trailing
+    /// `f16` scale.
+    Q6K,
 }
 
 impl IQuantType {
@@ -79,6 +89,23 @@ impl IQuantType {
         }
     }
 
+    /// The k-quant matching a type Candle parsed itself, for packed experts
+    /// (see the module docs). Not part of [`Self::from_ggml_type_id`], which
+    /// picks the tensors Candle cannot parse.
+    #[must_use]
+    pub fn from_k_quant(dtype: GgmlDType) -> Option<Self> {
+        match dtype {
+            GgmlDType::Q4K => Some(Self::Q4K),
+            GgmlDType::Q5K => Some(Self::Q5K),
+            GgmlDType::Q6K => Some(Self::Q6K),
+            _ => None,
+        }
+    }
+
+    fn is_k_quant(self) -> bool {
+        matches!(self, Self::Q4K | Self::Q5K | Self::Q6K)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Iq4Nl => "IQ4_NL",
@@ -87,29 +114,33 @@ impl IQuantType {
             Self::Iq3Xxs => "IQ3_XXS",
             Self::Iq3S => "IQ3_S",
             Self::Q2_0 => "Q2_0",
+            Self::Q4K => "Q4_K",
+            Self::Q5K => "Q5_K",
+            Self::Q6K => "Q6_K",
         }
     }
 
     /// Whether this build has a kernel running this type packed on `device`
-    /// (behind [`IQuantLinear`] / [`IQuantExperts`]). SYCL, Metal and CUDA run
-    /// every type. Anything else is re-quantized.
+    /// (behind [`IQuantLinear`] / [`IQuantExperts`]). SYCL runs every type,
+    /// Metal and CUDA every type but the k-quants. Anything else is
+    /// re-quantized.
     #[must_use]
     pub fn has_native_kernel(self, device: &Device) -> bool {
         (cfg!(feature = "sycl") && device.is_sycl())
-            || (cfg!(feature = "cuda") && device.is_cuda())
-            || (cfg!(feature = "metal") && device.is_metal())
+            || (!self.is_k_quant()
+                && ((cfg!(feature = "cuda") && device.is_cuda())
+                    || (cfg!(feature = "metal") && device.is_metal())))
     }
 
     /// Whether this build has a by-expert-id kernel for this type on
     /// `device`, so packed `MoE` experts can stay packed
-    /// ([`IQuantExperts`]): SYCL, Metal and CUDA. Elsewhere experts are
-    /// re-quantized and take the backend's regular `MoE` path, since
-    /// [`IQuantExperts::forward_indexed`]'s fallback decodes on the CPU.
+    /// ([`IQuantExperts`]): the same as [`Self::has_native_kernel`]. Elsewhere
+    /// experts take the backend's regular `MoE` path (re-quantized for
+    /// i-quants), since [`IQuantExperts::forward_indexed`]'s fallback decodes
+    /// on the CPU.
     #[must_use]
     pub fn has_native_experts_kernel(self, device: &Device) -> bool {
-        (cfg!(feature = "sycl") && device.is_sycl())
-            || (cfg!(feature = "cuda") && device.is_cuda())
-            || (cfg!(feature = "metal") && device.is_metal())
+        self.has_native_kernel(device)
     }
 
     /// Number of weights per block.
@@ -117,7 +148,13 @@ impl IQuantType {
         match self {
             Self::Iq4Nl => QK4_NL,
             Self::Q2_0 => QK2_0,
-            Self::Iq4Xs | Self::Iq2S | Self::Iq3Xxs | Self::Iq3S => QK_K,
+            Self::Iq4Xs
+            | Self::Iq2S
+            | Self::Iq3Xxs
+            | Self::Iq3S
+            | Self::Q4K
+            | Self::Q5K
+            | Self::Q6K => QK_K,
         }
     }
 
@@ -130,6 +167,9 @@ impl IQuantType {
             Self::Iq3Xxs => 2 + 3 * QK_K / 8,
             Self::Iq3S => 2 + 13 * QK_K / 32 + QK_K / 64,
             Self::Q2_0 => 2 + QK2_0 / 4,
+            Self::Q4K => 2 + 2 + 12 + QK_K / 2,
+            Self::Q5K => 2 + 2 + 12 + QK_K / 8 + QK_K / 2,
+            Self::Q6K => QK_K / 2 + QK_K / 4 + QK_K / 16 + 2,
         }
     }
 
@@ -146,6 +186,9 @@ impl IQuantType {
             Self::Iq3Xxs => dequantize_iq3_xxs(blocks, out),
             Self::Iq3S => dequantize_iq3_s(blocks, out),
             Self::Q2_0 => dequantize_q2_0(blocks, out),
+            Self::Q4K => dequantize_k_quant(GgmlDType::Q4K, blocks, out),
+            Self::Q5K => dequantize_k_quant(GgmlDType::Q5K, blocks, out),
+            Self::Q6K => dequantize_k_quant(GgmlDType::Q6K, blocks, out),
         }
     }
 }
@@ -174,6 +217,16 @@ pub fn ggml_type_name(id: u32) -> Option<&'static str> {
         42 => "Q2_0",
         _ => return None,
     })
+}
+
+/// Candle's own CPU decoder; the k-quants are only here for packed experts.
+fn dequantize_k_quant(dtype: GgmlDType, blocks: &[u8], out: &mut [f32]) {
+    let decoded = QStorage::from_data(Cow::Borrowed(blocks), &Device::Cpu, dtype)
+        .and_then(|storage| QTensor::new(storage, (out.len(),)))
+        .and_then(|qt| qt.dequantize(&Device::Cpu))
+        .and_then(|t| t.to_vec1::<f32>())
+        .expect("whole k-quant blocks decode on the CPU");
+    out.copy_from_slice(&decoded);
 }
 
 fn dequantize_iq4_nl(blocks: &[u8], out: &mut [f32]) {
@@ -818,7 +871,8 @@ impl IQuantExperts {
         }
 
         #[cfg(feature = "cuda")]
-        if self.packed.device().is_cuda() {
+        if self.packed.device().is_cuda() && self.ty.has_native_experts_kernel(self.packed.device())
+        {
             return crate::ops::quant_iq::cuda::matvec_indexed(
                 &xs.to_device(self.packed.device())?,
                 &self.packed,
@@ -844,7 +898,9 @@ impl IQuantExperts {
             );
         }
         #[cfg(feature = "metal")]
-        if self.packed.device().is_metal() {
+        if self.packed.device().is_metal()
+            && self.ty.has_native_experts_kernel(self.packed.device())
+        {
             return crate::ops::quant_iq::metal::matvec_indexed(
                 &xs.to_device(self.packed.device())?,
                 &self.packed,
@@ -1185,6 +1241,9 @@ mod tests {
             (IQuantType::Iq3S, 37, 2560),
             (IQuantType::Q2_0, 37, 640),
             (IQuantType::Iq4Nl, 21, 640),
+            (IQuantType::Q4K, 37, 512),
+            (IQuantType::Q5K, 37, 768),
+            (IQuantType::Q6K, 37, 512),
         ] {
             let packed = random_blocks(ty, rows * cols / ty.block_size(), rows as u32 * 31);
             let cpu = IQuantLinear::new(ty, packed.clone(), rows, cols, &Device::Cpu)?;
@@ -1358,6 +1417,9 @@ mod tests {
             (IQuantType::Iq3S, 64, 512),
             (IQuantType::Iq4Nl, 96, 640),
             (IQuantType::Q2_0, 96, 640),
+            (IQuantType::Q4K, 64, 512),
+            (IQuantType::Q5K, 64, 768),
+            (IQuantType::Q6K, 64, 512),
         ]
     }
 

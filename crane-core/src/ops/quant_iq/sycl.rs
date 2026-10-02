@@ -58,6 +58,9 @@ fn type_tag(ty: IQuantType) -> i32 {
         IQuantType::Iq3Xxs => 3,
         IQuantType::Iq3S => 4,
         IQuantType::Q2_0 => 5,
+        IQuantType::Q4K => 6,
+        IQuantType::Q5K => 7,
+        IQuantType::Q6K => 8,
     }
 }
 

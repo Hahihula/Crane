@@ -3,14 +3,17 @@
 // Built into `libcrane_gdn_sycl.so` by `crane-core/build.rs` (icpx, `--features
 // sycl` only) and driven by `ops/gdn/sycl_backend.rs`.
 //
-// One work-item owns its state column `S[:, vcol]` (K elements, private) and
-// steps through the whole sequence — each value column of each (batch*head) is
-// an independent sequential recurrence. This collapses the per-timestep candle
-// op graph into one submission per GDN layer per forward pass.
+// Each value column of each (batch*head) is an independent sequential
+// recurrence, so one launch steps through the whole sequence, collapsing the
+// per-timestep candle op graph into one submission per GDN layer per pass.
 //
-// v0: no local-memory staging — every work-item reads `k_t` / `q_t` straight
-// from global. Redundant bandwidth, but no barrier and easy to trust. The
-// shared-memory tiling is the next optimisation once numerics are verified.
+// For K = 64 / 128 / 256 a 16-lane sub-group owns four columns and splits
+// their K rows across its lanes (`gdn_sg_launch`): the state stays in
+// registers and there are 16x more work-items than columns. On an Arc Pro B70
+// at 32 heads of 128 x 128 that is 0.9 us per token against 18 us for the
+// per-column kernel (`gdn_launch`), where each work-item held a whole
+// 128-float column — every register a lane has, so it spilled — and only
+// 4096 work-items ran. Other K keep the per-column kernel.
 //
 // Layouts (all contiguous f32):
 //   q, k     : [BH, S, K]   (q already pre-scaled by 1/sqrt(K) by the caller)
@@ -29,6 +32,101 @@
 #include <cstdio>
 
 #define GDN_MAX_K 256
+
+namespace {
+
+constexpr int SG = 16;        // sub-group width
+constexpr int SG_PER_WG = 4;  // sub-groups per work-group
+
+// Sub-group kernel: one 16-lane sub-group owns `C` state columns of one
+// (batch*head), and lane `l` holds rows `l, l + 16, ...` (`R = K / 16` of
+// them) of each, so the state stays in registers and `BH * V / C` sub-groups
+// run in parallel. The two dot products per step (`S^T k`, `S^T q`) are
+// sub-group reductions.
+template <int R, int C>
+void gdn_sg_launch(sycl::queue &q, const float *qp, const float *kp, const float *vp,
+                   const float *gp, const float *bp, const float *st_in, float *st_out,
+                   float *yp, int BH, int S, int V) {
+  constexpr int K = R * SG;
+  const int tiles = V / C;
+  const size_t sgs = size_t(BH) * size_t(tiles);
+  const size_t wgs = (sgs + SG_PER_WG - 1) / SG_PER_WG;
+  q.parallel_for(
+      sycl::nd_range<1>(wgs * SG_PER_WG * SG, SG_PER_WG * SG),
+      [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG)]] {
+        const auto sg = it.get_sub_group();
+        const size_t id = it.get_group(0) * SG_PER_WG + sg.get_group_linear_id();
+        // Uniform across the sub-group, so the reductions below stay legal.
+        if (id >= sgs) {
+          return;
+        }
+        const int lane = int(sg.get_local_linear_id());
+        const size_t bh = id / size_t(tiles);
+        const int col0 = int(id % size_t(tiles)) * C;
+
+        float st[C][R];
+        const float *sti = st_in + bh * K * V;
+        for (int r = 0; r < R; ++r) {
+          for (int c = 0; c < C; ++c) {
+            st[c][r] = sti[size_t(lane + SG * r) * V + col0 + c];
+          }
+        }
+        const float *qb = qp + bh * S * K;
+        const float *kb = kp + bh * S * K;
+        const float *vb = vp + bh * S * V;
+        const float *gb = gp + bh * S;
+        const float *bb = bp + bh * S;
+        float *yb = yp + bh * S * V;
+
+        for (int t = 0; t < S; ++t) {
+          const float decay = sycl::exp(gb[t]);
+          const float beta_t = bb[t];
+          float kt[R], qt[R];
+          for (int r = 0; r < R; ++r) {
+            kt[r] = kb[size_t(t) * K + lane + SG * r];
+            qt[r] = qb[size_t(t) * K + lane + SG * r];
+          }
+          float kv[C];
+          for (int c = 0; c < C; ++c) {
+            float acc = 0.f;
+            for (int r = 0; r < R; ++r) {
+              st[c][r] *= decay;
+              acc += st[c][r] * kt[r];
+            }
+            kv[c] = sycl::reduce_over_group(sg, acc, sycl::plus<float>());
+          }
+          float y[C];
+          for (int c = 0; c < C; ++c) {
+            const float delta = (vb[size_t(t) * V + col0 + c] - kv[c]) * beta_t;
+            float acc = 0.f;
+            for (int r = 0; r < R; ++r) {
+              st[c][r] += kt[r] * delta;
+              acc += st[c][r] * qt[r];
+            }
+            y[c] = sycl::reduce_over_group(sg, acc, sycl::plus<float>());
+          }
+          for (int c = 0; c < C; ++c) {
+            if (lane == c) {
+              yb[size_t(t) * V + col0 + c] = y[c];
+            }
+          }
+        }
+
+        float *sto = st_out + bh * K * V;
+        for (int r = 0; r < R; ++r) {
+          for (int c = 0; c < C; ++c) {
+            sto[size_t(lane + SG * r) * V + col0 + c] = st[c][r];
+          }
+        }
+      });
+}
+
+// Columns per sub-group: on the B70, 4 beats 1, 2 and 8 (0.9 vs 1.5, 1.0
+// and 2.2 us per token at 128 x 128): fewer leaves the reductions' latency
+// exposed, more spills.
+constexpr int SG_COLS = 4;
+
+} // namespace
 
 template <int KT>
 static void gdn_launch(sycl::queue &q, const float *qp, const float *kp,
@@ -104,6 +202,15 @@ extern "C" int crane_gdn_recurrence_sycl(void *queue, const float *q,
     auto &sq = *static_cast<sycl::queue *>(queue);
     if (V_TILE <= 0 || V_TILE > V)
       V_TILE = V;
+    if (V % SG_COLS == 0 && (K == 64 || K == 128 || K == 256)) {
+      if (K == 64)
+        gdn_sg_launch<4, SG_COLS>(sq, q, k, v, g, beta, state_in, state_out, y, BH, S, V);
+      else if (K == 128)
+        gdn_sg_launch<8, SG_COLS>(sq, q, k, v, g, beta, state_in, state_out, y, BH, S, V);
+      else
+        gdn_sg_launch<16, SG_COLS>(sq, q, k, v, g, beta, state_in, state_out, y, BH, S, V);
+      return 0;
+    }
     if (K == 128)
       gdn_launch<128>(sq, q, k, v, g, beta, state_in, state_out, y, BH, S, 128, V,
                       V_TILE);

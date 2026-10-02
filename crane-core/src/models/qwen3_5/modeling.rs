@@ -602,9 +602,29 @@ impl FullAttention {
     }
 }
 
+/// Most queries per attention slice. Prefill chunks can be large (a packed
+/// `MoE` is cheapest per token in big chunks), but attention scores grow as
+/// `heads x queries x context`, so [`grouped_sdpa`] walks a chunk's queries in
+/// slices sized by [`attn_query_slice`].
+const ATTN_QUERY_CHUNK: usize = 512;
+
+/// Bytes of attention scores one slice may produce (f16 or f32 alike, as a
+/// bound): keeps a 512-query slice of 24 heads up to ~2.7k context and
+/// shrinks it beyond.
+const ATTN_SCORE_BUDGET: usize = 128 << 20;
+
+/// Queries per attention slice for `cells` of context: at most
+/// [`ATTN_QUERY_CHUNK`], fewer once `heads x queries x cells` f32 scores would
+/// pass [`ATTN_SCORE_BUDGET`], and at least 16.
+pub(crate) fn attn_query_slice(heads: usize, cells: usize) -> usize {
+    (ATTN_SCORE_BUDGET / (heads * cells * 4).max(1)).clamp(16, ATTN_QUERY_CHUNK)
+}
+
 /// GQA attention without expanding K/V: the `n_rep` query heads that share a
 /// KV head are folded into the matmul's row dimension, so K and V are read
-/// once at their stored `kv_heads` width.
+/// once at their stored `kv_heads` width. Queries go in slices of
+/// [`attn_query_slice`], so the score matrix stays bounded however long the
+/// prefill chunk and the context are.
 ///
 /// Expanding them instead (see [`expanded_sdpa`]) materializes `k_rep`,
 /// `v_rep` and `k_t`, each `[B, num_heads, cells, D]`: on Qwen3.8-27B (24 q /
@@ -616,6 +636,34 @@ impl FullAttention {
 /// `k`/`v` are `[B, kv_heads, cells, D]`; `mask` is additive and broadcasts to
 /// `[B, 1, S, cells]`. Returns `[B, S, num_heads * D]`.
 fn grouped_sdpa(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    n_rep: usize,
+) -> Result<Tensor> {
+    let (b_sz, num_heads, seq_len, _) = q.dims4()?;
+    let cells = k.dim(2)?;
+    let slice = attn_query_slice(b_sz * num_heads, cells);
+    if seq_len <= slice {
+        return grouped_sdpa_slice(q, k, v, mask, scale, n_rep);
+    }
+    let v = v.contiguous()?;
+    let mut outs = Vec::with_capacity(seq_len.div_ceil(slice));
+    let mut offset = 0;
+    while offset < seq_len {
+        let len = slice.min(seq_len - offset);
+        let q = q.narrow(2, offset, len)?.contiguous()?;
+        let mask = mask.map(|m| m.narrow(D::Minus2, offset, len)).transpose()?;
+        outs.push(grouped_sdpa_slice(&q, k, &v, mask.as_ref(), scale, n_rep)?);
+        offset += len;
+    }
+    Tensor::cat(&outs, 1)
+}
+
+/// [`grouped_sdpa`] over one slice of queries.
+fn grouped_sdpa_slice(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
@@ -944,6 +992,17 @@ impl DecoderLayer {
 mod tests {
     use super::*;
 
+    /// Qwen3.8-Flash-Next has 24 query heads: full 512-query slices up to
+    /// ~2.7k cells, then shrinking so scores stay within the budget.
+    #[test]
+    fn attention_slices_shrink_with_context() {
+        assert_eq!(attn_query_slice(24, 1), ATTN_QUERY_CHUNK);
+        assert_eq!(attn_query_slice(24, 2048), ATTN_QUERY_CHUNK);
+        assert_eq!(attn_query_slice(24, 32_768), 42);
+        assert!(24 * attn_query_slice(24, 32_768) * 32_768 * 4 <= ATTN_SCORE_BUDGET);
+        assert_eq!(attn_query_slice(24, 1 << 20), 16);
+    }
+
     /// The grouped GQA attention equals the expanded one, for decode and
     /// prefill shapes, with and without a causal mask, on every device this
     /// build has.
@@ -955,12 +1014,16 @@ mod tests {
         if candle_core::utils::sycl_is_available() {
             devices.push(Device::new_sycl(0)?);
         }
-        // Qwen3.8-27B (24 q / 4 KV) and Qwen3.8-Flash-Next (24 / 2) layouts.
+        // Qwen3.8-27B (24 q / 4 KV) and Qwen3.8-Flash-Next (24 / 2) layouts,
+        // then Ornith-1.5-35B (16 / 2) with queries in more than one slice:
+        // 512-query slices, and budget-shrunk ones (419 at 5000 cells).
         for (heads, kv_heads, seq, cells) in [
             (24, 4, 1, 300),
             (24, 2, 1, 77),
             (24, 4, 37, 300),
             (24, 2, 64, 64),
+            (16, 2, 700, 900),
+            (16, 2, 600, 5000),
         ] {
             let n_rep = heads / kv_heads;
             let d = 32;

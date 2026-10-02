@@ -34,7 +34,7 @@ pub(crate) fn write_gguf(tensors: &[(&str, &[usize], u32, Vec<u8>)]) -> Vec<u8> 
     out
 }
 
-/// `n` pseudo-random blocks of `ty` with a sane `f16` scale. The generator
+/// `n` pseudo-random blocks of `ty` with sane `f16` scales. The generator
 /// is fixed: golden values (e.g. `iquant::tests::low_bit_decoders_match_ggml`)
 /// were computed from its exact output.
 pub(crate) fn random_blocks(ty: IQuantType, n: usize, seed: u32) -> Vec<u8> {
@@ -42,13 +42,27 @@ pub(crate) fn random_blocks(ty: IQuantType, n: usize, seed: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * ty.block_bytes());
     for i in 0..n {
         #[allow(clippy::cast_precision_loss)]
-        out.extend(f16::from_f32(0.002 + 0.0001 * (i % 7) as f32).to_le_bytes());
+        let scale = f16::from_f32(0.002 + 0.0001 * (i % 7) as f32).to_le_bytes();
+        let start = out.len();
+        out.extend(scale);
         for _ in 2..ty.block_bytes() {
             state ^= state << 13;
             state ^= state >> 17;
             state ^= state << 5;
             #[allow(clippy::cast_possible_truncation)]
             out.push(state as u8);
+        }
+        // Other `f16` fields would be random bits, possibly NaN.
+        let block = &mut out[start..];
+        match ty {
+            IQuantType::Q4K | IQuantType::Q5K => {
+                block[2..4].copy_from_slice(&f16::from_f32(0.001).to_le_bytes());
+            },
+            IQuantType::Q6K => {
+                let end = block.len();
+                block[end - 2..].copy_from_slice(&scale);
+            },
+            _ => {},
         }
     }
     out

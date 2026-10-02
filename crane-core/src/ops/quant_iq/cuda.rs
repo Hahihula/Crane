@@ -310,6 +310,10 @@ fn type_tag(ty: IQuantType) -> &'static str {
         IQuantType::Iq3Xxs => "iq3_xxs",
         IQuantType::Iq3S => "iq3_s",
         IQuantType::Q2_0 => "q2_0",
+        // `IQuantType::has_native_kernel` keeps k-quants off this backend.
+        IQuantType::Q4K | IQuantType::Q5K | IQuantType::Q6K => {
+            unreachable!("no CUDA kernel for {}", ty.name())
+        },
     }
 }
 

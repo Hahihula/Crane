@@ -111,6 +111,15 @@ MODELS = {
         "default_quant": "UD-Q4_K_M",
         "description": "Qwen 3.8 27B, same arch as Qwen 3.5 scaled up, GGUF quant (Apache-2.0)",
     },
+    "ornith-1.5-35b-a3b-gguf": {
+        "repo_id": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+        "dirname": "Ornith-1.5-35B-A3B-GGUF",
+        "kind": "llm",
+        # Q4_K_M (21.7 GB) fits a 24-32 GB GPU; on Intel SYCL its Q4_K/Q6_K
+        # experts stay packed and run by expert id.
+        "quant_template": "Ornith-1.5-35B-{quant}.gguf",
+        "description": "Ornith 1.5 35B-A3B, Qwen 3.5 hybrid GDN + attention MoE (256 experts, 3B active), GGUF quant (MIT)",
+    },
     "ternary-bonsai-2-27b-gguf": {
         "repo_id": "prism-ml/Ternary-Bonsai-2-27B-gguf",
         "dirname": "Ternary-Bonsai-2-27B-gguf",

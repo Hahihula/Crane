@@ -7,9 +7,11 @@
 //!
 //! Feeding the prompt through the existing caches in fixed-size chunks makes
 //! the peak linear in context length: attention for one chunk costs
-//! `chunk × total`, and the GDN layers carry their constant-size recurrent and
-//! conv state across the boundary. Chunking engages only above the chunk size,
-//! so short prompts and decode steps take exactly the path they took before.
+//! `chunk × total` (and walks the chunk's queries in bounded slices, see
+//! `modeling::grouped_sdpa`), and the GDN layers carry their constant-size
+//! recurrent and conv state across the boundary. Chunking engages only above
+//! the chunk size, so short prompts and decode steps take exactly the path
+//! they took before.
 //!
 //! The chunk size is [`DEFAULT_CHUNK`] tokens, overridable with
 //! `CRANE_PREFILL_CHUNK`; `0` disables chunking.
@@ -19,8 +21,12 @@ use candle_core::{DType, Device, Tensor};
 
 use super::model::Qwen3_5TextModel;
 
-/// Prefill chunk size in tokens when nothing else selects one.
-pub const DEFAULT_CHUNK: usize = 512;
+/// Prefill chunk size in tokens when nothing else selects one; the same size
+/// crane-serve prefills in. Every pass dequantizes (or, for packed `MoE`
+/// experts, decodes) the whole weight set, so larger chunks amortize that:
+/// Ornith-1.5-35B-A3B on an Arc Pro B70 prefills 8.7k tokens 1.7x faster in
+/// 2048-token chunks than in 512-token ones.
+pub const DEFAULT_CHUNK: usize = 2048;
 
 /// Set by [`set_default_chunk`]; `0` means "not set".
 static DEFAULT_CHUNK_OVERRIDE: std::sync::atomic::AtomicUsize =

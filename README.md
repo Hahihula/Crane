@@ -610,12 +610,14 @@ hold the whole window locally on a 24 GB GPU.
 **Chunked prefill:** a single forward pass over the whole prompt makes the
 full-attention layers materialize a `[batch, heads, S, S]` score matrix, so
 peak VRAM grows with S². Prompts longer than `CRANE_PREFILL_CHUNK` (default
-512 tokens) are instead fed through the existing K/V and GDN caches one chunk
-at a time, which makes the peak linear in context length; shorter prompts and
-decode steps take exactly the single-pass path. Measured on an RX 7800 XT
-(16 GB) with `Qwen3.5-2B-Q8_0`, peak VRAM and prefill throughput:
+2048 tokens, the size crane-serve prefills in) are instead fed through the
+existing K/V and GDN caches one chunk at a time, and attention walks each
+chunk's queries in slices with a bounded score matrix, which makes the peak
+linear in context length; shorter prompts and decode steps take exactly the
+single-pass path. Measured on an RX 7800 XT (16 GB) with `Qwen3.5-2B-Q8_0`,
+peak VRAM and prefill throughput:
 
-| Prompt   | Single pass (`CRANE_PREFILL_CHUNK=0`) | Chunked (512)      |
+| Prompt   | Single pass (`CRANE_PREFILL_CHUNK=0`) | Chunked (`CRANE_PREFILL_CHUNK=512`) |
 |---------:|---------------------------------------|--------------------|
 | 4 165    | 8.02 GiB · 2249 t/s                   | 6.95 GiB · 2257 t/s |
 | 8 253    | 11.51 GiB · 2177 t/s                  | 8.91 GiB · 2212 t/s |
@@ -853,7 +855,7 @@ above for context):
 | `CRANE_KV_QUANT` | unset | K/V cache representation: `int8` (≈2× smaller) or `int4` (≈4× smaller); unset = fp |
 | `CRANE_FULL_RECOMPUTE` | unset | Force the O(n²) reset-and-reprocess decode path (debugging cross-check) |
 | `CRANE_GDN_VTILE` | unset | V-column tile size for the fused CUDA/ROCm GDN kernel (advanced tuning) |
-| `CRANE_PREFILL_CHUNK` | `512` | Prefill chunk size in tokens. Prompts longer than this are fed through the KV/GDN caches in chunks, so peak VRAM grows linearly with context instead of quadratically. `0` disables chunking (single-pass prefill) |
+| `CRANE_PREFILL_CHUNK` | `2048` | Prefill chunk size in tokens. Prompts longer than this are fed through the KV/GDN caches in chunks, so peak VRAM grows linearly with context instead of quadratically. `0` disables chunking (single-pass prefill) |
 | `CRANE_PROF` | unset | Profile the forward pass: submission time vs. wall time after a device sync, with a per-stage breakdown. Separates dispatch-bound from GPU-bound. Prints to stderr |
 | `CRANE_PROF_EVERY` | `64` | Passes per `CRANE_PROF` summary line |
 | `CRANE_PROF_SYNC` | unset | With `CRANE_PROF`, sync around every stage so stage times are GPU time, not submission time (kills overlap — use to attribute, not to measure) |

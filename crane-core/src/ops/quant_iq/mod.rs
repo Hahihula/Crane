@@ -36,7 +36,10 @@ const GEMM_ROW_BUDGET: usize = 8192;
 /// accumulates is `pairs x output_rows`; a final gather puts them back in
 /// pair order.
 ///
-/// Costs one host sync for `ids` (`U32`, flattened).
+/// Costs one host sync for `ids` (`U32`, flattened). Every batch is planned
+/// on the host from that one read and all index arrays go to the device in a
+/// single upload before any batch is queued: an upload waits for the queue
+/// to drain, so uploading per batch would stall the device once per batch.
 #[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
 pub(crate) fn indexed_via_gemm(
     input: &candle_core::Tensor,
@@ -61,19 +64,17 @@ pub(crate) fn indexed_via_gemm(
     let mut experts: Vec<(u32, Vec<usize>)> = by_expert.into_iter().collect();
     experts.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
 
-    // Activations in f16 with one extra zero row that padding slots gather.
     let x_rows = input.dim(0)?;
-    let x = Tensor::cat(
-        &[
-            &input.to_dtype(DType::F16)?,
-            &Tensor::zeros((1, cols), DType::F16, device)?,
-        ],
-        0,
-    )?;
-    let zero_row = u32::try_from(x_rows).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-
     let to_u32 = |n: usize| u32::try_from(n).map_err(|e| candle_core::Error::Msg(e.to_string()));
-    let mut outputs = Vec::new();
+    // Activation row that padding slots gather: an extra zero row.
+    let zero_row = to_u32(x_rows)?;
+
+    // Plan every batch, appending its index arrays to one host buffer:
+    // expert ids, padded gather rows, and the real rows of its output.
+    let mut index = Vec::with_capacity(experts.len() + 3 * pairs);
+    // (expert ids, gather rows, real rows) offsets into `index`, plus the
+    // batch size and its padded pair count.
+    let mut batches = Vec::new();
     // Where each pair's result lands in the concatenated batch outputs.
     let mut position = vec![0u32; pairs];
     let mut offset = 0usize;
@@ -87,32 +88,59 @@ pub(crate) fn indexed_via_gemm(
         let batch = &experts[next..next + take];
         next += take;
 
-        let ids: Vec<u32> = batch.iter().map(|(e, _)| *e).collect();
-        let mut gather = vec![zero_row; batch.len() * max_n];
-        // Rows of the padded output that hold real pairs, in output order.
-        let mut real_rows = Vec::new();
+        let ids_at = index.len();
+        index.extend(batch.iter().map(|(e, _)| *e));
+        let gather_at = index.len();
+        index.resize(gather_at + take * max_n, zero_row);
+        let real_at = index.len();
         for (b, (_, members)) in batch.iter().enumerate() {
             for (i, &p) in members.iter().enumerate() {
-                gather[b * max_n + i] = to_u32(p / x_div)?;
-                position[p] = to_u32(offset + real_rows.len())?;
-                real_rows.push(to_u32(b * max_n + i)?);
+                index[gather_at + b * max_n + i] = to_u32(p / x_div)?;
+                position[p] = to_u32(offset + index.len() - real_at)?;
+                index.push(to_u32(b * max_n + i)?);
             }
         }
-        let weights = dequantize_experts(&Tensor::from_vec(ids, batch.len(), device)?)?;
+        offset += index.len() - real_at;
+        batches.push((
+            ids_at,
+            gather_at,
+            real_at,
+            take,
+            max_n,
+            index.len() - real_at,
+        ));
+    }
+    let position_at = index.len();
+    index.extend(position);
+    let index_len = index.len();
+    let index = Tensor::from_vec(index, index_len, device)?;
+
+    // Activations in f16 with the zero row appended.
+    let x = Tensor::cat(
+        &[
+            &input.to_dtype(DType::F16)?,
+            &Tensor::zeros((1, cols), DType::F16, device)?,
+        ],
+        0,
+    )?;
+    let mut outputs = Vec::with_capacity(batches.len());
+    for (ids_at, gather_at, real_at, take, max_n, n_real) in batches {
+        let weights = dequantize_experts(&index.narrow(0, ids_at, take)?)?;
         let xb = x
-            .index_select(&Tensor::from_vec(gather, batch.len() * max_n, device)?, 0)?
-            .reshape((batch.len(), max_n, cols))?;
+            .index_select(&index.narrow(0, gather_at, take * max_n)?, 0)?
+            .reshape((take, max_n, cols))?;
         let y = xb
             .matmul(&weights.transpose(1, 2)?)? // [batch, max_n, rows]
-            .reshape((batch.len() * max_n, output_rows))?;
-        let n_real = real_rows.len();
-        outputs.push(y.index_select(&Tensor::from_vec(real_rows, n_real, device)?, 0)?);
-        offset += n_real;
-        // Batches differ in size, so their freed temporaries would otherwise
-        // pile up in the SYCL backend's caches (a no-op elsewhere).
-        crate::device::release_cached_memory(device);
+            .reshape((take * max_n, output_rows))?;
+        outputs.push(y.index_select(&index.narrow(0, real_at, n_real)?, 0)?);
     }
     let all = Tensor::cat(&outputs, 0)?;
-    all.index_select(&Tensor::from_vec(position, pairs, device)?, 0)?
-        .to_dtype(out_dtype)
+    drop(outputs);
+    let out = all
+        .index_select(&index.narrow(0, position_at, pairs)?, 0)?
+        .to_dtype(out_dtype)?;
+    // Batches differ in size, so their freed temporaries would otherwise pile
+    // up in the SYCL backend's caches (a no-op elsewhere).
+    crate::device::release_cached_memory(device);
+    Ok(out)
 }
