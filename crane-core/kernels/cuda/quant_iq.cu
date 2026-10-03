@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
 // llama.cpp i-quant weight kernels for CUDA: IQ4_NL, IQ4_XS, IQ2_S, IQ3_XXS,
-// IQ3_S and Q2_0 -- the counterpart of `kernels/metal/quant_iq.metal` and
+// IQ3_S and Q2_0, plus the k-quants Q4_K, Q5_K and Q6_K for packed MoE experts
+// -- the counterpart of `kernels/metal/quant_iq.metal` and
 // `kernels/sycl/quant_iq.cpp` (block layouts: `crane-core/src/quantized/
 // iquant.rs`). The codebooks come from `kernels/sycl/iq_grids.h`, so every
 // backend reads one copy of the tables.
@@ -37,7 +38,10 @@ using namespace crane_iq;
 #define QK_K 256
 #define ROWS_PER_BLOCK 4  // output rows (warps) per thread block
 
-enum { IQ4_NL = 0, IQ4_XS = 1, IQ2_S = 2, IQ3_XXS = 3, IQ3_S = 4, Q2_0 = 5 };
+enum {
+    IQ4_NL = 0, IQ4_XS = 1, IQ2_S = 2, IQ3_XXS = 3, IQ3_S = 4, Q2_0 = 5,
+    Q4_K = 6, Q5_K = 7, Q6_K = 8,
+};
 
 template <int TY> __device__ __forceinline__ int block_values() {
     return TY == IQ4_NL ? 32 : TY == Q2_0 ? 64 : QK_K;
@@ -49,6 +53,9 @@ template <int TY> __device__ __forceinline__ int block_bytes() {
     case IQ2_S: return 2 + QK_K / 4 + QK_K / 16;
     case IQ3_XXS: return 2 + 3 * QK_K / 8;
     case IQ3_S: return 2 + 13 * QK_K / 32 + QK_K / 64;
+    case Q4_K: return 2 + 2 + 12 + QK_K / 2;
+    case Q5_K: return 2 + 2 + 12 + QK_K / 8 + QK_K / 2;
+    case Q6_K: return QK_K / 2 + QK_K / 4 + QK_K / 16 + 2;
     default: return 2 + 64 / 4;  // Q2_0
     }
 }
@@ -97,7 +104,8 @@ template <int TY> __device__ __forceinline__ void decode32(const uint8_t * row, 
     } else {
         const uint8_t * blk = row + size_t(c / 8) * block_bytes<TY>();
         const int ib = c % 8;
-        const float d = load_half(blk);
+        // Q6_K keeps its scale after the values.
+        const float d = load_half(blk + (TY == Q6_K ? block_bytes<TY>() - 2 : 0));
         if (TY == IQ4_XS) {
             const int scales_h = int(blk[2]) | (int(blk[3]) << 8);
             const int lo = (blk[4 + ib / 2] >> (4 * (ib % 2))) & 0xf;
@@ -144,6 +152,46 @@ template <int TY> __device__ __forceinline__ void decode32(const uint8_t * row, 
                     w[8 * l + 4 + j] = signed_val(db * grid_byte(g2, j), s, j + 4);
                 }
             }
+        } else if (TY == Q4_K || TY == Q5_K) {
+            // ggml `get_scale_min_k4`: eight 6-bit scale/min pairs in 12 bytes.
+            const uint8_t * sc = blk + 4;
+            int s, m;
+            if (ib < 4) {
+                s = sc[ib] & 63;
+                m = sc[ib + 4] & 63;
+            } else {
+                s = (sc[ib + 4] & 0xf) | ((sc[ib - 4] >> 6) << 4);
+                m = (sc[ib + 4] >> 4) | ((sc[ib] >> 6) << 4);
+            }
+            const float dl = d * float(s);
+            const float ml = load_half(blk + 2) * float(m);
+            // Sub-blocks 2k and 2k+1 share 32 bytes: low nibbles, then high.
+            const uint8_t * q = blk + (TY == Q5_K ? 16 + QK_K / 8 : 16) + 32 * (ib / 2);
+            const int shift = 4 * (ib % 2);
+#pragma unroll
+            for (int j = 0; j < 32; ++j) {
+                int v = (q[j] >> shift) & 0xf;
+                if (TY == Q5_K) {
+                    v |= ((blk[16 + j] >> ib) & 1) << 4;
+                }
+                // Not contracted into an FMA, to stay bit-identical to the CPU.
+                w[j] = __fsub_rn(__fmul_rn(dl, float(v)), ml);
+            }
+        } else if (TY == Q6_K) {
+            // Each half of the block covers 128 values in four groups of 32:
+            // group k takes the low (k < 2) or high nibbles of 32 `ql` bytes
+            // and bits 2k..2k+1 of 32 `qh` bytes, one i8 scale per 16 values.
+            const int half_idx = ib / 4;
+            const int k = ib % 4;
+            const uint8_t * ql = blk + 64 * half_idx + 32 * (k & 1);
+            const uint8_t * qh = blk + QK_K / 2 + 32 * half_idx;
+            const int8_t * sc =
+                reinterpret_cast<const int8_t *>(blk + QK_K / 2 + QK_K / 4) + 8 * half_idx + 2 * k;
+#pragma unroll
+            for (int j = 0; j < 32; ++j) {
+                const int v = ((ql[j] >> (4 * (k >> 1))) & 0xf) | (((qh[j] >> (2 * k)) & 3) << 4);
+                w[j] = d * float(sc[j / 16]) * float(v - 32);
+            }
         } else {  // IQ3_S
             const uint8_t * qs = blk + 2 + 8 * ib;
             const int qh = blk[2 + QK_K / 4 + ib];
@@ -175,16 +223,17 @@ __device__ __forceinline__ void store_out(nv_bfloat16 * p, float v) { *p = __flo
 
 // `output[p, r] = dot(W_e[r], input[p / x_div])` for `p < pairs`, where `W_e`
 // is expert `e = ids[p]` of `packed`, or the only matrix without ids
-// (`has_ids == 0`). Grid (ceil(out_rows / ROWS_PER_BLOCK), pairs),
-// ROWS_PER_BLOCK * 32 threads.
+// (`has_ids == 0`). Grid (pairs, ceil(out_rows / ROWS_PER_BLOCK)),
+// ROWS_PER_BLOCK * 32 threads: pairs go on x, the only grid dimension that
+// may pass 65535.
 template <int TY, typename T>
 __device__ __forceinline__ void iq_matvec_impl(
     const uint8_t * packed, const uint32_t * ids, const float * input, T * output,
     uint64_t expert_stride, int x_div, int out_rows, int cols, int has_ids) {
-    const int pair = blockIdx.y;
+    const int pair = blockIdx.x;
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int row = blockIdx.x * ROWS_PER_BLOCK + warp;
+    const int row = blockIdx.y * ROWS_PER_BLOCK + warp;
     // Uniform across the warp, so the full-mask reduction below stays legal.
     if (row >= out_rows) {
         return;
@@ -214,14 +263,15 @@ __device__ __forceinline__ void iq_matvec_impl(
 
 // Decodes `n_mats` matrices of `n_rows` x `cols` into `[n_mats, n_rows,
 // cols]`: matrix `m` is expert `ids[m]` of `packed`, or the only one without
-// ids. One thread per 32-value chunk; grid (ceil(cols / 32 / 256), n_mats *
-// n_rows), 256 threads.
+// ids. One thread per 32-value chunk; grid (n_mats * n_rows, ceil(cols / 32 /
+// 256)), 256 threads: rows go on x, the only grid dimension that may pass
+// 65535 (32 experts of 2048 rows already do).
 template <int TY, typename T>
 __device__ __forceinline__ void iq_dequant_impl(
     const uint8_t * packed, const uint32_t * ids, T * output, uint64_t expert_stride,
     int n_mats, int n_rows, int cols, int has_ids) {
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t mat_row = blockIdx.y;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    const size_t mat_row = blockIdx.x;
     if (c >= cols / 32 || mat_row >= size_t(n_mats) * size_t(n_rows)) {
         return;
     }
@@ -257,7 +307,10 @@ __device__ __forceinline__ void iq_dequant_impl(
     IQ_KERNELS(IQ2_S, iq2_s, T, TNAME)       \
     IQ_KERNELS(IQ3_XXS, iq3_xxs, T, TNAME)   \
     IQ_KERNELS(IQ3_S, iq3_s, T, TNAME)       \
-    IQ_KERNELS(Q2_0, q2_0, T, TNAME)
+    IQ_KERNELS(Q2_0, q2_0, T, TNAME)         \
+    IQ_KERNELS(Q4_K, q4_k, T, TNAME)         \
+    IQ_KERNELS(Q5_K, q5_k, T, TNAME)         \
+    IQ_KERNELS(Q6_K, q6_k, T, TNAME)
 
 IQ_ALL_TYPES(float, f32)
 IQ_ALL_TYPES(half, f16)

@@ -265,11 +265,107 @@ impl<R: Read + Seek> Gguf<R> {
         Ok(crate::ops::linear::LinearLayer::quantized(qmm))
     }
 
+    /// The 2-D tensors `names`, which all read the same input, as one
+    /// linear layer whose output rows are theirs in order; `None` (nothing
+    /// read) unless they share a block-quantized type Candle parses and an
+    /// input width. Callers split the output with `narrow`.
+    ///
+    /// Each projection otherwise costs its own matvec plus, on CUDA, its own
+    /// activation quantization; decode is launch-bound, so projections of the
+    /// same input are worth running together. A row-major quantized matrix is
+    /// its rows' blocks back to back, so stacking rows is concatenating bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the tensors or building the layer fails.
+    pub fn linear_fused(
+        &mut self,
+        names: &[&str],
+    ) -> Result<Option<crate::ops::linear::LinearLayer>> {
+        let mut parts = Vec::with_capacity(names.len());
+        for &name in names {
+            let ternary = self
+                .ternary
+                .as_ref()
+                .is_some_and(|ctx| ctx.tensors.tensors.contains_key(name));
+            if ternary || self.iquant.contains_key(name) {
+                return Ok(None);
+            }
+            let Some(info) = self.ct.tensor_infos.get(name) else {
+                return Ok(None);
+            };
+            if info.shape.rank() != 2 {
+                return Ok(None);
+            }
+            let (rows, cols) = info.shape.dims2()?;
+            parts.push((info.ggml_dtype, rows, cols, info.offset));
+        }
+        let Some(&(dtype, _, cols, _)) = parts.first() else {
+            return Ok(None);
+        };
+        let float = matches!(dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16);
+        if float
+            || parts
+                .iter()
+                .any(|&(d, _, c, _)| d != dtype || c != cols || c % dtype.block_size() != 0)
+        {
+            return Ok(None);
+        }
+        let rows: usize = parts.iter().map(|p| p.1).sum();
+        let mut bytes = Vec::with_capacity(rows * cols / dtype.block_size() * dtype.type_size());
+        for (&name, &(_, part_rows, _, offset)) in names.iter().zip(&parts) {
+            let len = part_rows * cols / dtype.block_size() * dtype.type_size();
+            bytes.extend(self.read_tensor_data(name, offset, len)?);
+        }
+        let device = self.device.clone();
+        // As in `linear_on`: k-quants take Crane's packed kernels on SYCL.
+        if cfg!(feature = "sycl")
+            && device.is_sycl()
+            && let Some(ty) = IQuantType::from_k_quant(dtype)
+        {
+            let layer = super::iquant::IQuantLinear::new(ty, bytes, rows, cols, &device)?;
+            return Ok(Some(crate::ops::linear::LinearLayer::IQuant(layer)));
+        }
+        let storage = candle_core::quantized::QStorage::from_data(
+            std::borrow::Cow::Owned(bytes),
+            &device,
+            dtype,
+        )?;
+        let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(QTensor::new(
+            storage,
+            (rows, cols),
+        )?))?;
+        Ok(Some(crate::ops::linear::LinearLayer::quantized(qmm)))
+    }
+
     /// Whether [`Self::iquant_experts`] would keep `name` packed on `device`.
     /// Cheap: reads only the header.
     #[must_use]
     pub fn has_native_iquant_experts(&self, name: &str, device: &Device) -> bool {
         self.packed_experts_type(name, device).is_some()
+    }
+
+    /// Shape of tensor `name` as its header records it (i-quants included).
+    /// Cheap: reads only the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `name` is not in the file.
+    pub fn tensor_shape(&self, name: &str) -> Result<candle_core::Shape> {
+        if let Some(info) = self.iquant.get(name) {
+            return Ok(candle_core::Shape::from(info.shape.clone()));
+        }
+        self.ct
+            .tensor_infos
+            .get(name)
+            .map(|info| info.shape.clone())
+            .ok_or_else(|| candle_core::Error::Msg(format!("GGUF tensor {name} not found")))
+    }
+
+    /// Whether `name` is an i-quant tensor (a type Candle cannot parse).
+    #[must_use]
+    pub fn is_iquant_tensor(&self, name: &str) -> bool {
+        self.iquant.get(name).is_some()
     }
 
     /// The encoding a packed `[experts, rows, cols]` tensor keeps on
@@ -753,6 +849,49 @@ mod iquant_gguf_tests {
             }
         }
         out
+    }
+
+    /// [`Gguf::linear_fused`] stacks same-type projections into one layer
+    /// whose output is theirs side by side, and declines mixed or float ones.
+    #[test]
+    fn linear_fused_matches_separate_layers() -> candle_core::Result<()> {
+        use crate::quantized::test_util::random_blocks;
+
+        let cols = 512;
+        let q4k = |rows: usize, seed| random_blocks(IQuantType::Q4K, rows * cols / 256, seed);
+        let q6k = random_blocks(IQuantType::Q6K, 8 * cols / 256, 9);
+        let dense: Vec<u8> = (0..4 * cols)
+            .flat_map(|i| (i as f32).to_le_bytes())
+            .collect();
+        let bytes = write_gguf(&[
+            ("a", &[16, cols], 12, q4k(16, 3)),
+            ("b", &[8, cols], 12, q4k(8, 5)),
+            ("c", &[8, cols], 14, q6k),
+            ("d", &[4, cols], 0, dense),
+        ]);
+        let ct = read_content_lenient(&bytes)?;
+        let mut gg = Gguf::new(
+            ct,
+            std::io::Cursor::new(&bytes[..]),
+            Device::Cpu,
+            DType::F32,
+        );
+
+        let fused = gg.linear_fused(&["a", "b"])?.expect("same-type pair fuses");
+        let xs = Tensor::randn(0f32, 1.0, (3, cols), &Device::Cpu)?;
+        let want = Tensor::cat(
+            &[gg.linear("a")?.forward(&xs)?, gg.linear("b")?.forward(&xs)?],
+            1,
+        )?;
+        let got = fused.forward(&xs)?;
+        assert_eq!(got.dims(), &[3, 24]);
+        let diff = (got - want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0);
+
+        assert!(gg.linear_fused(&["a", "c"])?.is_none(), "mixed quant types");
+        assert!(gg.linear_fused(&["d", "d"])?.is_none(), "float tensors");
+        assert!(gg.linear_fused(&["a", "missing"])?.is_none());
+        Ok(())
     }
 
     #[test]

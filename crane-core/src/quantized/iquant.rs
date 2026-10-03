@@ -12,7 +12,9 @@
 //! layers ([`IQuantLinear`]) and packed `MoE` experts ([`IQuantExperts`])
 //! keep the packed encoding. The k-quants `Q4_K` / `Q5_K` / `Q6_K` are listed
 //! too, for packed experts only: Candle runs them as linear layers itself,
-//! but has no by-expert-id kernel for them on SYCL or Metal. Everything else (other devices and types,
+//! but has no by-expert-id kernel for them on SYCL or Metal. (On CUDA it has
+//! one, which all-k-quant experts keep; the kernels here take over when a
+//! projection is an i-quant.) Everything else (other devices and types,
 //! embeddings) is dequantized on the CPU and re-quantized
 //! at load time to a Candle-native type (see [`requant_target`]), so every
 //! backend can still run it through its existing `QMatMul` kernels. Reference:
@@ -102,10 +104,6 @@ impl IQuantType {
         }
     }
 
-    fn is_k_quant(self) -> bool {
-        matches!(self, Self::Q4K | Self::Q5K | Self::Q6K)
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Self::Iq4Nl => "IQ4_NL",
@@ -121,13 +119,13 @@ impl IQuantType {
     }
 
     /// Whether this build has a kernel running this type packed on `device`
-    /// (behind [`IQuantLinear`] / [`IQuantExperts`]). SYCL and Metal run every
-    /// type, CUDA every type but the k-quants. Anything else is re-quantized.
+    /// (behind [`IQuantLinear`] / [`IQuantExperts`]). SYCL, Metal and CUDA run
+    /// every type. Anything else is re-quantized.
     #[must_use]
     pub fn has_native_kernel(self, device: &Device) -> bool {
         (cfg!(feature = "sycl") && device.is_sycl())
+            || (cfg!(feature = "cuda") && device.is_cuda())
             || (cfg!(feature = "metal") && device.is_metal())
-            || (!self.is_k_quant() && cfg!(feature = "cuda") && device.is_cuda())
     }
 
     /// Whether this build has a by-expert-id kernel for this type on
@@ -1299,6 +1297,9 @@ mod tests {
             (IQuantType::Iq3S, 37, 2560),
             (IQuantType::Q2_0, 37, 640),
             (IQuantType::Iq4Nl, 21, 640),
+            (IQuantType::Q4K, 37, 512),
+            (IQuantType::Q5K, 37, 768),
+            (IQuantType::Q6K, 37, 512),
         ] {
             let packed = random_blocks(ty, rows * cols / ty.block_size(), rows as u32 * 31);
             let cpu = IQuantLinear::new(ty, packed.clone(), rows, cols, &Device::Cpu)?;

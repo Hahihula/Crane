@@ -51,6 +51,11 @@ pub struct Qwen3_5TextModel {
     attn_caches: Vec<Option<KvCache>>,
     device: Device,
     dtype: DType,
+    /// Dtype the full-attention layers attend and cache K/V in when it
+    /// differs from `dtype` (see [`FullAttention::set_attention_dtype`]).
+    ///
+    /// [`FullAttention::set_attention_dtype`]: super::FullAttention::set_attention_dtype
+    attn_dtype: Option<DType>,
 }
 
 impl Qwen3_5TextModel {
@@ -171,6 +176,7 @@ impl Qwen3_5TextModel {
             attn_caches,
             device: device.clone(),
             dtype,
+            attn_dtype: None,
         })
     }
 
@@ -212,15 +218,23 @@ impl Qwen3_5TextModel {
         extended: Option<crate::quantized::extended_gguf::ExtendedGgufInfo>,
     ) -> Result<Self> {
         // QMatMul handles quantized weights internally; dequantized side
-        // tensors (norms, conv kernels, embeddings) use a compute dtype of
-        // BF16 on CUDA and F16 on Metal (the F32 embedding alone would cost
-        // ~1 GB at Qwen3.5's 248k vocab), F32 on CPU.
-        let dtype = if device.is_cuda() {
-            DType::BF16
+        // tensors (norms, conv kernels) use the compute dtype, while the
+        // embedding stays quantized whatever it is. F16 on Metal / ROCm /
+        // SYCL, F32 on CPU.
+        //
+        // On CUDA decode activations are F32: candle's quantized matvec only
+        // takes F32, so BF16 activations cost a cast into and out of every
+        // linear layer (~700 of a token's ~3000 launches on Ornith-1.5-35B,
+        // where decode is launch-bound: 53.4 -> 59.6 tok/s on an RTX 3090).
+        // The K/V cache, attention and multi-token (prefill) activations stay
+        // BF16 (`attn_dtype`): in F32 they cost enough memory that a 24 GB
+        // card ran out at 18k tokens of context where BF16 reaches ~27k.
+        let (dtype, attn_dtype) = if device.is_cuda() {
+            (DType::F32, Some(DType::BF16))
         } else if device.is_metal() || device.is_rocm() || device.is_sycl() {
-            DType::F16
+            (DType::F16, None)
         } else {
-            DType::F32
+            (DType::F32, None)
         };
         let mut gg = match extended {
             Some(info) => Gguf::new_extended(ct, reader, device.clone(), dtype, info)?,
@@ -344,9 +358,9 @@ impl Qwen3_5TextModel {
 
         let mut layers = Vec::with_capacity(num_hidden_layers);
         for (idx, &layer_type) in layer_types.iter().enumerate() {
-            layers.push(DecoderLayer::from_gguf(
-                &text_cfg, layer_type, &mut gg, idx, device,
-            )?);
+            let mut layer = DecoderLayer::from_gguf(&text_cfg, layer_type, &mut gg, idx, device)?;
+            layer.set_attention_dtype(attn_dtype);
+            layers.push(layer);
         }
 
         let norm =
@@ -383,6 +397,7 @@ impl Qwen3_5TextModel {
             attn_caches,
             device: device.clone(),
             dtype,
+            attn_dtype,
         })
     }
 
@@ -415,6 +430,12 @@ impl Qwen3_5TextModel {
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// Dtype attention runs in, and so the dtype of the causal mask.
+    #[must_use]
+    pub fn attention_dtype(&self) -> DType {
+        self.attn_dtype.unwrap_or(self.dtype)
     }
 
     /// Capture the layer state so a later request replaying this token prefix
@@ -574,7 +595,7 @@ impl Qwen3_5TextModel {
                 seq_len,
                 start_pos,
                 hidden_states.device(),
-                hidden_states.dtype(),
+                self.attention_dtype(),
             )?),
             None => None,
         };
@@ -600,6 +621,11 @@ impl Qwen3_5TextModel {
         rope: RopeSlice<'_>,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
+        // Multi-token passes are bound by memory and GEMMs, not launches, so
+        // they keep the half-precision activations (see `attn_dtype`).
+        if xs.dim(1)? > 1 && xs.dtype() != self.attention_dtype() {
+            xs = xs.to_dtype(self.attention_dtype())?;
+        }
         let debug = std::env::var_os("CRANE_QWEN35_DEBUG_LAYERS").is_some();
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];

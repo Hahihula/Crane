@@ -2,7 +2,7 @@
 
 //! Launchers for `kernels/cuda/quant_iq4.cu` (IQ4_XS `dp4a` decode, IQ4 dequant)
 //! and `kernels/cuda/quant_iq.cu` (every other type, plus the by-expert-id
-//! matvec packed `MoE` experts need).
+//! matvec packed `MoE` experts need; the k-quants are only reached by those).
 
 use candle_core::cuda_backend::cudarc::driver::{DeviceRepr, LaunchConfig, PushKernelArg};
 use candle_core::cuda_backend::{CudaDType, WrapErr};
@@ -218,8 +218,7 @@ pub fn dequantize(
     if !matches!(ty, IQuantType::Iq4Nl | IQuantType::Iq4Xs) {
         let row_bytes = cols / ty.block_size() * ty.block_bytes();
         return launch_dequant(
-            packed,
-            row_start * row_bytes,
+            PackedSource::Tensor(packed, row_start * row_bytes),
             ty,
             None,
             1,
@@ -305,10 +304,9 @@ fn type_tag(ty: IQuantType) -> &'static str {
         IQuantType::Iq3Xxs => "iq3_xxs",
         IQuantType::Iq3S => "iq3_s",
         IQuantType::Q2_0 => "q2_0",
-        // `IQuantType::has_native_kernel` keeps k-quants off this backend.
-        IQuantType::Q4K | IQuantType::Q5K | IQuantType::Q6K => {
-            unreachable!("no CUDA kernel for {}", ty.name())
-        },
+        IQuantType::Q4K => "q4_k",
+        IQuantType::Q5K => "q5_k",
+        IQuantType::Q6K => "q6_k",
     }
 }
 
@@ -480,8 +478,8 @@ fn launch_matvec_as<T: CudaDType + DeviceRepr>(
 
     let config = LaunchConfig {
         grid_dim: (
-            output_rows.div_ceil(ROWS_PER_BLOCK) as u32,
             u32::try_from(pairs).map_err(|_| candle_core::Error::Msg("too many pairs".into()))?,
+            output_rows.div_ceil(ROWS_PER_BLOCK) as u32,
             1,
         ),
         block_dim: (32 * ROWS_PER_BLOCK as u32, 1, 1),
@@ -510,12 +508,20 @@ fn launch_matvec_as<T: CudaDType + DeviceRepr>(
     ))
 }
 
+/// Where [`launch_dequant`] reads the packed blocks.
+#[derive(Clone, Copy)]
+enum PackedSource<'a> {
+    /// A `u8` tensor, from this byte offset.
+    Tensor(&'a Tensor, usize),
+    /// A raw device allocation on this device, e.g. a `QTensor`'s.
+    Raw(&'a CudaDevice, u64),
+}
+
 /// Expand weight rows `row_start..row_start + n_rows` -- see [`dequantize`];
 /// this is the type-generic kernel behind it, optionally over experts.
 #[allow(clippy::too_many_arguments)]
 fn launch_dequant(
-    packed: &Tensor,
-    byte_offset: usize,
+    packed: PackedSource<'_>,
     ty: IQuantType,
     ids: Option<&Tensor>,
     n_mats: usize,
@@ -524,37 +530,18 @@ fn launch_dequant(
     dtype: DType,
 ) -> Result<Tensor> {
     match dtype {
-        DType::F32 => {
-            launch_dequant_as::<f32>(packed, byte_offset, ty, ids, n_mats, n_rows, cols, dtype)
+        DType::F32 => launch_dequant_as::<f32>(packed, ty, ids, n_mats, n_rows, cols, dtype),
+        DType::F16 => launch_dequant_as::<half::f16>(packed, ty, ids, n_mats, n_rows, cols, dtype),
+        DType::BF16 => {
+            launch_dequant_as::<half::bf16>(packed, ty, ids, n_mats, n_rows, cols, dtype)
         },
-        DType::F16 => launch_dequant_as::<half::f16>(
-            packed,
-            byte_offset,
-            ty,
-            ids,
-            n_mats,
-            n_rows,
-            cols,
-            dtype,
-        ),
-        DType::BF16 => launch_dequant_as::<half::bf16>(
-            packed,
-            byte_offset,
-            ty,
-            ids,
-            n_mats,
-            n_rows,
-            cols,
-            dtype,
-        ),
         other => bail!("i-quant dequantize: unsupported output dtype {other:?}"),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn launch_dequant_as<T: CudaDType + DeviceRepr>(
-    packed: &Tensor,
-    byte_offset: usize,
+    packed: PackedSource<'_>,
     ty: IQuantType,
     ids: Option<&Tensor>,
     n_mats: usize,
@@ -562,7 +549,10 @@ fn launch_dequant_as<T: CudaDType + DeviceRepr>(
     cols: usize,
     dtype: DType,
 ) -> Result<Tensor> {
-    let dev = packed.device().as_cuda_device()?.clone();
+    let dev = match packed {
+        PackedSource::Tensor(t, _) => t.device().as_cuda_device()?.clone(),
+        PackedSource::Raw(dev, _) => dev.clone(),
+    };
     let name = format!("dequant_{}_{}", type_tag(ty), float_tag(dtype)?);
     let func = dev.get_or_load_custom_func(&name, GENERIC_MODULE, ptx::QUANT_IQ)?;
     let expert_stride = (n_rows * (cols / ty.block_size()) * ty.block_bytes()) as u64;
@@ -571,13 +561,22 @@ fn launch_dequant_as<T: CudaDType + DeviceRepr>(
     let cols_i = to_i32(cols, "dequantize cols")?;
     let has_ids = i32::from(ids.is_some());
 
-    let (packed_storage, packed_offset) = packed_slice(packed)?;
-    let Storage::Cuda(packed_cuda) = &*packed_storage else {
-        unreachable!()
+    let packed_guard = match packed {
+        PackedSource::Tensor(t, byte_offset) => {
+            let (storage, offset) = packed_slice(t)?;
+            Some((storage, offset + byte_offset))
+        },
+        PackedSource::Raw(..) => None,
     };
-    let packed_slice = packed_cuda
-        .as_cuda_slice::<u8>()?
-        .slice(packed_offset + byte_offset..);
+    let packed_view = match &packed_guard {
+        Some((storage, offset)) => {
+            let Storage::Cuda(cuda) = &**storage else {
+                unreachable!()
+            };
+            Some(cuda.as_cuda_slice::<u8>()?.slice(*offset..))
+        },
+        None => None,
+    };
     let ids = ids.map(|t| t.flatten_all()?.contiguous()).transpose()?;
     let ids_guard = ids.as_ref().map(ids_slice).transpose()?;
     let dummy = if ids.is_none() {
@@ -599,9 +598,9 @@ fn launch_dequant_as<T: CudaDType + DeviceRepr>(
     let chunks = cols / 32;
     let config = LaunchConfig {
         grid_dim: (
-            chunks.div_ceil(256) as u32,
             u32::try_from(n_mats * n_rows)
                 .map_err(|_| candle_core::Error::Msg("too many rows".into()))?,
+            chunks.div_ceil(256) as u32,
             1,
         ),
         block_dim: (chunks.min(256) as u32, 1, 1),
@@ -609,7 +608,11 @@ fn launch_dequant_as<T: CudaDType + DeviceRepr>(
     };
     let output_buf = unsafe { dev.alloc::<T>(n_mats * n_rows * cols) }?;
     let mut builder = func.builder();
-    builder.arg(&packed_slice);
+    match (&packed_view, &packed) {
+        (Some(view), _) => builder.arg(view),
+        (None, PackedSource::Raw(_, ptr)) => builder.arg(ptr),
+        (None, PackedSource::Tensor(..)) => unreachable!(),
+    };
     builder.arg(&ids_view);
     builder.arg(&output_buf);
     builder.arg(&expert_stride);
@@ -618,7 +621,8 @@ fn launch_dequant_as<T: CudaDType + DeviceRepr>(
     builder.arg(&cols_i);
     builder.arg(&has_ids);
     unsafe { builder.launch(config) }.w()?;
-    drop(packed_storage);
+    drop(packed_view);
+    drop(packed_guard);
     drop(ids_guard);
     Ok(Tensor::from_storage(
         Storage::Cuda(CudaStorage::wrap_cuda_slice(output_buf, dev)),
@@ -645,5 +649,53 @@ pub fn dequantize_experts(
     dtype: DType,
 ) -> Result<Tensor> {
     let n = ids.elem_count();
-    launch_dequant(packed, 0, ty, Some(ids), n, rows, cols, dtype)?.reshape((n, rows, cols))
+    launch_dequant(
+        PackedSource::Tensor(packed, 0),
+        ty,
+        Some(ids),
+        n,
+        rows,
+        cols,
+        dtype,
+    )?
+    .reshape((n, rows, cols))
+}
+
+/// [`dequantize_experts`] reading the packed `[experts, rows, cols]` blocks
+/// straight out of a `QTensor`'s device buffer (candle stores them
+/// contiguously, padding only at the end), so `MoE` experts held for
+/// `indexed_moe_forward` can take the batched-GEMM path without a second
+/// copy.
+///
+/// # Errors
+///
+/// Returns an error if `packed` is not on `dev`, `dtype` isn't
+/// F32/F16/BF16, or the kernel launch fails.
+pub fn dequantize_qtensor_experts(
+    dev: &CudaDevice,
+    packed: &candle_core::quantized::QTensor,
+    ty: IQuantType,
+    ids: &Tensor,
+    rows: usize,
+    cols: usize,
+    dtype: DType,
+) -> Result<Tensor> {
+    if !packed
+        .device()
+        .same_device(&candle_core::Device::Cuda(dev.clone()))
+    {
+        bail!("packed experts are not on the activations' CUDA device")
+    }
+    let ptr = packed.device_ptr()? as u64;
+    let n = ids.elem_count();
+    launch_dequant(
+        PackedSource::Raw(dev, ptr),
+        ty,
+        Some(ids),
+        n,
+        rows,
+        cols,
+        dtype,
+    )?
+    .reshape((n, rows, cols))
 }

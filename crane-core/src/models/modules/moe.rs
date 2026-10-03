@@ -194,11 +194,45 @@ impl Module for MoeExpert {
 /// Always-on shared expert (Qwen3.5-MoE): a dense `SwiGLU` MLP added to the
 /// routed output, scaled per token by `sigmoid(gate . x)`.
 struct SharedExpert {
-    gate_proj: LinearLayer,
-    up_proj: LinearLayer,
+    gate_up: SharedGateUp,
     down_proj: LinearLayer,
-    /// `[1, hidden]` scalar gate producing one logit per token.
-    gate: LinearLayer,
+    /// `[1, hidden]` scalar gate producing one logit per token; `None` when
+    /// it is folded into the router as its last row (see
+    /// [`SparseMoeBlock::fold_shared_gate_into_router`]).
+    gate: Option<LinearLayer>,
+}
+
+/// A shared expert's gate and up projections, which read the same input.
+enum SharedGateUp {
+    Split {
+        gate_proj: LinearLayer,
+        up_proj: LinearLayer,
+    },
+    /// One `[gate; up]` matrix, when GGUF stores both in the same quant type:
+    /// one matvec instead of two on the launch-bound decode path.
+    Fused {
+        gate_up_proj: LinearLayer,
+        intermediate_size: usize,
+    },
+}
+
+impl SharedGateUp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (gate, up) = match self {
+            Self::Split { gate_proj, up_proj } => (gate_proj.forward(xs)?, up_proj.forward(xs)?),
+            Self::Fused {
+                gate_up_proj,
+                intermediate_size,
+            } => {
+                let gate_up = gate_up_proj.forward(xs)?;
+                (
+                    gate_up.narrow(D::Minus1, 0, *intermediate_size)?,
+                    gate_up.narrow(D::Minus1, *intermediate_size, *intermediate_size)?,
+                )
+            },
+        };
+        crate::ops::fused_ops::swiglu::swiglu(&gate, &up)
+    }
 }
 
 impl SharedExpert {
@@ -213,10 +247,12 @@ impl SharedExpert {
             )))
         };
         Ok(Self {
-            gate_proj: layer("shared_expert.gate_proj.weight")?,
-            up_proj: layer("shared_expert.up_proj.weight")?,
+            gate_up: SharedGateUp::Split {
+                gate_proj: layer("shared_expert.gate_proj.weight")?,
+                up_proj: layer("shared_expert.up_proj.weight")?,
+            },
             down_proj: layer("shared_expert.down_proj.weight")?,
-            gate: layer("shared_expert_gate.weight")?,
+            gate: Some(layer("shared_expert_gate.weight")?),
         })
     }
 
@@ -225,22 +261,40 @@ impl SharedExpert {
         let gate_weight = gg
             .dequant_tensor(&format!("{prefix}.ffn_gate_inp_shexp.weight"))?
             .unsqueeze(0)?;
+        let gate_name = format!("{prefix}.ffn_gate_shexp.weight");
+        let up_name = format!("{prefix}.ffn_up_shexp.weight");
+        let gate_up = match gg.linear_fused(&[&gate_name, &up_name])? {
+            Some(gate_up_proj) => SharedGateUp::Fused {
+                gate_up_proj,
+                intermediate_size: gg.tensor_shape(&gate_name)?.dims2()?.0,
+            },
+            None => SharedGateUp::Split {
+                gate_proj: gg.linear(&gate_name)?,
+                up_proj: gg.linear(&up_name)?,
+            },
+        };
         Ok(Self {
-            gate_proj: gg.linear(&format!("{prefix}.ffn_gate_shexp.weight"))?,
-            up_proj: gg.linear(&format!("{prefix}.ffn_up_shexp.weight"))?,
+            gate_up,
             down_proj: gg.linear(&format!("{prefix}.ffn_down_shexp.weight"))?,
-            gate: LinearLayer::Standard(Linear::new(gate_weight, None)),
+            gate: Some(LinearLayer::Standard(Linear::new(gate_weight, None))),
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let h = crate::ops::fused_ops::swiglu::swiglu(
-            &self.gate_proj.forward(xs)?,
-            &self.up_proj.forward(xs)?,
-        )?;
+    /// `gate_logit` is this block's gate logit per token (`[tokens, 1]`)
+    /// when the router computed it; required exactly when `gate` is `None`.
+    fn forward(&self, xs: &Tensor, gate_logit: Option<Tensor>) -> Result<Tensor> {
+        let h = self.gate_up.forward(xs)?;
         let out = self.down_proj.forward(&h)?;
-        let gate = candle_nn::ops::sigmoid(&self.gate.forward(xs)?)?;
-        out.broadcast_mul(&gate)
+        let logit = match (&self.gate, gate_logit) {
+            (Some(gate), _) => gate.forward(xs)?,
+            (None, Some(logit)) => {
+                let mut dims = xs.dims().to_vec();
+                *dims.last_mut().expect("rank >= 1") = 1;
+                logit.reshape(dims)?.to_dtype(out.dtype())?
+            },
+            (None, None) => candle_core::bail!("shared expert gate logit missing"),
+        };
+        out.broadcast_mul(&candle_nn::ops::sigmoid(&logit)?)
     }
 }
 
@@ -283,7 +337,7 @@ pub struct SparseMoeBlock {
     /// Shared expert added to every token's routed output; `None` for
     /// plain Qwen3-style `MoE`.
     shared_expert: Option<Box<SharedExpert>>,
-    /// Packed i-quant (or, on SYCL, k-quant) experts run by expert id on the
+    /// Packed i-quant (or k-quant) experts run by expert id on the
     /// device; when set, `experts` is empty. See [`PackedIQuantExperts`].
     iquant_experts: Option<PackedIQuantExperts>,
 }
@@ -525,7 +579,7 @@ impl SparseMoeBlock {
             None
         };
 
-        let block = Self {
+        let mut block = Self {
             layer_idx,
             gate,
             experts,
@@ -538,6 +592,7 @@ impl SparseMoeBlock {
             shared_expert,
             iquant_experts,
         };
+        block.fold_shared_gate_into_router()?;
         block.log_dispatch_decision();
         Ok(block)
     }
@@ -555,6 +610,19 @@ impl SparseMoeBlock {
         if !names
             .iter()
             .all(|n| gg.has_native_iquant_experts(n, expert_device))
+        {
+            return Ok(None);
+        }
+        // CUDA and ROCm already run all-k-quant experts packed, through
+        // `indexed_moe_forward` (int8 activations and `dp4a`): 2-5x faster
+        // than the float by-id matvec up to ~64 tokens on an RTX 3090 at
+        // Ornith-1.5-35B-A3B shapes (see `cuda_packed_k_quant_experts_bench`),
+        // and on CUDA prefill switches to the same batched GEMM
+        // (`SparseMoeBlock::k_quant_gemm_forward`). The by-id kernels take a
+        // set only when it holds an i-quant, which that path would have to
+        // re-quantize at load.
+        if (expert_device.is_cuda() || expert_device.is_rocm())
+            && !names.iter().any(|n| gg.is_iquant_tensor(n))
         {
             return Ok(None);
         }
@@ -834,6 +902,17 @@ impl SparseMoeBlock {
         original_dtype: DType,
         original_dims: &[usize],
     ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if let Some(out) = Self::k_quant_gemm_forward(
+            xs_f32,
+            topk_ids,
+            topk_weights,
+            gate_up_exps,
+            down_exps,
+            original_dtype,
+        )? {
+            return out.reshape(original_dims);
+        }
         let intermediate_size = gate_up_exps.shape().dims()[1] / 2;
         let xs_3d = prof::timed(Span::MoeInputPrep, || xs_f32.unsqueeze(1)?.contiguous())?;
         let gate_up_out = prof::timed(Span::MoeGateUp, || {
@@ -851,6 +930,103 @@ impl SparseMoeBlock {
         prof::timed(Span::MoeCombine, || {
             Self::combine_expert_outputs(&down_out, topk_weights, original_dtype, original_dims)
         })
+    }
+
+    /// The prefill side of [`Self::fused_forward`] on CUDA, for `Q4_K` /
+    /// `Q5_K` / `Q6_K` experts: once a batch routes
+    /// [`GEMM_MIN_PAIRS`](crate::ops::quant_iq::GEMM_MIN_PAIRS) pairs, each
+    /// routed expert is decoded once (straight from the same packed
+    /// `QTensor`s) and multiplied by cuBLAS through a
+    /// [`GemmPlan`](crate::ops::quant_iq::GemmPlan), instead of
+    /// `indexed_moe_forward`'s per-pair matvec. On an RTX 3090 at
+    /// Ornith-1.5-35B-A3B shapes that is 32 ms instead of 101 ms per layer
+    /// for a 2048-token chunk; below ~512 tokens `indexed_moe_forward` wins
+    /// (see `cuda_packed_k_quant_experts_bench`). `None` when this path does
+    /// not apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if planning, a kernel or a GEMM fails.
+    #[cfg(feature = "cuda")]
+    fn k_quant_gemm_forward(
+        xs_f32: &Tensor,
+        topk_ids: &Tensor,
+        topk_weights: &Tensor,
+        gate_up_exps: &QTensor,
+        down_exps: &QTensor,
+        original_dtype: DType,
+    ) -> Result<Option<Tensor>> {
+        use crate::ops::fused_ops::moe_combine::moe_combine;
+        use crate::ops::quant_iq::cuda::dequantize_qtensor_experts;
+        use crate::ops::quant_iq::{GEMM_MIN_PAIRS, GemmPlan, PlanLayout};
+        use crate::quantized::iquant::IQuantType;
+
+        let Device::Cuda(dev) = xs_f32.device() else {
+            return Ok(None);
+        };
+        let (Some(gate_up_ty), Some(down_ty)) = (
+            IQuantType::from_k_quant(gate_up_exps.dtype()),
+            IQuantType::from_k_quant(down_exps.dtype()),
+        ) else {
+            return Ok(None);
+        };
+        if topk_ids.elem_count() < GEMM_MIN_PAIRS {
+            return Ok(None);
+        }
+        let (_, gate_up_rows, hidden) = gate_up_exps.shape().dims3()?;
+        let (_, down_rows, intermediate) = down_exps.shape().dims3()?;
+        let top_k = topk_ids.dim(1)?;
+        let plan = GemmPlan::new(
+            &topk_ids.flatten_all()?,
+            &[PlanLayout::Rows(top_k), PlanLayout::PlanOrder],
+        )?;
+        let gate_up_dequant = |ids: &Tensor| {
+            dequantize_qtensor_experts(
+                dev,
+                gate_up_exps,
+                gate_up_ty,
+                ids,
+                gate_up_rows,
+                hidden,
+                DType::F16,
+            )
+        };
+        let down_dequant = |ids: &Tensor| {
+            dequantize_qtensor_experts(
+                dev,
+                down_exps,
+                down_ty,
+                ids,
+                down_rows,
+                intermediate,
+                DType::F16,
+            )
+        };
+        // Gate and up are fused per expert, so one GEMM yields both halves.
+        let gate_up = plan
+            .run(
+                xs_f32,
+                PlanLayout::Rows(top_k),
+                gate_up_rows,
+                hidden,
+                &[&gate_up_dequant],
+            )?
+            .remove(0);
+        let half = gate_up_rows / 2;
+        let hidden_act = crate::ops::fused_ops::swiglu::swiglu(
+            &gate_up.narrow(D::Minus1, 0, half)?,
+            &gate_up.narrow(D::Minus1, half, half)?,
+        )?;
+        let down = plan
+            .run(
+                &hidden_act,
+                PlanLayout::PlanOrder,
+                down_rows,
+                intermediate,
+                &[&down_dequant],
+            )?
+            .remove(0);
+        moe_combine(&down, Some(&plan.position()?), topk_weights, original_dtype).map(Some)
     }
 
     /// CPU-native equivalent of [`Self::fused_forward`], using
@@ -2195,16 +2371,52 @@ fn batched_promote(
 
 impl Module for SparseMoeBlock {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let routed = self.routed_forward(xs)?;
+        let mut shared_gate_logit = None;
+        let routed = self.routed_forward(xs, &mut shared_gate_logit)?;
         match &self.shared_expert {
-            Some(shared) => routed + shared.forward(xs)?,
+            Some(shared) => routed + shared.forward(xs, shared_gate_logit)?,
             None => Ok(routed),
         }
     }
 }
 
 impl SparseMoeBlock {
-    fn routed_forward(&self, xs: &Tensor) -> Result<Tensor> {
+    /// Stack the shared expert's `[1, hidden]` gate under the router's
+    /// `[experts, hidden]` weight (both dense, so in F32): one gemv yields
+    /// both per token, saving a matvec per layer on the launch-bound decode
+    /// path. The router's extra last column is handed to the shared expert.
+    fn fold_shared_gate_into_router(&mut self) -> Result<()> {
+        let Some(shared) = self.shared_expert.as_mut() else {
+            return Ok(());
+        };
+        let (LinearLayer::Standard(router), Some(LinearLayer::Standard(gate))) =
+            (&self.gate, &shared.gate)
+        else {
+            return Ok(());
+        };
+        if router.bias().is_some() || gate.bias().is_some() {
+            return Ok(());
+        }
+        let weight = Tensor::cat(
+            &[
+                router.weight().to_dtype(DType::F32)?,
+                gate.weight().to_dtype(DType::F32)?,
+            ],
+            0,
+        )?;
+        self.gate = LinearLayer::Standard(Linear::new(weight, None));
+        shared.gate = None;
+        Ok(())
+    }
+
+    /// The routed experts' output; when the router also computes the shared
+    /// expert's gate (see [`Self::fold_shared_gate_into_router`]), that
+    /// logit is stored in `shared_gate_logit`.
+    fn routed_forward(
+        &self,
+        xs: &Tensor,
+        shared_gate_logit: &mut Option<Tensor>,
+    ) -> Result<Tensor> {
         let original_dims = xs.dims().to_vec();
         let Some(&hidden_size) = original_dims.last() else {
             candle_core::bail!("SparseMoeBlock input must have at least one dimension");
@@ -2218,7 +2430,16 @@ impl SparseMoeBlock {
 
         let (topk_ids, topk_weights) =
             prof::timed(Span::MoeRouter, || -> Result<(Tensor, Tensor)> {
-                let logits = self.gate.forward(&xs_f32)?;
+                let mut logits = self.gate.forward(&xs_f32)?;
+                if self
+                    .shared_expert
+                    .as_ref()
+                    .is_some_and(|shared| shared.gate.is_none())
+                {
+                    let experts = logits.dim(1)? - 1;
+                    *shared_gate_logit = Some(logits.narrow(1, experts, 1)?);
+                    logits = logits.narrow(1, 0, experts)?;
+                }
                 crate::ops::fused_ops::topk_moe::topk_moe_routing(
                     &logits,
                     self.num_experts_per_tok,
@@ -4969,6 +5190,176 @@ mod tests {
             return Ok(());
         };
         packed_iquant_experts_match_dequantized_reference(&device)
+    }
+
+    /// [`SparseMoeBlock::fused_forward`] on CUDA with `Q4_K` gate/up and
+    /// `Q6_K` down experts, against routing recomputed on the CPU from the
+    /// dequantized weights: 5 tokens take `indexed_moe_forward`, 600 (2400
+    /// pairs) the k-quant batched-GEMM branch.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_k_quant_fused_forward_matches_dequantized_reference() -> Result<()> {
+        use crate::quantized::iquant::IQuantType;
+        use crate::quantized::test_util::random_blocks;
+        use candle_core::quantized::QStorage;
+        use std::borrow::Cow;
+
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let (experts, hidden, inter, top_k) = (16usize, 512usize, 256usize, 4usize);
+        let qtensor = |ty: IQuantType, dtype, shape: [usize; 3], seed| -> Result<QTensor> {
+            let n = shape.iter().product::<usize>() / ty.block_size();
+            QTensor::new(
+                QStorage::from_data(Cow::Owned(random_blocks(ty, n, seed)), &device, dtype)?,
+                (shape[0], shape[1], shape[2]),
+            )
+        };
+        let gate_up = qtensor(
+            IQuantType::Q4K,
+            GgmlDType::Q4K,
+            [experts, 2 * inter, hidden],
+            3,
+        )?;
+        let down = qtensor(IQuantType::Q6K, GgmlDType::Q6K, [experts, hidden, inter], 5)?;
+        let gate_up_w = gate_up.dequantize(&Device::Cpu)?;
+        let down_w = down.dequantize(&Device::Cpu)?;
+
+        for tokens in [5usize, 600] {
+            // Small activations keep the random blocks' outputs inside f16.
+            let x = (Tensor::randn(0f32, 1.0, (tokens, hidden), &Device::Cpu)? * 0.01)?;
+            let ids: Vec<u32> = (0..tokens * top_k)
+                .map(|p| ((p * 7 + p / top_k * 3) % experts) as u32)
+                .collect();
+            let weights = Tensor::rand(0f32, 1.0, (tokens, top_k), &Device::Cpu)?;
+            let got = SparseMoeBlock::fused_forward(
+                &x.to_device(&device)?,
+                &Tensor::from_vec(ids.clone(), (tokens, top_k), &device)?,
+                &weights.to_device(&device)?,
+                &gate_up,
+                &down,
+                DType::F32,
+                &[tokens, hidden],
+            )?
+            .to_device(&Device::Cpu)?;
+
+            let w = weights.to_vec2::<f32>()?;
+            let mut want = Vec::with_capacity(tokens);
+            for t in 0..tokens {
+                let xt = x.narrow(0, t, 1)?;
+                let mut acc = Tensor::zeros((1, hidden), DType::F32, &Device::Cpu)?;
+                for k in 0..top_k {
+                    let e = ids[t * top_k + k] as usize;
+                    let gu = xt.matmul(&gate_up_w.get(e)?.t()?)?;
+                    let h = (candle_nn::ops::silu(&gu.narrow(1, 0, inter)?)?
+                        * gu.narrow(1, inter, inter)?)?;
+                    let y = h.matmul(&down_w.get(e)?.t()?)?;
+                    acc = (acc + (y * f64::from(w[t][k]))?)?;
+                }
+                want.push(acc);
+            }
+            let want = Tensor::cat(&want, 0)?;
+            let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+            let diff = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            // `indexed_moe_forward` rounds activations to int8, the GEMM
+            // branch multiplies in f16.
+            let tol = if tokens * top_k >= 2048 { 2e-3 } else { 3e-2 };
+            assert!(
+                diff / scale < tol,
+                "tokens {tokens}: rel diff {}",
+                diff / scale
+            );
+        }
+        Ok(())
+    }
+
+    /// Packed k-quant experts at Ornith-1.5-35B-A3B shapes (256 experts,
+    /// top-8, 2048 hidden, 512 intermediate; `Q4_K` gate/up, `Q6_K` down):
+    /// [`PackedIQuantExperts`] (the float by-id matvec, then the batched GEMM
+    /// from 2048 pairs) against [`SparseMoeBlock::fused_forward`]
+    /// (`indexed_moe_forward`, then the same GEMM through
+    /// `k_quant_gemm_forward`).
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "benchmark"]
+    fn cuda_packed_k_quant_experts_bench() -> Result<()> {
+        use crate::quantized::iquant::IQuantType;
+        use crate::quantized::test_util::random_blocks;
+        use candle_core::quantized::QStorage;
+        use std::borrow::Cow;
+
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let (experts, hidden, inter, top_k) = (256usize, 2048usize, 512usize, 8usize);
+        let blocks = |ty: IQuantType, seed| {
+            random_blocks(ty, experts * inter * hidden / ty.block_size(), seed)
+        };
+        let (gate, up, down) = (
+            blocks(IQuantType::Q4K, 3),
+            blocks(IQuantType::Q4K, 5),
+            blocks(IQuantType::Q6K, 7),
+        );
+        let qtensor = |data: &[u8], dtype, shape: [usize; 3]| -> Result<QTensor> {
+            QTensor::new(
+                QStorage::from_data(Cow::Borrowed(data), &device, dtype)?,
+                (shape[0], shape[1], shape[2]),
+            )
+        };
+        let gu_shape = [experts, inter, hidden];
+        let down_shape = [experts, hidden, inter];
+        let gate_up = fuse_packed_qtensors(
+            &qtensor(&gate, GgmlDType::Q4K, gu_shape)?,
+            &qtensor(&up, GgmlDType::Q4K, gu_shape)?,
+            &device,
+        )?;
+        let down_q = qtensor(&down, GgmlDType::Q6K, down_shape)?;
+        let packed = PackedIQuantExperts::new(
+            IQuantExperts::new(IQuantType::Q4K, gate, gu_shape, &device)?,
+            IQuantExperts::new(IQuantType::Q4K, up, gu_shape, &device)?,
+            IQuantExperts::new(IQuantType::Q6K, down, down_shape, &device)?,
+        )?;
+
+        for tokens in [1usize, 8, 64, 512, 2048] {
+            // Small activations keep the random blocks' outputs inside f16.
+            let xs = (Tensor::randn(0f32, 1.0, (tokens, hidden), &device)? * 0.01)?;
+            let ids: Vec<u32> = (0..tokens * top_k)
+                .map(|p| ((p * 37 + p / top_k * 11) % experts) as u32)
+                .collect();
+            let ids = Tensor::from_vec(ids, (tokens, top_k), &device)?;
+            let weights = Tensor::rand(0f32, 1.0, (tokens, top_k), &device)?;
+            let iters = if tokens <= 8 { 200 } else { 10 };
+            let time = |f: &dyn Fn() -> Result<Tensor>| -> Result<(f64, Tensor)> {
+                let mut out = f()?;
+                device.synchronize()?;
+                let start = std::time::Instant::now();
+                for _ in 0..iters {
+                    out = f()?;
+                }
+                device.synchronize()?;
+                Ok((start.elapsed().as_secs_f64() * 1e3 / f64::from(iters), out))
+            };
+            let (packed_ms, a) = time(&|| packed.forward(&xs, &ids, &weights, DType::BF16))?;
+            let (fused_ms, b) = time(&|| {
+                SparseMoeBlock::fused_forward(
+                    &xs,
+                    &ids,
+                    &weights,
+                    &gate_up,
+                    &down_q,
+                    DType::BF16,
+                    &[tokens, hidden],
+                )
+            })?;
+            let (a, b) = (a.to_dtype(DType::F32)?, b.to_dtype(DType::F32)?);
+            let scale = b.abs()?.max_all()?.to_scalar::<f32>()?;
+            let diff = (a - b)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            println!(
+                "tokens {tokens:5}: packed {packed_ms:8.3} ms, fused_forward {fused_ms:8.3} ms, rel diff {:.4}",
+                diff / scale
+            );
+        }
+        Ok(())
     }
 
     #[cfg(feature = "sycl")]

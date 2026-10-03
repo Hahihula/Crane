@@ -390,9 +390,20 @@ pub struct FullAttention {
     num_kv_heads: usize,
     head_dim: usize,
     has_output_gate: bool,
+    /// Dtype the K/V cache and attention run in when it differs from the
+    /// activations' (see [`Self::set_attention_dtype`]); `None` follows them.
+    attn_dtype: Option<DType>,
 }
 
 impl FullAttention {
+    /// Run the K/V cache and attention in `dtype` instead of the activations'
+    /// dtype: Q/K/V are cast after RoPE and the output back before the gate.
+    /// Lets F32 activations (no casts around every quantized linear) keep a
+    /// half-precision cache, which is what long contexts are sized by.
+    pub fn set_attention_dtype(&mut self, dtype: Option<DType>) {
+        self.attn_dtype = dtype;
+    }
+
     /// # Errors
     ///
     /// Returns an error if a required weight tensor is missing or has an unexpected shape.
@@ -442,6 +453,7 @@ impl FullAttention {
             num_kv_heads,
             head_dim,
             has_output_gate: output_gate,
+            attn_dtype: None,
         })
     }
 
@@ -505,6 +517,7 @@ impl FullAttention {
             num_kv_heads: dims.num_kv_heads,
             head_dim: dims.head_dim,
             has_output_gate: dims.output_gate,
+            attn_dtype: None,
         })
     }
 
@@ -571,6 +584,19 @@ impl FullAttention {
 
         let q = apply_mrope(&q, rope.cos, rope.sin, rope.rot_dim)?;
         let k = apply_mrope(&k, rope.cos, rope.sin, rope.rot_dim)?;
+        let out_dtype = q.dtype();
+        let (q, k, v) = match self.attn_dtype {
+            Some(dt) if dt != out_dtype => (q.to_dtype(dt)?, k.to_dtype(dt)?, v.to_dtype(dt)?),
+            _ => (q, k, v),
+        };
+        // The model builds its mask in the attention dtype; a caller-supplied
+        // one may not match.
+        let attention_mask = match attention_mask {
+            Some(m) if m.dtype() != q.dtype() => Some(m.to_dtype(q.dtype())?),
+            Some(m) => Some(m.clone()),
+            None => None,
+        };
+        let attention_mask = attention_mask.as_ref();
 
         // Append this step's K/V to the cache (post-RoPE, pre-GQA-expand) and
         // continue with the full cached K/V. During incremental decode this is
@@ -588,7 +614,8 @@ impl FullAttention {
             expanded_sdpa(&q, &k, &v, attention_mask, scale, n_rep)?
         } else {
             grouped_sdpa(&q, &k, &v, attention_mask, scale, n_rep)?
-        };
+        }
+        .to_dtype(out_dtype)?;
 
         // Qwen 3.5 gates the attention output before `o_proj`.
         let y = match gate {
@@ -923,6 +950,13 @@ impl DecoderLayer {
             mlp,
             gdn_dims,
         })
+    }
+
+    /// See [`FullAttention::set_attention_dtype`]; no-op for GDN layers.
+    pub fn set_attention_dtype(&mut self, dtype: Option<DType>) {
+        if let LayerImpl::FullAttention(attn) = &mut self.layer_impl {
+            attn.set_attention_dtype(dtype);
+        }
     }
 
     #[must_use]

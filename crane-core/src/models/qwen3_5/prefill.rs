@@ -106,7 +106,7 @@ fn forward_inner(
                 seq_len,
                 start_pos,
                 model.device(),
-                model.dtype(),
+                model.attention_dtype(),
             )?),
             None => None,
         };
@@ -119,7 +119,12 @@ fn forward_inner(
     while offset < seq_len {
         let len = chunk.min(seq_len - offset);
         let ids = input_ids.narrow(1, offset, len)?.contiguous()?;
-        let mask = causal_mask(len, start_pos + offset, model.device(), model.dtype())?;
+        let mask = causal_mask(
+            len,
+            start_pos + offset,
+            model.device(),
+            model.attention_dtype(),
+        )?;
         let hidden = model.forward_layers(&ids, start_pos + offset, Some(&mask))?;
         // Only the final position is ever projected, so each chunk's hidden
         // states are dropped here rather than accumulated.
