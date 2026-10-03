@@ -1138,6 +1138,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         tts_tx_opt,
         asr_tx_opt,
         duplex_tx_opt,
+        background_thread,
     ): (
         Option<EngineHandle>,
         tokenizers::Tokenizer,
@@ -1150,6 +1151,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         Option<tokio::sync::mpsc::UnboundedSender<TtsGenerateRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<AsrTranscribeRequest>>,
         Option<tokio::sync::mpsc::UnboundedSender<handlers::duplex::DuplexRequest>>,
+        Option<std::thread::JoinHandle<()>>,
     ) = if is_tts {
         info!(
             "Loading TTS model ({:?}) from: {}",
@@ -1165,7 +1167,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         let tts_dtype = dtype;
         let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<TtsGenerateRequest>();
         let resolved_name = resolved_type.display_name().to_string();
-        std::thread::Builder::new()
+        let tts_thread = std::thread::Builder::new()
             .name("tts-engine".into())
             .spawn(move || {
                 let mut tts = match engine::model_factory::create_tts(
@@ -1215,6 +1217,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             Some(tts_tx),
             None,
             None,
+            Some(tts_thread),
         )
     } else if is_asr {
         info!(
@@ -1228,7 +1231,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         let asr_dtype = dtype;
         let (asr_tx, asr_rx) = tokio::sync::mpsc::unbounded_channel::<AsrTranscribeRequest>();
         let resolved_name = resolved_type.display_name().to_string();
-        std::thread::Builder::new()
+        let asr_thread = std::thread::Builder::new()
             .name("asr-engine".into())
             .spawn(move || {
                 let mut asr = match engine::model_factory::create_asr(
@@ -1276,6 +1279,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             None,
             Some(asr_tx),
             None,
+            Some(asr_thread),
         )
     } else if is_vlm {
         // Only the PaddleOCR-VL fallback branch below actually consumes
@@ -1301,6 +1305,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         let mut minicpm_v_vlm_tx_opt_inner: Option<
             tokio::sync::mpsc::UnboundedSender<MinicpmVVlmRequest>,
         > = None;
+        let background_thread_inner: Option<std::thread::JoinHandle<()>>;
         if resolved_type == engine::model_factory::ModelType::MinicpmV46 {
             info!("Loading MiniCPM-V-4.6 model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
@@ -1308,7 +1313,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             let dtype_clone = dtype;
             let (mcpv_tx, mut mcpv_rx) =
                 tokio::sync::mpsc::unbounded_channel::<MinicpmVVlmRequest>();
-            std::thread::Builder::new()
+            let vlm_thread = std::thread::Builder::new()
                 .name("minicpm-v-vlm-engine".into())
                 .spawn(move || {
                     use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
@@ -1358,6 +1363,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                 })
                 .expect("Failed to spawn MiniCPM-V-4.6 thread");
             minicpm_v_vlm_tx_opt_inner = Some(mcpv_tx);
+            background_thread_inner = Some(vlm_thread);
         } else if resolved_type == engine::model_factory::ModelType::Qwen3_5VL {
             info!("Loading Qwen 3.5 VL model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
@@ -1365,7 +1371,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             let dtype_clone = dtype;
             let (q35vlm_tx, mut q35vlm_rx) =
                 tokio::sync::mpsc::unbounded_channel::<Qwen3_5VlmRequest>();
-            std::thread::Builder::new()
+            let vlm_thread = std::thread::Builder::new()
                 .name("qwen3_5-vlm-engine".into())
                 .spawn(move || {
                     use crane_core::models::qwen3_5::{Qwen3_5VLModel, VlGenerationConfig};
@@ -1412,6 +1418,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                 })
                 .expect("Failed to spawn Qwen 3.5 VL thread");
             qwen3_5_vlm_tx_opt_inner = Some(q35vlm_tx);
+            background_thread_inner = Some(vlm_thread);
         } else if resolved_type == engine::model_factory::ModelType::Gemma4VL {
             info!("Loading Gemma4 VLM model from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
@@ -1419,7 +1426,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             let dtype_clone = dtype;
             let (g4vlm_tx, mut g4vlm_rx) =
                 tokio::sync::mpsc::unbounded_channel::<Gemma4VlmRequest>();
-            std::thread::Builder::new()
+            let vlm_thread = std::thread::Builder::new()
                 .name("gemma4-vlm-engine".into())
                 .spawn(move || {
                     use crane_core::models::gemma4::vision::{
@@ -1518,11 +1525,12 @@ pub async fn run(mut args: Args) -> Result<()> {
                 })
                 .expect("Failed to spawn Gemma4 VLM thread");
             gemma4_vlm_tx_opt_inner = Some(g4vlm_tx);
+            background_thread_inner = Some(vlm_thread);
         } else {
             info!("Loading VLM model (PaddleOCR-VL) from: {}", args.model_path);
             let model_path_clone = args.model_path.clone();
             let (vlm_tx, mut vlm_rx) = tokio::sync::mpsc::unbounded_channel::<VlmRequest>();
-            std::thread::Builder::new()
+            let vlm_thread = std::thread::Builder::new()
                 .name("vlm-engine".into())
                 .spawn(move || {
                     let mut vlm = match engine::model_factory::create_vlm_model(
@@ -1583,6 +1591,7 @@ pub async fn run(mut args: Args) -> Result<()> {
                 })
                 .expect("Failed to spawn VLM thread");
             vlm_tx_opt_inner = Some(vlm_tx);
+            background_thread_inner = Some(vlm_thread);
         }
         info!("VLM model routing established (type: {:?})", resolved_type);
         let eos_id = tokenizer
@@ -1602,6 +1611,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             None,
             None,
             None,
+            background_thread_inner,
         )
     } else if is_duplex {
         info!("Loading MiniCPM-o duplex model from: {}", args.model_path);
@@ -1616,7 +1626,7 @@ pub async fn run(mut args: Args) -> Result<()> {
         }
         let (duplex_tx, duplex_rx) =
             tokio::sync::mpsc::unbounded_channel::<handlers::duplex::DuplexRequest>();
-        std::thread::Builder::new()
+        let duplex_thread = std::thread::Builder::new()
             .name("duplex-engine".into())
             .spawn(move || {
                 let session_result = if let Some(gguf) = llm_gguf_clone {
@@ -1674,6 +1684,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             None,
             None,
             Some(duplex_tx),
+            Some(duplex_thread),
         )
     } else {
         // Only one of the TTS/ASR/VLM/LLM branches runs per process, so each is
@@ -1790,7 +1801,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             memory_config,
             engine::model_factory::uses_xml_tool_format(&args.model_path),
         );
-        std::thread::Builder::new()
+        let engine_thread = std::thread::Builder::new()
             .name("inference-engine".into())
             .spawn(move || engine.run())
             .expect("Failed to spawn engine thread");
@@ -1806,6 +1817,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             None,
             None,
             None,
+            Some(engine_thread),
         )
     };
 
@@ -1991,6 +2003,31 @@ pub async fn run(mut args: Args) -> Result<()> {
         );
     }
     serve.await?;
+    // Drop the last `Arc<AppState>` strong reference so whichever background
+    // model thread (inference engine, TTS, ASR, VLM, or duplex) is running
+    // sees its request channel close and returns from its loop on its own.
+    drop(state);
+    if let Some(thread) = background_thread {
+        // `JoinHandle::join` blocks, so run it on a blocking-pool thread
+        // rather than stalling the async runtime. Without this, this
+        // function (and so the whole process) could return while the
+        // background thread is still mid-teardown of shared GPU/device
+        // state that the process's own exit path is concurrently
+        // dropping -- a use-after-free race observed as a SIGSEGV in the
+        // model thread immediately after Ctrl-C.
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => {
+                let msg = e
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| e.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("<non-string panic>");
+                warn!("Background model thread panicked during shutdown: {msg}");
+            },
+            Err(e) => warn!("Failed to join background model thread: {e}"),
+        }
+    }
     Ok(())
 }
 
