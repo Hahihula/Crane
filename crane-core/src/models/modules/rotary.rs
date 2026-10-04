@@ -88,6 +88,21 @@ impl RotaryEmbedding {
         let sin = self.sin_table.narrow(0, start_pos, seq_len)?;
         Ok((cos, sin))
     }
+
+    /// The `max_pos` this instance was constructed with — the model's native
+    /// maximum context length, since the cos/sin tables have exactly that
+    /// many rows.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: `cos_table` is always 2-D by construction (see
+    /// `new()`).
+    #[must_use]
+    pub fn max_pos(&self) -> usize {
+        self.cos_table
+            .dim(0)
+            .expect("cos_table is 2-D by construction")
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +119,13 @@ mod tests {
         let (cos, sin) = rope.forward(0, 32).expect("forward failed");
         assert_eq!(cos.dims(), &[32, 32]);
         assert_eq!(sin.dims(), &[32, 32]);
+    }
+
+    #[test]
+    fn max_pos_matches_construction_arg() {
+        let rope = RotaryEmbedding::new(64, 128, 10000.0, &Device::Cpu)
+            .expect("failed to construct RotaryEmbedding");
+        assert_eq!(rope.max_pos(), 128);
     }
 
     #[test]

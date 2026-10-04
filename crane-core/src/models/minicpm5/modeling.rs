@@ -811,4 +811,11 @@ impl MiniCpm5Model {
         }
         // rotary_emb tables are static and reusable — do not clear.
     }
+
+    /// Native maximum context length this checkpoint was trained/configured
+    /// for — the precomputed rotary table's row count, since `Config` itself
+    /// isn't retained after construction.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.rotary_emb.max_pos()
+    }
 }

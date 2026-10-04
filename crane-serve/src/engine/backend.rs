@@ -117,6 +117,13 @@ pub trait ModelBackend: Send + 'static {
         None
     }
 
+    /// Native maximum context length (trained/configured positional range)
+    /// this checkpoint supports, if known. `None` when the backend has no
+    /// way to report it.
+    fn max_position_embeddings(&self) -> Option<usize> {
+        None
+    }
+
     /// Worst-case transient VRAM one in-flight MoE CPU-offload call needs
     /// for a `chunk_tokens`-token prefill chunk. 0 for backends without
     /// CPU-offloaded MoE experts (the default).
@@ -240,6 +247,10 @@ impl ModelBackend for Gemma4Backend {
         self.model.num_layers()
     }
 
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
+    }
+
     fn device(&self) -> &Device {
         &self.model.device
     }
@@ -315,6 +326,10 @@ impl ModelBackend for HunyuanBackend {
 
     fn num_layers(&self) -> usize {
         self.model.num_layers()
+    }
+
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
     }
 
     fn device(&self) -> &Device {
@@ -448,6 +463,10 @@ impl ModelBackend for Qwen25Backend {
         0 // KV swap not supported; vector is unused
     }
 
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
+    }
+
     fn device(&self) -> &Device {
         &self.model.device
     }
@@ -521,6 +540,10 @@ impl ModelBackend for Minicpm5Backend {
 
     fn num_layers(&self) -> usize {
         0 // KV swap not supported; vector is unused
+    }
+
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
     }
 
     fn device(&self) -> &Device {
@@ -633,6 +656,10 @@ impl ModelBackend for Qwen3_5Backend {
         self.model.num_layers()
     }
 
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
+    }
+
     fn device(&self) -> &Device {
         &self.model.device
     }
@@ -706,6 +733,10 @@ impl ModelBackend for Qwen4ExpBackend {
 
     fn num_layers(&self) -> usize {
         self.model.inner.config().num_hidden_layers
+    }
+
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
     }
 
     fn device(&self) -> &Device {
@@ -808,6 +839,10 @@ impl ModelBackend for Qwen3Backend {
 
     fn num_layers(&self) -> usize {
         self.model.num_layers()
+    }
+
+    fn max_position_embeddings(&self) -> Option<usize> {
+        Some(self.model.max_position_embeddings())
     }
 
     fn device(&self) -> &Device {

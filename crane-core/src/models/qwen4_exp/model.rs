@@ -702,6 +702,11 @@ impl Model {
         Ok(self.inner.reset()?)
     }
 
+    /// Native maximum context length this checkpoint was trained/configured for.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.inner.config().max_position_embeddings
+    }
+
     /// One short forward so kernels are compiled before the first request.
     pub fn warmup(&mut self) {
         if let Err(e) = self.inner.forward(&[45]) {
