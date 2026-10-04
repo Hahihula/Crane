@@ -127,6 +127,10 @@ pub struct Model {
     pub tokenizer: TokenOutputStream,
     pub device: Device,
     model_typed: ModelTyped,
+    /// Native maximum context length from `config.json`. Captured at load
+    /// time since `ModelTyped`'s upstream `candle_transformers` types don't
+    /// retain their `Config` after construction.
+    max_position_embeddings: usize,
 }
 
 pub enum ModelTyped {
@@ -178,13 +182,20 @@ impl Model {
         let config_data = std::fs::read(config_file)?;
         let config: ConfigBase = serde_json::from_slice(&config_data)?;
 
+        let max_position_embeddings = config.max_position_embeddings;
         let model_typed = ModelTyped::Base(ModelBase::new(&config, vb)?);
 
         Ok(Self {
             tokenizer: TokenOutputStream::new(tokenizer),
             device: device.clone(),
             model_typed,
+            max_position_embeddings,
         })
+    }
+
+    /// Native maximum context length this checkpoint was trained/configured for.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.max_position_embeddings
     }
 
     pub fn prepare_inputs(&self, inputs: &str) -> Result<Vec<u32>> {

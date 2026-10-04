@@ -129,6 +129,11 @@ impl Model {
         &self.eos_token_ids
     }
 
+    /// Native maximum context length this checkpoint was trained/configured for.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.inner.max_position_embeddings()
+    }
+
     fn from_pretrained(model_path: &str, device: &Device, dtype: &DType) -> Result<Model> {
         let tokenizer_path = std::path::Path::new(model_path).join("tokenizer.json");
         if !tokenizer_path.exists() {

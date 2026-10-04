@@ -1017,6 +1017,11 @@ impl Model {
         self.inner.num_layers()
     }
 
+    /// Native maximum context length this checkpoint was trained/configured for.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.inner.config().max_position_embeddings
+    }
+
     /// Total bytes held by the full-attention K/V caches (context-scaling term).
     pub fn attn_cache_bytes(&self) -> usize {
         self.inner.attn_cache_bytes()

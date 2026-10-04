@@ -185,6 +185,11 @@ impl Model {
         self.inner.num_layers()
     }
 
+    /// Native maximum context length this checkpoint was trained/configured for.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.inner.config().max_position_embeddings
+    }
+
     pub fn active_kv_cache_bytes(&self) -> u64 {
         self.inner.active_kv_cache_bytes()
     }
