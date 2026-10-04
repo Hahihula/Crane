@@ -6,6 +6,8 @@
 pub mod cuda;
 #[cfg(feature = "metal")]
 pub mod metal;
+#[cfg(all(feature = "rocm", not(feature = "cuda")))]
+pub mod rocm;
 #[cfg(feature = "sycl")]
 pub mod sycl;
 
@@ -19,15 +21,25 @@ pub mod sycl;
 /// experts are routed (decoding them dominates) plus ~3 ms per 1000 tokens;
 /// the matvec grows linearly from ~45 us per token. On an Arc Pro B70 with
 /// Qwen3.8-Flash-Next shapes (256 experts, top-10) they cross at ~200-250
-/// tokens, i.e. ~2k pairs. CUDA and Metal use the same crossover; not tuned
-/// there yet.
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+/// tokens, i.e. ~2k pairs. CUDA, Metal and `ROCm` use the same crossover;
+/// not tuned there yet.
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 pub(crate) const GEMM_MIN_PAIRS: usize = 2048;
 
 /// Experts decoded per batched GEMM in [`GemmPlan::run`]; bounds the
 /// transient f16 weights (32 x 640 x 2560 x 2 B = 105 MB for
 /// Qwen3.8-Flash-Next).
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 const GEMM_EXPERT_BATCH: usize = 32;
 
 /// Zero-padded activation rows per batched GEMM in [`GemmPlan::run`]:
@@ -35,7 +47,12 @@ const GEMM_EXPERT_BATCH: usize = 32;
 /// (a few experts taking most tokens) an unbounded batch pads every expert to
 /// the busiest one's count. 8192 rows of a 2560-wide projection are 42 MB of
 /// f16 activations, and as much again for the output.
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 const GEMM_ROW_BUDGET: usize = 8192;
 
 /// The prefill path of the by-id `MoE` matmul, planned once per routing.
@@ -58,7 +75,12 @@ const GEMM_ROW_BUDGET: usize = 8192;
 /// (`PackedIQuantExperts`): gate and up run together on one gather of the
 /// input, and down reads their (elementwise-combined) output in plan order,
 /// so nothing is reordered until the final combine.
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 pub(crate) struct GemmPlan {
     /// Every batch's index arrays (see [`PlanBatch`]) plus `position`.
     index: candle_core::Tensor,
@@ -73,12 +95,22 @@ pub(crate) struct GemmPlan {
 
 /// Decodes the listed experts (`U32` ids) of one projection to f16
 /// `[n, output_rows, cols]`, for [`GemmPlan::run`].
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 pub(crate) type DequantizeExperts<'a> =
     &'a dyn Fn(&candle_core::Tensor) -> candle_core::Result<candle_core::Tensor>;
 
 /// How a [`GemmPlan::run`] input's rows relate to the routed pairs.
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlanLayout {
     /// Pair `p` reads row `p / x_div`: `top_k` for one row per token, 1 for
@@ -90,7 +122,12 @@ pub(crate) enum PlanLayout {
 }
 
 /// One batch of [`GemmPlan`]: offsets into its `index` tensor.
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 struct PlanBatch {
     /// `experts` expert ids.
     ids_at: usize,
@@ -105,7 +142,12 @@ struct PlanBatch {
     n_real: usize,
 }
 
-#[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+#[cfg(any(
+    feature = "sycl",
+    feature = "metal",
+    feature = "cuda",
+    feature = "rocm"
+))]
 impl GemmPlan {
     /// Plan the routing `ids` (`U32`, flattened: pair `p` is expert `ids[p]`)
     /// for inputs laid out as each of `layouts`.

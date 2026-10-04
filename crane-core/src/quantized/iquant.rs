@@ -8,13 +8,13 @@
 //! [`extended_gguf`](super::extended_gguf) probe hides these tensors from
 //! Candle; this module decodes them.
 //!
-//! Where a native kernel exists ([`IQuantType::has_native_kernel`]), linear
-//! layers ([`IQuantLinear`]) and packed `MoE` experts ([`IQuantExperts`])
-//! keep the packed encoding. The k-quants `Q4_K` / `Q5_K` / `Q6_K` are listed
-//! too, for packed experts only: Candle runs them as linear layers itself,
-//! but has no by-expert-id kernel for them on SYCL or Metal. (On CUDA it has
-//! one, which all-k-quant experts keep; the kernels here take over when a
-//! projection is an i-quant.) Everything else (other devices and types,
+//! Where a native kernel exists ([`IQuantType::has_native_kernel`]: every
+//! type on SYCL, Metal, CUDA and `ROCm`), linear layers ([`IQuantLinear`])
+//! and packed `MoE` experts ([`IQuantExperts`]) keep the packed encoding.
+//! The k-quants `Q4_K` / `Q5_K` / `Q6_K` are listed too, for packed experts
+//! only: Candle runs them as linear layers itself, and the kernels here take
+//! over for packed experts when a projection is a k-quant or i-quant.
+//! Everything else (other devices and types,
 //! embeddings) is dequantized on the CPU and re-quantized
 //! at load time to a Candle-native type (see [`requant_target`]), so every
 //! backend can still run it through its existing `QMatMul` kernels. Reference:
@@ -27,9 +27,6 @@ use candle_core::{DType, Device, Result, Tensor, bail};
 use half::f16;
 
 use super::iquant_grids::{IQ2S_GRID, IQ3S_GRID, IQ3XXS_GRID};
-// `Device::is_sycl` is inherent on the SYCL candle fork; this extension only
-// supplies it (as a constant `false`) for builds without that fork.
-#[cfg(not(feature = "sycl"))]
 use crate::utils::DeviceExt;
 
 /// Super-block size shared by the k-quants and `IQ4_XS`.
@@ -119,13 +116,14 @@ impl IQuantType {
     }
 
     /// Whether this build has a kernel running this type packed on `device`
-    /// (behind [`IQuantLinear`] / [`IQuantExperts`]). SYCL, Metal and CUDA run
-    /// every type. Anything else is re-quantized.
+    /// (behind [`IQuantLinear`] / [`IQuantExperts`]). SYCL, Metal, CUDA and
+    /// `ROCm` run every type. Anything else is re-quantized.
     #[must_use]
     pub fn has_native_kernel(self, device: &Device) -> bool {
         (cfg!(feature = "sycl") && device.is_sycl())
             || (cfg!(feature = "cuda") && device.is_cuda())
             || (cfg!(feature = "metal") && device.is_metal())
+            || (cfg!(feature = "rocm") && device.is_rocm())
     }
 
     /// Whether this build has a by-expert-id kernel for this type on
@@ -392,9 +390,9 @@ fn dequantize_q2_0(blocks: &[u8], out: &mut [f32]) {
 }
 
 /// Whether linear layers keep i-quant weights packed and run them through
-/// the native kernels (CUDA only). True unless `CRANE_IQ_REQUANT` names an
-/// explicit target, which forces re-quantization everywhere (handy for A/B
-/// comparisons).
+/// the native kernels (CUDA / SYCL / Metal / ROCm). True unless
+/// `CRANE_IQ_REQUANT` names an explicit target, which forces re-quantization
+/// everywhere (handy for A/B comparisons).
 pub fn native_enabled() -> bool {
     std::env::var("CRANE_IQ_REQUANT").map_or(true, |v| v.eq_ignore_ascii_case("native"))
 }
@@ -498,7 +496,12 @@ pub fn requantize(
 /// Largest input-row count served by the decode matvec kernel; bigger
 /// batches dequantize weight chunks and use a regular matmul.
 #[cfg_attr(
-    not(any(feature = "cuda", feature = "sycl", feature = "metal")),
+    not(any(
+        feature = "cuda",
+        feature = "sycl",
+        feature = "metal",
+        feature = "rocm"
+    )),
     allow(dead_code)
 )]
 const MATVEC_MAX_ROWS: usize = 8;
@@ -509,7 +512,7 @@ const PREFILL_CHUNK_BYTES: usize = 256 << 20;
 /// device (see `kernels/cuda/quant_iq4.cu`,
 /// `kernels/sycl/quant_iq.cpp`, `kernels/metal/quant_iq.metal`).
 ///
-/// Only built for CUDA / SYCL / Metal by [`Gguf`](super::gguf_file::Gguf);
+/// Only built for CUDA / SYCL / Metal / ROCm by [`Gguf`](super::gguf_file::Gguf);
 /// other devices get a re-quantized `QMatMul` instead. The CPU path here
 /// dequantizes the whole weight per call and exists for tests and device
 /// fallbacks.
@@ -625,6 +628,21 @@ impl IQuantLinear {
             && matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
         {
             return crate::ops::quant_iq::metal::dequantize(
+                &self.packed,
+                self.ty,
+                0,
+                self.rows,
+                self.cols,
+                dtype,
+            );
+        }
+        // Unlike the CUDA branch above, guard unsupported dtypes here so they
+        // fall through to the CPU path below instead of erroring inside the
+        // kernel dispatch.
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        if self.packed.device().is_rocm() && matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
+        {
+            return crate::ops::quant_iq::rocm::dequantize(
                 &self.packed,
                 self.ty,
                 0,
@@ -763,6 +781,34 @@ impl IQuantLinear {
             return y.reshape(out_dims);
         }
 
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        if xs.device().is_rocm() {
+            use crate::ops::quant_iq::rocm;
+            if n <= MATVEC_MAX_ROWS {
+                let x = xs.reshape((n, self.cols))?;
+                let y = rocm::matvec(&x, &self.packed, self.ty, self.rows, self.cols, out_dtype)?;
+                return y.reshape(out_dims);
+            }
+            let x = xs
+                .to_dtype(out_dtype)?
+                .reshape((n, self.cols))?
+                .contiguous()?;
+            let chunk = (chunk_bytes / (self.cols * out_dtype.size_in_bytes())).max(1);
+            let mut outs = Vec::with_capacity(self.rows.div_ceil(chunk));
+            for start in (0..self.rows).step_by(chunk) {
+                let n_rows = chunk.min(self.rows - start);
+                let w =
+                    rocm::dequantize(&self.packed, self.ty, start, n_rows, self.cols, out_dtype)?;
+                outs.push(x.matmul(&w.t()?)?);
+            }
+            let y = if outs.len() == 1 {
+                outs.pop().unwrap()
+            } else {
+                Tensor::cat(&outs, 1)?
+            };
+            return y.reshape(out_dims);
+        }
+
         let x = xs.to_dtype(DType::F32)?.reshape((n, self.cols))?;
         let w = self.dequantize(DType::F32)?;
         x.matmul(&w.t()?)?.to_dtype(out_dtype)?.reshape(out_dims)
@@ -858,10 +904,15 @@ impl IQuantExperts {
 
     /// Whether the device kernels run these experts (the by-id matvec, and
     /// [`Self::gemm_plan`]'s dequantize-and-GEMM path).
-    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "sycl",
+        feature = "metal",
+        feature = "rocm"
+    ))]
     fn on_native_device(&self) -> bool {
         let device = self.packed.device();
-        (device.is_cuda() || device.is_sycl() || device.is_metal())
+        (device.is_cuda() || device.is_sycl() || device.is_metal() || device.is_rocm())
             && self.ty.has_native_experts_kernel(device)
     }
 
@@ -875,7 +926,12 @@ impl IQuantExperts {
     /// # Errors
     ///
     /// Returns an error if `ids` cannot be read.
-    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "sycl",
+        feature = "metal",
+        feature = "rocm"
+    ))]
     pub(crate) fn gemm_plan(
         &self,
         ids: &Tensor,
@@ -900,7 +956,12 @@ impl IQuantExperts {
     /// Returns an error if `experts` is empty or disagree in shape, the
     /// shapes disagree with `xs`, `layout` was not planned, or a kernel
     /// fails.
-    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "sycl",
+        feature = "metal",
+        feature = "rocm"
+    ))]
     pub(crate) fn forward_planned(
         experts: &[&Self],
         xs: &Tensor,
@@ -935,7 +996,12 @@ impl IQuantExperts {
     }
 
     /// Experts `ids` decoded to f16 `[n, rows, cols]` by the device kernel.
-    #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "sycl",
+        feature = "metal",
+        feature = "rocm"
+    ))]
     fn dequantize_experts_f16(&self, ids: &Tensor) -> Result<Tensor> {
         let (packed, ty, rows, cols) = (&self.packed, self.ty, self.rows, self.cols);
         #[cfg(feature = "cuda")]
@@ -971,6 +1037,17 @@ impl IQuantExperts {
                 DType::F16,
             );
         }
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        if packed.device().is_rocm() {
+            return crate::ops::quant_iq::rocm::dequantize_experts(
+                packed,
+                ty,
+                ids,
+                rows,
+                cols,
+                DType::F16,
+            );
+        }
         bail!(
             "no device kernel decodes {} experts on {:?}",
             ty.name(),
@@ -993,7 +1070,12 @@ impl IQuantExperts {
     pub fn forward_indexed(&self, xs: &Tensor, ids: &Tensor, x_div: usize) -> Result<Tensor> {
         self.check_width(xs)?;
 
-        #[cfg(any(feature = "cuda", feature = "sycl", feature = "metal"))]
+        #[cfg(any(
+            feature = "cuda",
+            feature = "sycl",
+            feature = "metal",
+            feature = "rocm"
+        ))]
         {
             use crate::ops::quant_iq::PlanLayout;
             if let Some(plan) = self.gemm_plan(ids, &[PlanLayout::Rows(x_div)])? {
@@ -1034,6 +1116,19 @@ impl IQuantExperts {
             && self.ty.has_native_experts_kernel(self.packed.device())
         {
             return crate::ops::quant_iq::metal::matvec_indexed(
+                &xs.to_device(self.packed.device())?,
+                &self.packed,
+                self.ty,
+                &ids.to_device(self.packed.device())?,
+                x_div,
+                self.rows,
+                self.cols,
+                DType::F32,
+            );
+        }
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        if self.packed.device().is_rocm() {
+            return crate::ops::quant_iq::rocm::matvec_indexed(
                 &xs.to_device(self.packed.device())?,
                 &self.packed,
                 self.ty,
@@ -1645,8 +1740,85 @@ mod tests {
         experts_match_cpu_reference(&Device::new_metal(0)?)
     }
 
+    #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+    #[test]
+    fn rocm_all_types_linear_match_cpu_reference() -> Result<()> {
+        let Ok(rocm) = Device::new_rocm(0) else {
+            return Ok(());
+        };
+        for (ty, rows, cols) in [
+            (IQuantType::Iq4Xs, 37, 512),
+            (IQuantType::Iq4Nl, 37, 288),
+            (IQuantType::Iq2S, 37, 512),
+            (IQuantType::Iq3Xxs, 37, 768),
+            (IQuantType::Iq3S, 37, 2560),
+            (IQuantType::Q2_0, 37, 640),
+            (IQuantType::Iq4Nl, 21, 640),
+        ] {
+            let packed = random_blocks(ty, rows * cols / ty.block_size(), rows as u32 * 31);
+            let cpu = IQuantLinear::new(ty, packed.clone(), rows, cols, &Device::Cpu)?;
+            let gpu = IQuantLinear::new(ty, packed, rows, cols, &rocm)?;
+            for n in [1usize, 3, 4, 7, 9, 33] {
+                let x = Tensor::randn(0f32, 1.0, (n, cols), &Device::Cpu)?;
+                let want = cpu.forward(&x)?;
+                let scale = want.abs()?.max_all()?.to_scalar::<f32>()?.max(1e-6);
+                let check = |got: Tensor, tol: f32, what: &str| -> Result<()> {
+                    let got = got.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                    let diff = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert!(
+                        diff / scale < tol,
+                        "{} {what} n={n}: rel diff {}",
+                        ty.name(),
+                        diff / scale
+                    );
+                    Ok(())
+                };
+                let xg = x.to_device(&rocm)?;
+                // IQ4_XS decode quantizes activations to int8 (dp4a).
+                let tol = if ty == IQuantType::Iq4Xs && n <= MATVEC_MAX_ROWS {
+                    3e-2
+                } else {
+                    1e-4
+                };
+                check(gpu.forward(&xg)?, tol, "f32")?;
+                check(gpu.forward(&xg.to_dtype(DType::F16)?)?, 3e-2, "f16")?;
+                check(gpu.forward(&xg.to_dtype(DType::BF16)?)?, 3e-2, "bf16")?;
+                // A tiny chunk forces the multi-chunk prefill path.
+                check(
+                    gpu.forward_chunked(&xg, DType::F32, 4 * cols * 4)?,
+                    tol,
+                    "chunked",
+                )?;
+            }
+            for dtype in [DType::F32, DType::F16, DType::BF16] {
+                let dense = gpu
+                    .dequantize(dtype)?
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(DType::F32)?;
+                let want = cpu.dequantize(dtype)?.to_dtype(DType::F32)?;
+                let diff = (dense - want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert_eq!(diff, 0.0, "{} dequantize {dtype:?}", ty.name());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+    #[test]
+    fn rocm_experts_match_cpu_reference() -> Result<()> {
+        let Ok(rocm) = Device::new_rocm(0) else {
+            return Ok(());
+        };
+        experts_match_cpu_reference(&rocm)
+    }
+
     /// [`IQuantExperts::forward_indexed`] on `gpu` against the CPU decoders.
-    #[cfg(any(feature = "sycl", feature = "metal", feature = "cuda"))]
+    #[cfg(any(
+        feature = "sycl",
+        feature = "metal",
+        feature = "cuda",
+        feature = "rocm"
+    ))]
     fn experts_match_cpu_reference(gpu_dev: &Device) -> Result<()> {
         let (experts, top_k) = (5usize, 3usize);
         for (ty, rows, cols) in expert_cases() {
