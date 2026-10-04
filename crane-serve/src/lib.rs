@@ -952,6 +952,21 @@ async fn shutdown_signal() {
     });
 }
 
+/// Caps a `max_seq_len` candidate at the model's native
+/// `max_position_embeddings`, the hard ceiling set by the size of its
+/// precomputed rotary position tables (`RotaryEmbedding::forward` errors
+/// once `start_pos + seq_len` exceeds it).
+///
+/// `value == 0` (unset/unlimited) defaults to the native ceiling when known;
+/// a `value` already within bounds, or `native_max_position_embeddings ==
+/// None` (unknown), passes through unchanged.
+fn clamp_to_native_context(value: usize, native_max_position_embeddings: Option<usize>) -> usize {
+    match native_max_position_embeddings {
+        Some(native) if native > 0 && (value == 0 || value > native) => native,
+        _ => value,
+    }
+}
+
 /// Auto-derives a safe `--max-seq-len` when the caller left it at `0`
 /// (unlimited) while `--gpu-memory-limit` is set. Without this, a single
 /// long-running session's own KV cache can grow past physical VRAM with
@@ -1720,6 +1735,37 @@ pub async fn run(mut args: Args) -> Result<()> {
         let eos_token_id = backend.eos_token_id();
         let chat_template =
             engine::model_factory::create_chat_template(model_type, &args.model_path);
+        let native_max_position_embeddings = backend.max_position_embeddings();
+        if args.max_seq_len > 0 {
+            let clamped = clamp_to_native_context(args.max_seq_len, native_max_position_embeddings);
+            if clamped != args.max_seq_len {
+                warn!(
+                    "--context/--max-seq-len ({}) exceeds this model's native \
+                     max_position_embeddings; clamping to {clamped}",
+                    args.max_seq_len,
+                );
+                args.max_seq_len = clamped;
+                // The initial expert-promotion pass (in create_backend) used
+                // the pre-clamp max_seq_len, over-reserving VRAM for a KV
+                // cache larger than the model can ever actually use. Re-run
+                // promotion with the clamped cap so the model can reclaim
+                // that headroom and promote additional MoE layers.
+                if let Some(ref promo) = promotion {
+                    let effective_concurrent = if backend.supports_kv_swap() {
+                        args.max_concurrent
+                    } else {
+                        1
+                    };
+                    let updated = ExpertPromotionPolicy {
+                        vram_ceiling_bytes: promo.vram_ceiling_bytes,
+                        max_concurrent: Some(effective_concurrent),
+                        max_seq_len: Some(clamped),
+                        chunk_tokens: promo.chunk_tokens,
+                    };
+                    backend.re_promote_experts(&updated)?;
+                }
+            }
+        }
         let mut memory_config =
             MemoryConfig::parse(args.max_seq_len, args.gpu_memory_limit.as_deref(), &device);
         memory_config.record_baseline(&device);
@@ -1744,6 +1790,12 @@ pub async fn run(mut args: Args) -> Result<()> {
                 .and_then(|kv_bpt| derive_safe_max_seq_len(&memory_config, physical_total, kv_bpt))
             {
                 Some(derived) => {
+                    // The VRAM budget alone can exceed what the model is
+                    // architecturally capable of (e.g. a 256K-context card
+                    // budget on a model with a 32K native context) — cap to
+                    // the model's own ceiling so the derived value is never
+                    // one the rotary position tables can't satisfy.
+                    let derived = clamp_to_native_context(derived, native_max_position_embeddings);
                     info!(
                         "max_seq_len unset with gpu_memory_limit set; auto-derived {derived} \
                          tokens from physical_vram={}, baseline={}",
@@ -1784,11 +1836,27 @@ pub async fn run(mut args: Args) -> Result<()> {
                         "max_seq_len is unlimited (0) with gpu_memory_limit set; a single \
                          long-running session's KV cache can grow past VRAM with no runtime \
                          eviction protection (eviction only guards against multiple competing \
-                         sequences). Could not auto-derive a safe cap for this model/device — \
-                         set --max-seq-len explicitly."
+                         sequences). Could not auto-derive a safe cap from VRAM for this \
+                         model/device; will fall back to the model's native \
+                         max_position_embeddings if known. For tighter VRAM protection, set \
+                         --max-seq-len explicitly."
                     );
                 },
             }
+        }
+        // max_seq_len is still unset here whenever --gpu-memory-limit wasn't
+        // given, or the VRAM-based derivation above couldn't run — fall back
+        // to the model's own native context instead of leaving it genuinely
+        // unbounded, since every checkpoint has a real ceiling regardless of
+        // whether the operator told us about it.
+        let defaulted =
+            clamp_to_native_context(memory_config.max_seq_len, native_max_position_embeddings);
+        if defaulted != memory_config.max_seq_len {
+            info!(
+                "max_seq_len unset; defaulting to this model's native max_position_embeddings ({defaulted})"
+            );
+            memory_config.max_seq_len = defaulted;
+            args.max_seq_len = defaulted;
         }
         let baseline_gpu = memory_config.baseline_gpu_bytes;
         info!(
@@ -2528,6 +2596,43 @@ mod dtype_tests {
             "4096",
         ]);
         assert!(result.is_err());
+    }
+
+    // ── clamp_to_native_context ──
+
+    #[test]
+    fn clamp_passes_through_when_native_unknown() {
+        // Can't bound against a ceiling we don't know — leave as-is,
+        // including the unset (0) case.
+        assert_eq!(clamp_to_native_context(0, None), 0);
+        assert_eq!(clamp_to_native_context(65_536, None), 65_536);
+    }
+
+    #[test]
+    fn clamp_defaults_unset_to_native() {
+        // Qwen3Coder-style: no --context given, model caps at 32K.
+        assert_eq!(clamp_to_native_context(0, Some(32_768)), 32_768);
+    }
+
+    #[test]
+    fn clamp_caps_explicit_value_above_native() {
+        // --context 64K on a model whose native max_position_embeddings is 32K.
+        assert_eq!(clamp_to_native_context(65_536, Some(32_768)), 32_768);
+    }
+
+    #[test]
+    fn clamp_leaves_explicit_value_within_native_untouched() {
+        assert_eq!(clamp_to_native_context(16_384, Some(32_768)), 16_384);
+    }
+
+    #[test]
+    fn clamp_treats_native_zero_as_unknown() {
+        // A malformed config.json (or a failed native-ceiling lookup)
+        // reporting native=0 must not be treated as a real ceiling. That
+        // would otherwise clamp any explicit value down to 0, which is
+        // itself the "unlimited" sentinel elsewhere, inverting the cap.
+        assert_eq!(clamp_to_native_context(0, Some(0)), 0);
+        assert_eq!(clamp_to_native_context(4096, Some(0)), 4096);
     }
 
     // ── derive_safe_max_seq_len ──
