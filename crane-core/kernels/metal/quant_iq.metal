@@ -1,5 +1,6 @@
 // llama.cpp i-quant weight kernels for the Metal backend: IQ4_NL, IQ4_XS,
-// IQ2_S, IQ3_XXS, IQ3_S and Q2_0 — the counterpart of
+// IQ2_S, IQ3_XXS, IQ3_S and Q2_0, plus the k-quants Q4_K, Q5_K and Q6_K for
+// packed MoE experts — the counterpart of
 // `kernels/sycl/quant_iq.cpp` (see `crane-core/src/quantized/iquant.rs` for
 // the block layouts). Compiled to an `MTLLibrary` at runtime by
 // `ops/quant_iq/metal.rs` via `Device::new_library_with_source` (no
@@ -8,7 +9,7 @@
 // backends read one copy of the tables.
 //
 // Every format splits a row into 32-value chunks that decode on their own (an
-// IQ4_NL block, a Q2_0 half-block, or one sub-block of a 256-value
+// IQ4_NL block, a Q2_0 half-block, or one 32-value group of a 256-value
 // super-block), so both entry points are written against one per-type
 // `decode32`:
 //
@@ -36,7 +37,7 @@ constant int QK_K = 256;
 constant int ROWS_PER_TG = 4;  // output rows (SIMD-groups) per threadgroup
 
 // Type tags; the kernel names use `type_tag` in `ops/quant_iq/metal.rs`.
-enum { IQ4_NL = 0, IQ4_XS = 1, IQ2_S = 2, IQ3_XXS = 3, IQ3_S = 4, Q2_0 = 5 };
+enum { IQ4_NL = 0, IQ4_XS = 1, IQ2_S = 2, IQ3_XXS = 3, IQ3_S = 4, Q2_0 = 5, Q4_K = 6, Q5_K = 7, Q6_K = 8 };
 
 template <int TY> inline int block_values() {
     return TY == IQ4_NL ? 32 : TY == Q2_0 ? 64 : QK_K;
@@ -48,6 +49,9 @@ template <int TY> inline int block_bytes() {
     case IQ2_S: return 2 + QK_K / 4 + QK_K / 16;
     case IQ3_XXS: return 2 + 3 * QK_K / 8;
     case IQ3_S: return 2 + 13 * QK_K / 32 + QK_K / 64;
+    case Q4_K: return 2 + 2 + 12 + QK_K / 2;
+    case Q5_K: return 2 + 2 + 12 + QK_K / 8 + QK_K / 2;
+    case Q6_K: return QK_K / 2 + QK_K / 4 + QK_K / 16 + 2;
     default: return 2 + 64 / 4; // Q2_0
     }
 }
@@ -90,7 +94,8 @@ template <int TY> inline void decode32(const device uchar *row, int c, thread fl
     } else {
         const device uchar *blk = row + size_t(c / 8) * block_bytes<TY>();
         const int ib = c % 8;
-        const float d = load_half(blk);
+        // Q6_K keeps its scale after the values.
+        const float d = load_half(blk + (TY == Q6_K ? block_bytes<TY>() - 2 : 0));
         if (TY == IQ4_XS) {
             const int scales_h = int(blk[2]) | (int(blk[3]) << 8);
             const int lo = (blk[4 + ib / 2] >> (4 * (ib % 2))) & 0xf;
@@ -131,6 +136,43 @@ template <int TY> inline void decode32(const device uchar *row, int c, thread fl
                     w[8 * l + j] = signed_val(db * grid_byte(g1, j), s, j);
                     w[8 * l + 4 + j] = signed_val(db * grid_byte(g2, j), s, j + 4);
                 }
+            }
+        } else if (TY == Q4_K || TY == Q5_K) {
+            // ggml `get_scale_min_k4`: eight 6-bit scale/min pairs in 12 bytes.
+            const device uchar *sc = blk + 4;
+            int s, m;
+            if (ib < 4) {
+                s = sc[ib] & 63;
+                m = sc[ib + 4] & 63;
+            } else {
+                s = (sc[ib + 4] & 0xf) | ((sc[ib - 4] >> 6) << 4);
+                m = (sc[ib + 4] >> 4) | ((sc[ib] >> 6) << 4);
+            }
+            const float dl = d * float(s);
+            const float ml = load_half(blk + 2) * float(m);
+            // Sub-blocks 2k and 2k+1 share 32 bytes: low nibbles, then high.
+            const device uchar *q = blk + (TY == Q5_K ? 16 + QK_K / 8 : 16) + 32 * (ib / 2);
+            const int shift = 4 * (ib % 2);
+            for (int j = 0; j < 32; ++j) {
+                int v = (q[j] >> shift) & 0xf;
+                if (TY == Q5_K) {
+                    v |= ((blk[16 + j] >> ib) & 1) << 4;
+                }
+                w[j] = dl * float(v) - ml;
+            }
+        } else if (TY == Q6_K) {
+            // Each half of the block covers 128 values in four groups of 32:
+            // group k takes the low (k < 2) or high nibbles of 32 `ql` bytes
+            // and bits 2k..2k+1 of 32 `qh` bytes, one i8 scale per 16 values.
+            const int half_idx = ib / 4;
+            const int k = ib % 4;
+            const device uchar *ql = blk + 64 * half_idx + 32 * (k & 1);
+            const device uchar *qh = blk + QK_K / 2 + 32 * half_idx;
+            const device char *sc =
+                reinterpret_cast<const device char *>(blk + QK_K / 2 + QK_K / 4) + 8 * half_idx + 2 * k;
+            for (int j = 0; j < 32; ++j) {
+                const int v = ((ql[j] >> (4 * (k >> 1))) & 0xf) | (((qh[j] >> (2 * k)) & 3) << 4);
+                w[j] = d * float(sc[j / 16]) * float(v - 32);
             }
         } else { // IQ3_S
             const device uchar *qs = blk + 2 + 8 * ib;
@@ -252,7 +294,10 @@ kernel void iq_dequant(
     IQ_KERNELS(IQ2_S, "iq2_s", T, TNAME)       \
     IQ_KERNELS(IQ3_XXS, "iq3_xxs", T, TNAME)   \
     IQ_KERNELS(IQ3_S, "iq3_s", T, TNAME)       \
-    IQ_KERNELS(Q2_0, "q2_0", T, TNAME)
+    IQ_KERNELS(Q2_0, "q2_0", T, TNAME)         \
+    IQ_KERNELS(Q4_K, "q4_k", T, TNAME)         \
+    IQ_KERNELS(Q5_K, "q5_k", T, TNAME)         \
+    IQ_KERNELS(Q6_K, "q6_k", T, TNAME)
 
 IQ_ALL_TYPES(float, "f32")
 IQ_ALL_TYPES(half, "f16")

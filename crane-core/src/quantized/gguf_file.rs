@@ -14,7 +14,11 @@ use std::sync::Arc;
 
 use super::extended_gguf::{ExtendedGgufInfo, IQuantTensorInfo};
 use super::iquant::IQuantType;
+// `Device::is_sycl` is inherent on the SYCL candle fork; this extension only
+// supplies it (as a constant `false`) for builds without that fork.
 use super::ternary::{GdnPermutation, HadamardMode, TernaryLinear, TernaryWeight};
+#[cfg(not(feature = "sycl"))]
+use crate::utils::DeviceExt;
 
 /// Opens and memory-maps a GGUF file for zero-syscall tensor reads.
 ///
@@ -150,15 +154,21 @@ impl<R: Read + Seek> Gguf<R> {
         };
         let elems: usize = info.shape.iter().product();
         let bytes = elems / info.ty.block_size() * info.ty.block_bytes();
+        let packed = self.read_tensor_data(name, info.offset, bytes)?;
+        Ok(Some((info, packed)))
+    }
+
+    /// `bytes` of tensor data starting `offset` bytes into the data section.
+    fn read_tensor_data(&mut self, name: &str, offset: u64, bytes: usize) -> Result<Vec<u8>> {
         let absolute = self
             .ct
             .tensor_data_offset
-            .checked_add(info.offset)
+            .checked_add(offset)
             .ok_or_else(|| candle_core::Error::Msg(format!("tensor {name} offset overflow")))?;
         self.reader.seek(std::io::SeekFrom::Start(absolute))?;
-        let mut packed = vec![0u8; bytes];
-        self.reader.read_exact(&mut packed)?;
-        Ok(Some((info, packed)))
+        let mut data = vec![0u8; bytes];
+        self.reader.read_exact(&mut data)?;
+        Ok(data)
     }
 
     /// Load a quantized tensor and wrap as a `LinearLayer` (`QMatMul`).
@@ -233,25 +243,150 @@ impl<R: Read + Seek> Gguf<R> {
             )?;
             return Ok(crate::ops::linear::LinearLayer::IQuant(layer));
         }
+        // On SYCL, k-quant weights take Crane's packed kernels too: decode
+        // there is bound by kernel submission, and a matvec is one launch
+        // where Candle's `QMatMul` takes three (quantize the activation,
+        // partial dots, sum).
+        if cfg!(feature = "sycl")
+            && device.is_sycl()
+            && let Some(info) = self.ct.tensor_infos.get(name)
+            && info.shape.rank() == 2
+            && let Some(ty) = IQuantType::from_k_quant(info.ggml_dtype)
+        {
+            let (rows, cols) = info.shape.dims2()?;
+            let offset = info.offset;
+            let bytes = rows * cols / ty.block_size() * ty.block_bytes();
+            let packed = self.read_tensor_data(name, offset, bytes)?;
+            let layer = super::iquant::IQuantLinear::new(ty, packed, rows, cols, device)?;
+            return Ok(crate::ops::linear::LinearLayer::IQuant(layer));
+        }
         let ws = self.load_qtensor(name, device)?;
         let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(ws))?;
         Ok(crate::ops::linear::LinearLayer::quantized(qmm))
+    }
+
+    /// The 2-D tensors `names`, which all read the same input, as one
+    /// linear layer whose output rows are theirs in order; `None` (nothing
+    /// read) unless they share a block-quantized type Candle parses and an
+    /// input width. Callers split the output with `narrow`.
+    ///
+    /// Each projection otherwise costs its own matvec plus, on CUDA, its own
+    /// activation quantization; decode is launch-bound, so projections of the
+    /// same input are worth running together. A row-major quantized matrix is
+    /// its rows' blocks back to back, so stacking rows is concatenating bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the tensors or building the layer fails.
+    pub fn linear_fused(
+        &mut self,
+        names: &[&str],
+    ) -> Result<Option<crate::ops::linear::LinearLayer>> {
+        let mut parts = Vec::with_capacity(names.len());
+        for &name in names {
+            let ternary = self
+                .ternary
+                .as_ref()
+                .is_some_and(|ctx| ctx.tensors.tensors.contains_key(name));
+            if ternary || self.iquant.contains_key(name) {
+                return Ok(None);
+            }
+            let Some(info) = self.ct.tensor_infos.get(name) else {
+                return Ok(None);
+            };
+            if info.shape.rank() != 2 {
+                return Ok(None);
+            }
+            let (rows, cols) = info.shape.dims2()?;
+            parts.push((info.ggml_dtype, rows, cols, info.offset));
+        }
+        let Some(&(dtype, _, cols, _)) = parts.first() else {
+            return Ok(None);
+        };
+        let float = matches!(dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16);
+        if float
+            || parts
+                .iter()
+                .any(|&(d, _, c, _)| d != dtype || c != cols || c % dtype.block_size() != 0)
+        {
+            return Ok(None);
+        }
+        let rows: usize = parts.iter().map(|p| p.1).sum();
+        let mut bytes = Vec::with_capacity(rows * cols / dtype.block_size() * dtype.type_size());
+        for (&name, &(_, part_rows, _, offset)) in names.iter().zip(&parts) {
+            let len = part_rows * cols / dtype.block_size() * dtype.type_size();
+            bytes.extend(self.read_tensor_data(name, offset, len)?);
+        }
+        let device = self.device.clone();
+        // As in `linear_on`: k-quants take Crane's packed kernels on SYCL.
+        if cfg!(feature = "sycl")
+            && device.is_sycl()
+            && let Some(ty) = IQuantType::from_k_quant(dtype)
+        {
+            let layer = super::iquant::IQuantLinear::new(ty, bytes, rows, cols, &device)?;
+            return Ok(Some(crate::ops::linear::LinearLayer::IQuant(layer)));
+        }
+        let storage = candle_core::quantized::QStorage::from_data(
+            std::borrow::Cow::Owned(bytes),
+            &device,
+            dtype,
+        )?;
+        let qmm = candle_core::quantized::QMatMul::from_arc(Arc::new(QTensor::new(
+            storage,
+            (rows, cols),
+        )?))?;
+        Ok(Some(crate::ops::linear::LinearLayer::quantized(qmm)))
     }
 
     /// Whether [`Self::iquant_experts`] would keep `name` packed on `device`.
     /// Cheap: reads only the header.
     #[must_use]
     pub fn has_native_iquant_experts(&self, name: &str, device: &Device) -> bool {
-        self.iquant.get(name).is_some_and(|info| {
-            info.shape.len() == 3
-                && info.ty.has_native_experts_kernel(device)
-                && super::iquant::native_enabled()
-        })
+        self.packed_experts_type(name, device).is_some()
     }
 
-    /// A packed `[experts, rows, cols]` `MoE` tensor kept in its i-quant
-    /// encoding on `device`, or `None` when `name` is not an i-quant that has
-    /// a native kernel there (callers then load it as a regular `QTensor`).
+    /// Shape of tensor `name` as its header records it (i-quants included).
+    /// Cheap: reads only the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `name` is not in the file.
+    pub fn tensor_shape(&self, name: &str) -> Result<candle_core::Shape> {
+        if let Some(info) = self.iquant.get(name) {
+            return Ok(candle_core::Shape::from(info.shape.clone()));
+        }
+        self.ct
+            .tensor_infos
+            .get(name)
+            .map(|info| info.shape.clone())
+            .ok_or_else(|| candle_core::Error::Msg(format!("GGUF tensor {name} not found")))
+    }
+
+    /// Whether `name` is an i-quant tensor (a type Candle cannot parse).
+    #[must_use]
+    pub fn is_iquant_tensor(&self, name: &str) -> bool {
+        self.iquant.get(name).is_some()
+    }
+
+    /// The encoding a packed `[experts, rows, cols]` tensor keeps on
+    /// `device`: an i-quant, or a k-quant Candle parsed itself (see
+    /// [`IQuantType::from_k_quant`]), whenever a by-id kernel runs it there.
+    fn packed_experts_type(&self, name: &str, device: &Device) -> Option<IQuantType> {
+        let ty = if let Some(info) = self.iquant.get(name) {
+            (info.shape.len() == 3 && super::iquant::native_enabled()).then_some(info.ty)?
+        } else {
+            let info = self.ct.tensor_infos.get(name)?;
+            if info.shape.rank() != 3 {
+                return None;
+            }
+            IQuantType::from_k_quant(info.ggml_dtype)?
+        };
+        ty.has_native_experts_kernel(device).then_some(ty)
+    }
+
+    /// A packed `[experts, rows, cols]` `MoE` tensor kept in its i-quant or
+    /// k-quant encoding on `device`, or `None` when no by-id kernel runs it
+    /// there (callers then load it as a regular `QTensor`).
     ///
     /// # Errors
     ///
@@ -261,14 +396,22 @@ impl<R: Read + Seek> Gguf<R> {
         name: &str,
         device: &Device,
     ) -> Result<Option<super::iquant::IQuantExperts>> {
-        if !self.has_native_iquant_experts(name, device) {
-            return Ok(None);
-        }
-        let Some((info, packed)) = self.iquant_bytes(name)? else {
+        let Some(ty) = self.packed_experts_type(name, device) else {
             return Ok(None);
         };
-        let shape = [info.shape[0], info.shape[1], info.shape[2]];
-        super::iquant::IQuantExperts::new(info.ty, packed, shape, device).map(Some)
+        let (shape, packed) = if let Some((info, packed)) = self.iquant_bytes(name)? {
+            ([info.shape[0], info.shape[1], info.shape[2]], packed)
+        } else {
+            let info = &self.ct.tensor_infos[name];
+            let (experts, rows, cols) = info.shape.dims3()?;
+            let offset = info.offset;
+            let bytes = experts * rows * cols / ty.block_size() * ty.block_bytes();
+            (
+                [experts, rows, cols],
+                self.read_tensor_data(name, offset, bytes)?,
+            )
+        };
+        super::iquant::IQuantExperts::new(ty, packed, shape, device).map(Some)
     }
 
     fn ternary_linear(&mut self, name: &str) -> Result<TernaryLinear> {
@@ -706,6 +849,49 @@ mod iquant_gguf_tests {
             }
         }
         out
+    }
+
+    /// [`Gguf::linear_fused`] stacks same-type projections into one layer
+    /// whose output is theirs side by side, and declines mixed or float ones.
+    #[test]
+    fn linear_fused_matches_separate_layers() -> candle_core::Result<()> {
+        use crate::quantized::test_util::random_blocks;
+
+        let cols = 512;
+        let q4k = |rows: usize, seed| random_blocks(IQuantType::Q4K, rows * cols / 256, seed);
+        let q6k = random_blocks(IQuantType::Q6K, 8 * cols / 256, 9);
+        let dense: Vec<u8> = (0..4 * cols)
+            .flat_map(|i| (i as f32).to_le_bytes())
+            .collect();
+        let bytes = write_gguf(&[
+            ("a", &[16, cols], 12, q4k(16, 3)),
+            ("b", &[8, cols], 12, q4k(8, 5)),
+            ("c", &[8, cols], 14, q6k),
+            ("d", &[4, cols], 0, dense),
+        ]);
+        let ct = read_content_lenient(&bytes)?;
+        let mut gg = Gguf::new(
+            ct,
+            std::io::Cursor::new(&bytes[..]),
+            Device::Cpu,
+            DType::F32,
+        );
+
+        let fused = gg.linear_fused(&["a", "b"])?.expect("same-type pair fuses");
+        let xs = Tensor::randn(0f32, 1.0, (3, cols), &Device::Cpu)?;
+        let want = Tensor::cat(
+            &[gg.linear("a")?.forward(&xs)?, gg.linear("b")?.forward(&xs)?],
+            1,
+        )?;
+        let got = fused.forward(&xs)?;
+        assert_eq!(got.dims(), &[3, 24]);
+        let diff = (got - want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0);
+
+        assert!(gg.linear_fused(&["a", "c"])?.is_none(), "mixed quant types");
+        assert!(gg.linear_fused(&["d", "d"])?.is_none(), "float tensors");
+        assert!(gg.linear_fused(&["a", "missing"])?.is_none());
+        Ok(())
     }
 
     #[test]

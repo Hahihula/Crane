@@ -109,21 +109,7 @@ impl GatedDeltaNet {
     ) -> Result<(Self, GdnDims)> {
         let prefix = format!("blk.{layer_idx}");
         let dims = GdnDims::new(cfg).with_v_head_order(VHeadOrder::Chunked);
-        let dense =
-            |gg: &mut crate::quantized::gguf_file::Gguf<R>, name: &str| -> Result<LinearLayer> {
-                Ok(LinearLayer::Standard(candle_nn::Linear::new(
-                    gg.dequant_tensor(&format!("{prefix}.{name}"))?,
-                    None,
-                )))
-            };
-        let in_proj_b = dense(gg, "ssm_beta.weight")?;
-        let in_proj_a = dense(gg, "ssm_alpha.weight")?;
-        let input_proj = GdnInputProjection::Split {
-            in_proj_qkv: gg.linear(&format!("{prefix}.attn_qkv.weight"))?,
-            in_proj_z: gg.linear(&format!("{prefix}.attn_gate.weight"))?,
-            in_proj_b,
-            in_proj_a,
-        };
+        let input_proj = Self::gguf_input_projection(gg, &prefix)?;
         // GGUF stores the conv kernel 2-D; crane expects HF's
         // `[conv_dim, 1, kernel]`.
         let conv1d_weight = gg
@@ -150,6 +136,41 @@ impl GatedDeltaNet {
             &dims,
         )?;
         Ok((gdn, dims))
+    }
+
+    /// The four split projections, stacked where they can run as one matvec
+    /// (see [`GdnInputProjection::Fused`]): `attn_qkv` with `attn_gate` when
+    /// they share a quant type, and `ssm_beta` with `ssm_alpha` as one dense
+    /// matrix, dequantized like the safetensors path keeps them (they feed
+    /// the numerically sensitive β/decay path).
+    ///
+    /// Decode results are bit-identical to the separate layers; prefill's
+    /// tiled quantized matmul rounds differently for the taller matrix
+    /// (~1e-6 relative). Quantizing β/α too, so all four run as one matvec,
+    /// measured another ~1.5% of decode on Ornith-1.5-35B but is not done,
+    /// for that numerical reason.
+    fn gguf_input_projection<R: std::io::Read + std::io::Seek>(
+        gg: &mut crate::quantized::gguf_file::Gguf<R>,
+        prefix: &str,
+    ) -> Result<GdnInputProjection> {
+        use super::projection::GdnPart;
+
+        let [qkv, z, b, a] = ["attn_qkv", "attn_gate", "ssm_beta", "ssm_alpha"]
+            .map(|n| format!("{prefix}.{n}.weight"));
+        let mut groups = Vec::with_capacity(3);
+        match gg.linear_fused(&[&qkv, &z])? {
+            Some(l) => groups.push((l, vec![GdnPart::Qkv, GdnPart::Z])),
+            None => {
+                groups.push((gg.linear(&qkv)?, vec![GdnPart::Qkv]));
+                groups.push((gg.linear(&z)?, vec![GdnPart::Z]));
+            },
+        }
+        let ba = Tensor::cat(&[gg.dequant_tensor(&b)?, gg.dequant_tensor(&a)?], 0)?;
+        groups.push((
+            LinearLayer::Standard(candle_nn::Linear::new(ba, None)),
+            vec![GdnPart::B, GdnPart::A],
+        ));
+        Ok(GdnInputProjection::Fused(groups))
     }
 
     /// Assemble from already-loaded parts, deriving the per-token constants.
@@ -208,6 +229,28 @@ impl GatedDeltaNet {
             let mixed_qkv = projected.conv_input(dims, batch_size, seq_len)?;
             causal_conv1d(&mixed_qkv, &self.conv1d_weight, dims, cache)
         })?;
+
+        // 3-6 in one launch on SYCL.
+        #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
+        if mixed_qkv.device().is_sycl() && std::env::var("CRANE_GDN_PORTABLE").is_err() {
+            let fused = timed(Span::GdnRecur, || {
+                super::sycl_backend::gdn_fused_sycl(
+                    &mixed_qkv,
+                    &projected.a,
+                    &projected.b,
+                    &self.derived.gates.neg_exp_a_log,
+                    &self.derived.gates.dt_bias,
+                    &cache.recurrent_state,
+                    dims,
+                )
+            })?;
+            if let Some((y, state)) = fused {
+                cache.recurrent_state = state;
+                return timed(Span::GdnFinish, || {
+                    self.finish_forward(y, projected.z, batch_size, seq_len)
+                });
+            }
+        }
 
         // 3-5. Per-head split, QK L2-norm, and the β/g gates.
         let (q, k, v, beta, g) = timed(Span::GdnQkv, || -> Result<_> {

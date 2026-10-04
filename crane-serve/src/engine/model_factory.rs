@@ -194,6 +194,15 @@ struct MistralConfig {
 pub fn detect_model_type(model_path: &str) -> ModelType {
     let path = Path::new(model_path);
 
+    // A GGUF file records its architecture in its own header, which beats a
+    // config.json that merely sits in the same directory: GGUFs often live
+    // in a shared models folder whose config.json belongs to another
+    // checkpoint (and a vision `config.json` would route the GGUF to a VLM
+    // loader that only reads model directories).
+    if let Some(mt) = detect_from_gguf_header(path) {
+        return mt;
+    }
+
     // Locate config.json (same dir for dir paths; parent dir for GGUF files).
     let config_path = if path.is_file() {
         path.parent().map(|p| p.join("config.json"))
@@ -234,7 +243,8 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
                 "qwen3" | "qwen3moe" => return ModelType::Qwen3,
                 // Qwen 3.6 / 3.8 27B ship `model_type: "qwen3_5"`; the 3.6/3.8
                 // spellings are only here for retagged third-party repacks.
-                "qwen3_5" | "qwen3.5" | "qwen3_6" | "qwen3.6" | "qwen3_8" | "qwen3.8" => {
+                "qwen3_5" | "qwen3_5_moe" | "qwen3.5" | "qwen3_6" | "qwen3.6" | "qwen3_8"
+                | "qwen3.8" => {
                     return if config.vision_config.is_some() {
                         ModelType::Qwen3_5VL
                     } else {
@@ -340,13 +350,7 @@ pub fn detect_model_type(model_path: &str) -> ModelType {
         return ModelType::VoxtralTTS;
     }
 
-    // 4. GGUF files: the architecture is recorded in the header — far more
-    // reliable than the path name.
-    if let Some(mt) = detect_from_gguf_header(path) {
-        return mt;
-    }
-
-    // 5. Heuristic: check the model path name
+    // 4. Heuristic: check the model path name
     let path_lower = model_path.to_lowercase();
     if path_lower.contains("voxtral") {
         ModelType::VoxtralTTS
@@ -502,8 +506,10 @@ fn detect_from_gguf_header(path: &Path) -> Option<ModelType> {
     match arch.as_str() {
         // llama.cpp writes "qwen35" for Qwen 3.5, 3.6 and 3.8 alike; the
         // 36/38 spellings guard against a future converter renaming it.
-        "qwen35" | "qwen3_5" | "qwen3.5" | "qwen36" | "qwen3_6" | "qwen3.6" | "qwen38"
-        | "qwen3_8" | "qwen3.8" => Some(ModelType::Qwen3_5),
+        // "qwen35moe" is the MoE variant (e.g. Ornith-1.5-35B-A3B), which the
+        // same loader handles: experts are detected per layer.
+        "qwen35" | "qwen35moe" | "qwen3_5" | "qwen3.5" | "qwen36" | "qwen3_6" | "qwen3.6"
+        | "qwen38" | "qwen3_8" | "qwen3.8" => Some(ModelType::Qwen3_5),
         "qwen3" | "qwen3moe" => Some(ModelType::Qwen3),
         "qwen4exp" => Some(ModelType::Qwen4Exp),
         "qwen2" => Some(ModelType::Qwen25),
@@ -1202,6 +1208,55 @@ mod tests {
         .unwrap();
         let result = detect_model_type(dir.path().to_str().unwrap());
         assert_eq!(result, ModelType::Qwen4Exp);
+    }
+
+    /// Qwen 3.5 MoE (e.g. Ornith-1.5-35B-A3B): `qwen3_5_moe` in config.json,
+    /// `qwen35moe` in a GGUF header; both load through the Qwen 3.5 backend.
+    #[test]
+    fn detect_qwen3_5_moe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "qwen3_5_moe"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_model_type(dir.path().to_str().unwrap()),
+            ModelType::Qwen3_5
+        );
+
+        // The GGUF goes in a directory of its own so no config.json is consulted.
+        let gguf_dir = tempfile::tempdir().unwrap();
+        let gguf = gguf_dir.path().join("Ornith-1.5-35B-Q4_K_M.gguf");
+        let mut file = b"GGUF".to_vec();
+        file.extend(3u32.to_le_bytes());
+        file.extend(0u64.to_le_bytes());
+        file.extend(1u64.to_le_bytes());
+        let key = b"general.architecture";
+        file.extend((key.len() as u64).to_le_bytes());
+        file.extend(key);
+        file.extend(8u32.to_le_bytes());
+        let value = b"qwen35moe";
+        file.extend((value.len() as u64).to_le_bytes());
+        file.extend(value);
+        std::fs::write(&gguf, &file).unwrap();
+        assert_eq!(
+            detect_model_type(gguf.to_str().unwrap()),
+            ModelType::Qwen3_5
+        );
+
+        // In a shared folder beside another checkpoint's vision config.json,
+        // the GGUF's own header still decides (the VLM loader cannot read a
+        // GGUF file).
+        std::fs::write(
+            gguf_dir.path().join("config.json"),
+            r#"{"model_type": "qwen3_5_moe", "vision_config": {}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_model_type(gguf.to_str().unwrap()),
+            ModelType::Qwen3_5
+        );
     }
 
     /// llama.cpp names the architecture `qwen4exp` in the GGUF header.

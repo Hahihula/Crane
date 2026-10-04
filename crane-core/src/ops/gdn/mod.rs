@@ -63,8 +63,8 @@ pub use conv::causal_conv1d;
 pub use cuda_backend::gdn_recurrence_cuda;
 pub use layer::GatedDeltaNet;
 pub use norm::{GateActivation, RmsNormGated};
-pub use projection::{GdnInputProjection, GdnInputProjectionKind, GdnProjection};
+pub use projection::{GdnInputProjection, GdnInputProjectionKind, GdnPart, GdnProjection};
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 pub use rocm_backend::gdn_recurrence_rocm;
 #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
-pub use sycl_backend::gdn_recurrence_sycl;
+pub use sycl_backend::{gdn_fused_sycl, gdn_recurrence_sycl};

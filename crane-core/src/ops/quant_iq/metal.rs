@@ -5,7 +5,7 @@
 //! Mirrors [`super::sycl`]: activations are not quantized to int8 for a
 //! `dp4a`-style dot product — both entry points decode weights on the fly and
 //! accumulate a plain float dot product. Every [`IQuantType`] has a Metal
-//! kernel, including the by-expert-id matvec packed `MoE` experts need.
+//! kernel (the k-quants are only reached by packed `MoE` experts), including the by-expert-id matvec packed `MoE` experts need.
 //! F32 / F16 / BF16 outputs are supported; on older Macs without `bfloat`
 //! (Metal < 3.0) the BF16 kernels are absent from the compiled library and
 //! the BF16 path returns an error so the caller can fall back to the CPU
@@ -28,13 +28,6 @@ const GRIDS_H: &str = include_str!("../../../kernels/sycl/iq_grids.h");
 /// Output rows (SIMD-groups of 32) per matvec threadgroup; `ROWS_PER_TG` in
 /// the kernel.
 const ROWS_PER_TG: usize = 4;
-
-/// Pair count from which [`matvec_indexed`] switches from the by-id matvec
-/// (every pair decodes its expert on its own, ids stay on the device) to
-/// [`super::indexed_via_gemm`] (one host sync for the ids, then each routed
-/// expert is decoded once and multiplied by candle's Metal GEMM). The same
-/// crossover as SYCL's; not tuned on Apple GPUs yet.
-const GEMM_MIN_PAIRS: usize = 2048;
 
 /// `MatvecParams` in the kernel.
 #[repr(C)]
@@ -66,6 +59,9 @@ fn type_tag(ty: IQuantType) -> &'static str {
         IQuantType::Iq3Xxs => "iq3_xxs",
         IQuantType::Iq3S => "iq3_s",
         IQuantType::Q2_0 => "q2_0",
+        IQuantType::Q4K => "q4_k",
+        IQuantType::Q5K => "q5_k",
+        IQuantType::Q6K => "q6_k",
     }
 }
 
@@ -131,8 +127,8 @@ pub fn matvec(
 /// packed `[experts, output_rows, cols]` tensor) times activation row
 /// `p / x_div` of `input` (`[_, cols]`). Returns `[ids.len(), output_rows]`.
 ///
-/// Below [`GEMM_MIN_PAIRS`] `ids` (`U32`, same device) is never read on the
-/// host.
+/// `ids` (`U32`, same device) is never read on the host. Prefill-sized
+/// routings take [`super::GemmPlan`] instead (see `IQuantExperts`).
 ///
 /// # Errors
 ///
@@ -154,11 +150,6 @@ pub fn matvec_indexed(
     }
     let ids = ids.flatten_all()?.contiguous()?;
     let pairs = ids.elem_count();
-    if pairs >= GEMM_MIN_PAIRS {
-        return super::indexed_via_gemm(input, &ids, x_div, output_rows, cols, out_dtype, |e| {
-            dequantize_experts(packed, ty, e, output_rows, cols, DType::F16)
-        });
-    }
     launch_matvec(
         input,
         packed,

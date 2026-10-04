@@ -297,3 +297,42 @@ extern "C" int crane_atan2_sycl(void *queue, int dtype, const void *y, const voi
     return 1;
   }
 }
+
+// `MoE` combine (`ops/fused_ops/moe_combine.rs`): `out[t, h] = sum_k w[t, k] *
+// y[row(t, k), h]`, with `row(t, k) = rows[t * K + k]`, or `t * K + k` when
+// `rows` is null. `y` is f32 (`y_f16 == 0`) or f16; `out` likewise by
+// `out_f16`. The sum runs over `k` in order, in f32, as the op chain it
+// replaces does. Returns 0 on success, 1 on a SYCL error.
+extern "C" int crane_moe_combine_sycl(void *queue, const void *y, int y_f16, const uint32_t *rows,
+                                      const float *w, void *out, int out_f16, int tokens, int K,
+                                      int H) {
+  try {
+    auto &q = *static_cast<sycl::queue *>(queue);
+    auto run = [&]<typename Y, typename O>(const Y *yp, O *op) {
+      q.parallel_for(sycl::range<2>(size_t(tokens), size_t(H)), [=](sycl::id<2> id) {
+        const size_t t = id[0], h = id[1];
+        float acc = 0.f;
+        for (int k = 0; k < K; ++k) {
+          const size_t p = t * size_t(K) + size_t(k);
+          const size_t r = rows ? size_t(rows[p]) : p;
+          acc += w[p] * static_cast<float>(yp[r * size_t(H) + h]);
+        }
+        op[t * size_t(H) + h] = static_cast<O>(acc);
+      });
+    };
+    using half = sycl::half;
+    if (y_f16) {
+      const auto *yp = static_cast<const half *>(y);
+      out_f16 ? run(yp, static_cast<half *>(out)) : run(yp, static_cast<float *>(out));
+    } else {
+      const auto *yp = static_cast<const float *>(y);
+      out_f16 ? run(yp, static_cast<half *>(out)) : run(yp, static_cast<float *>(out));
+    }
+    return 0;
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[crane sycl] %s: %s\n", __func__, e.what());
+    return 1;
+  } catch (...) {
+    return 1;
+  }
+}

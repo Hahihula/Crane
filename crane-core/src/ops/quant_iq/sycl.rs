@@ -24,6 +24,7 @@ unsafe extern "C" {
         queue: *mut c_void,
         ty: i32,
         dtype: i32,
+        in_dtype: i32,
         packed: *const c_void,
         expert_stride: usize,
         ids: *const c_void,
@@ -58,6 +59,9 @@ fn type_tag(ty: IQuantType) -> i32 {
         IQuantType::Iq3Xxs => 3,
         IQuantType::Iq3S => 4,
         IQuantType::Q2_0 => 5,
+        IQuantType::Q4K => 6,
+        IQuantType::Q5K => 7,
+        IQuantType::Q6K => 8,
     }
 }
 
@@ -123,7 +127,8 @@ pub fn matvec(
 /// packed `[experts, output_rows, cols]` tensor) times activation row
 /// `p / x_div` of `input` (`[_, cols]`). Returns `[ids.len(), output_rows]`.
 ///
-/// `ids` is `U32` on the same device and never read on the host.
+/// `ids` is `U32` on the same device and never read on the host. Prefill-sized
+/// routings take [`super::GemmPlan`] instead (see `IQuantExperts`).
 ///
 /// # Errors
 ///
@@ -145,11 +150,6 @@ pub fn matvec_indexed(
     }
     let ids = ids.flatten_all()?.contiguous()?;
     let pairs = ids.elem_count();
-    if pairs >= GEMM_MIN_PAIRS {
-        return super::indexed_via_gemm(input, &ids, x_div, output_rows, cols, out_dtype, |e| {
-            dequantize_experts(packed, ty, e, output_rows, cols, DType::F16)
-        });
-    }
     launch_matvec(
         input,
         packed,
@@ -163,17 +163,6 @@ pub fn matvec_indexed(
     )
 }
 
-/// Pair count from which [`matvec_indexed`] switches from the by-id matvec
-/// (every pair decodes its expert on its own, ids stay on the device) to
-/// [`super::indexed_via_gemm`] (one host sync for the ids, then each routed expert
-/// is decoded once and multiplied on the XMX engines by oneMKL).
-///
-/// The GEMM path costs roughly a fixed ~9 ms per projection once most
-/// experts are routed (decoding them dominates) plus ~3 ms per 1000 tokens;
-/// the matvec grows linearly from ~45 us per token. On an Arc Pro B70 with
-/// Qwen3.8-Flash-Next shapes (256 experts, top-10) they cross at ~200-250
-/// tokens, i.e. ~2k pairs.
-const GEMM_MIN_PAIRS: usize = 2048;
 #[allow(clippy::too_many_arguments)]
 fn launch_matvec(
     input: &Tensor,
@@ -189,13 +178,19 @@ fn launch_matvec(
     let dev = input.device().as_sycl_device()?.clone();
     let queue = dev.queue().native_ptr();
     let dtype = dtype_tag(out_dtype)?;
-    let input = input.to_dtype(DType::F32)?.contiguous()?;
+    // F16 activations go in as they are; anything else is widened to F32.
+    let in_dtype = if input.dtype() == DType::F16 {
+        DType::F16
+    } else {
+        DType::F32
+    };
+    let input = input.to_dtype(in_dtype)?.contiguous()?;
     let expert_stride = output_rows * (cols / ty.block_size()) * ty.block_bytes();
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_ptr = byte_ptr(
         &input_storage,
-        input_layout.start_offset() * DType::F32.size_in_bytes(),
+        input_layout.start_offset() * in_dtype.size_in_bytes(),
         "matvec input",
     )?;
     let (packed_storage, packed_layout) = packed.storage_and_layout();
@@ -222,6 +217,7 @@ fn launch_matvec(
             queue,
             type_tag(ty),
             dtype,
+            dtype_tag(in_dtype)?,
             packed_ptr,
             expert_stride,
             ids_ptr,

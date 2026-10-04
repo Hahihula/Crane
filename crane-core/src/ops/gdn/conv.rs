@@ -27,6 +27,11 @@ pub fn causal_conv1d(
     cache: &mut GdnLayerCache,
 ) -> Result<Tensor> {
     let (_, seq_len, _) = x.dims3()?;
+    // Prefill and decode may run in different dtypes (see `Qwen3_5TextModel`'s
+    // `attn_dtype`); the small state follows the pass it feeds.
+    if cache.conv_state.dtype() != x.dtype() {
+        cache.conv_state = cache.conv_state.to_dtype(x.dtype())?;
+    }
     if seq_len == 1 {
         return decode_conv1d(x, conv1d_weight, cache);
     }

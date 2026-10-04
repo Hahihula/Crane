@@ -148,6 +148,11 @@ impl LinearLayer {
 impl Module for LinearLayer {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
+            // A dense weight kept in another dtype than the activations (e.g.
+            // F32 side weights during a BF16 prefill) runs in its own dtype.
+            Self::Standard(l) if l.weight().dtype() != xs.dtype() => l
+                .forward(&xs.to_dtype(l.weight().dtype())?)?
+                .to_dtype(xs.dtype()),
             Self::Standard(l) => l.forward(xs),
             Self::Quantized(q) => q.forward(xs),
             Self::Ternary(t) => t.forward(xs),

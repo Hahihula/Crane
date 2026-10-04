@@ -28,6 +28,29 @@ pub enum GdnInputProjectionKind {
     Split,
 }
 
+/// One of the four `Split` projections, as a run of a fused output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GdnPart {
+    /// `[Q | K | V]`, `conv_dim` wide.
+    Qkv,
+    /// The gate, `value_dim` wide.
+    Z,
+    /// β, `num_v_heads` wide.
+    B,
+    /// A, `num_v_heads` wide.
+    A,
+}
+
+impl GdnPart {
+    fn width(self, dims: &super::config::GdnDims) -> usize {
+        match self {
+            Self::Qkv => dims.conv_dim,
+            Self::Z => dims.value_dim,
+            Self::B | Self::A => dims.num_v_heads,
+        }
+    }
+}
+
 /// Holds the four (or two, in `Grouped` mode) linear projections.
 pub enum GdnInputProjection {
     Grouped {
@@ -40,6 +63,12 @@ pub enum GdnInputProjection {
         in_proj_b: LinearLayer,
         in_proj_a: LinearLayer,
     },
+    /// The `Split` projections with some stacked into one matrix, so they
+    /// run as one matvec: each layer's output is its parts' columns in
+    /// order. Every part appears exactly once. Decode is launch-bound, and
+    /// each projection costs a matvec (plus, for a quantized weight on CUDA,
+    /// an activation quantization).
+    Fused(Vec<(LinearLayer, Vec<GdnPart>)>),
 }
 
 impl GdnInputProjection {
@@ -125,6 +154,26 @@ impl GdnInputProjection {
                 batch_size,
                 seq_len,
             ),
+            Self::Fused(groups) => {
+                let mut parts: [Option<Tensor>; 4] = Default::default();
+                for (layer, group) in groups {
+                    let out = layer.forward(x)?;
+                    let mut offset = 0;
+                    for &part in group {
+                        let width = part.width(dims);
+                        parts[part as usize] = Some(if group.len() == 1 {
+                            out.clone()
+                        } else {
+                            out.narrow(D::Minus1, offset, width)?
+                        });
+                        offset += width;
+                    }
+                }
+                let [Some(qkv), Some(z), Some(b), Some(a)] = parts else {
+                    candle_core::bail!("fused GDN projection is missing a part")
+                };
+                GdnProjection::from_split(qkv, z, b, a, dims, batch_size, seq_len)
+            },
         }
     }
 }

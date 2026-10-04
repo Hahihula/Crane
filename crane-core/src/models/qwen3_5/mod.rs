@@ -25,6 +25,7 @@ pub use config::{Config, LayerType, RopeParameters, TextConfig, VisionConfig, lo
 pub use kv_cache::{KvCache, KvCacheBackend, KvCacheKind};
 pub use model::StateSnapshot;
 pub use model::{Model, ModelFormat, Qwen3_5TextModel};
+pub(crate) use modeling::attn_query_slice;
 pub use modeling::{
     AttentionDims, DecoderLayer, FullAttention, MRotaryEmbedding, Mlp, Qwen35RmsNorm, RopeSlice,
     apply_mrope,
