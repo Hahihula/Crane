@@ -178,7 +178,7 @@ struct HfConfig {
     model_type: Option<String>,
     architectures: Option<Vec<String>>,
     vision_config: Option<serde_json::Value>,
-    /// VoxCPM2's `config.json` uses a **singular** `"architecture"` string
+    /// `VoxCPM2`'s `config.json` uses a **singular** `"architecture"` string
     /// field (not the plural HF-style `"architectures"` list) — genuinely
     /// distinctive, checked separately in `detect_model_type`.
     architecture: Option<String>,

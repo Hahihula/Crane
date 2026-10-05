@@ -6,7 +6,7 @@
 //! - Top-k / top-p filtering
 //!
 //! All routines are designed for zero-copy GPU operation where possible: on a
-//! device with the fused ops (CUDA or ROCm) the only host transfer per token is
+//! device with the fused ops (CUDA or `ROCm`) the only host transfer per token is
 //! the sampled index itself. Set `CRANE_SAMPLE_TRACE=1` to log the path taken
 //! and its latency at `debug` level.
 
@@ -24,7 +24,7 @@ use super::sequence::Sequence;
 /// by real kernels, i.e. whether the device-side sampling path applies.
 ///
 /// Off it, sampling copies the whole logits vector to the host and sorts there
-/// — ~1 MB and ~24 ms per decoded token at a 250 K vocabulary. ROCm used to be
+/// — ~1 MB and ~24 ms per decoded token at a 250 K vocabulary. `ROCm` used to be
 /// excluded here because the fused ops were CUDA-only; they are not any more.
 #[must_use]
 fn has_gpu_sampling(device: &Device) -> bool {

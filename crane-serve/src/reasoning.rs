@@ -43,7 +43,7 @@ impl ThinkingOptions {
     ///
     /// `chat_template_kwargs` is the vLLM/SGLang convention
     /// (`{"chat_template_kwargs": {"enable_thinking": false}}`);
-    /// `reasoning_effort` is OpenAI's own top-level field. When both carry an
+    /// `reasoning_effort` is `OpenAI`'s own top-level field. When both carry an
     /// effort, `chat_template_kwargs` wins — it is the more specific,
     /// template-targeted channel.
     pub fn from_request(

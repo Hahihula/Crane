@@ -35,7 +35,7 @@ use super::vlm;
 /// `POST /generate` — SGLang-style native generation.
 ///
 /// Accepts either `text` (prompt string) or `input_ids` (pre-tokenized).
-/// Returns generated text + meta_info, or SSE stream if `stream: true`.
+/// Returns generated text + `meta_info`, or SSE stream if `stream: true`.
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GenerateRequest>,

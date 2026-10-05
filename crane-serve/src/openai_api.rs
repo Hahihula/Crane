@@ -40,7 +40,7 @@ pub struct ChatCompletionRequest {
     /// EOS, a stop sequence, cancellation, or the server context limit.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
-    /// OpenAI's newer alias for `max_tokens`; takes precedence when present.
+    /// `OpenAI`'s newer alias for `max_tokens`; takes precedence when present.
     pub max_completion_tokens: Option<usize>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
@@ -61,13 +61,13 @@ pub struct ChatCompletionRequest {
     /// Reasoning models read `enable_thinking` and `reasoning_effort` from
     /// here; see [`crate::reasoning::ThinkingOptions`].
     pub chat_template_kwargs: Option<serde_json::Value>,
-    /// OpenAI's top-level reasoning budget (`low` / `medium` / `xhigh` for the
+    /// `OpenAI`'s top-level reasoning budget (`low` / `medium` / `xhigh` for the
     /// Qwen 3.6+ templates). `chat_template_kwargs` takes precedence.
     pub reasoning_effort: Option<String>,
     /// Function/tool specs, passed to the chat template verbatim — the
     /// template owns the prompt syntax (`tool | tojson` for the Qwen family).
     pub tools: Option<Vec<Tool>>,
-    /// Accepted for OpenAI compatibility. `"none"` suppresses the tool
+    /// Accepted for `OpenAI` compatibility. `"none"` suppresses the tool
     /// block. Other values (`"auto"`, `"required"`, or a specific named
     /// tool) are advisory: the engine grammar-constrains the tool-call XML
     /// *skeleton* once triggered (see `engine::grammar`), but does not yet
@@ -112,7 +112,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FunctionCall {
     pub name: String,
-    /// JSON-encoded arguments, per the OpenAI wire format — a *string*, not an
+    /// JSON-encoded arguments, per the `OpenAI` wire format — a *string*, not an
     /// object, so clients must parse it themselves.
     pub arguments: String,
 }
@@ -238,7 +238,7 @@ impl ChatMessage {
 pub enum ChatMessageContent {
     /// Plain text content (backward compatible).
     Text(String),
-    /// Structured content with text and/or image_url parts.
+    /// Structured content with text and/or `image_url` parts.
     Parts(Vec<ContentPart>),
 }
 
@@ -252,7 +252,7 @@ pub enum ContentPart {
     /// Image URL content.
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrl },
-    /// Image content (alternative key used by some OpenAI clients).
+    /// Image content (alternative key used by some `OpenAI` clients).
     #[serde(rename = "image")]
     Image { image_url: Option<ImageUrl> },
 }
@@ -384,7 +384,7 @@ pub struct CompletionRequest {
     /// EOS, a stop sequence, cancellation, or the server context limit.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
-    /// OpenAI's newer alias for `max_tokens`; takes precedence when present.
+    /// `OpenAI`'s newer alias for `max_tokens`; takes precedence when present.
     pub max_completion_tokens: Option<usize>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
@@ -532,7 +532,7 @@ pub struct SpeechRequest {
     pub model: String,
     /// The text to synthesize.
     pub input: String,
-    /// Voice name (speaker ID or preset for CustomVoice models).
+    /// Voice name (speaker ID or preset for `CustomVoice` models).
     #[serde(default)]
     pub voice: Option<String>,
     /// Language hint as an ISO 639-1 code (e.g. "zh", "en", "ja") or "auto".
@@ -556,19 +556,19 @@ pub struct SpeechRequest {
     /// Max codec tokens to generate (controls max duration).
     #[serde(default = "default_audio_max_tokens")]
     pub max_tokens: usize,
-    /// VoxCPM2 only: flow-matching (CFM) sampler steps per audio frame.
+    /// `VoxCPM2` only: flow-matching (CFM) sampler steps per audio frame.
     /// Omitted keeps the model default (10). Lower = faster generation for a
-    /// modest quality cost — the CFM decoder dominates VoxCPM2 latency.
+    /// modest quality cost — the CFM decoder dominates `VoxCPM2` latency.
     #[serde(default)]
     pub cfm_steps: Option<usize>,
-    /// VoxCPM2 only: classifier-free guidance strength for the CFM sampler.
+    /// `VoxCPM2` only: classifier-free guidance strength for the CFM sampler.
     /// Omitted keeps the model default (2.0).
     #[serde(default)]
     pub cfg_scale: Option<f64>,
     /// Stream the audio as it is generated (chunked `audio/pcm`, 16-bit LE
     /// mono at the model's sample rate — see the `X-Sample-Rate` response
     /// header). Requires `response_format: "pcm"` and is not supported with
-    /// voice cloning. Only VoxCPM2 generates incrementally today; other TTS
+    /// voice cloning. Only `VoxCPM2` generates incrementally today; other TTS
     /// models fall back to emitting the whole clip as one chunk.
     #[serde(default)]
     pub stream: bool,
