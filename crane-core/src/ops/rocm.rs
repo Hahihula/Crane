@@ -1,14 +1,14 @@
 //! Shared plumbing for Crane's own ROCm/HIP kernels.
 //!
 //! Crane owns two kernel sources (`kernels/cuda/gdn.cu`, `kernels/cuda/fused_ops.cu`).
-//! On CUDA they are compiled to PTX at build time; on ROCm candle compiles the
+//! On CUDA they are compiled to PTX at build time; on `ROCm` candle compiles the
 //! *same* sources with `hipcc` on first use and caches the code object on disk
 //! (`RocmDevice::get_or_load_custom_func`). What each launcher then needs is
 //! the same three things — a device pointer into a tensor, a kernel launch, and
 //! a way to hand an output buffer back as a `Tensor` — so they live here rather
 //! than being written twice.
 //!
-//! Raw pointers, not typed slices: candle's ROCm storage exposes
+//! Raw pointers, not typed slices: candle's `ROCm` storage exposes
 //! `SendSyncDeviceMemory<T>` with a `ptr_at`, and `hipModuleLaunchKernel` takes
 //! a `*mut c_void` per argument, so there is no equivalent of cudarc's typed
 //! `builder.arg(&slice)`.
@@ -21,11 +21,11 @@ use candle_core::rocm_backend::{
 };
 use candle_core::{DType, Layout, Result, Shape, Storage, Tensor};
 
-/// The ROCm slice behind a tensor's storage, or an error naming the operand.
+/// The `ROCm` slice behind a tensor's storage, or an error naming the operand.
 ///
 /// # Errors
 ///
-/// Returns an error if `storage` is not ROCm storage.
+/// Returns an error if `storage` is not `ROCm` storage.
 pub fn rocm_slice<'a>(storage: &'a Storage, what: &str) -> Result<&'a RocmStorageSlice> {
     match storage {
         Storage::Rocm(s) => Ok(&s.slice),
@@ -40,7 +40,7 @@ pub fn rocm_slice<'a>(storage: &'a Storage, what: &str) -> Result<&'a RocmStorag
 ///
 /// # Errors
 ///
-/// Returns an error if `storage` is not ROCm storage, if `layout` is not
+/// Returns an error if `storage` is not `ROCm` storage, if `layout` is not
 /// contiguous, or if the slice's dtype is not `dtype`.
 pub fn device_ptr(
     storage: &Storage,
@@ -210,7 +210,7 @@ impl RocmElem for f32 {
 /// # Safety
 ///
 /// `kernel` (found in `source`) must have exactly the signature described
-/// above for dtype `T`. `a_ptr` and `b_ptr` must be valid ROCm device
+/// above for dtype `T`. `a_ptr` and `b_ptr` must be valid `ROCm` device
 /// pointers on `dev`, of dtype `T`, each addressing at least `n` contiguous
 /// elements, and must remain valid until the launched kernel completes on
 /// `dev`'s stream — the same caller obligation [`device_ptr`] documents for
@@ -243,7 +243,7 @@ pub unsafe fn launch_binary_elementwise<T: RocmElem>(
     Ok(T::wrap_slice(dst))
 }
 
-/// Full ROCm forward pass for a binary elementwise `CustomOp2`.
+/// Full `ROCm` forward pass for a binary elementwise `CustomOp2`.
 ///
 /// Handles shape validation, dtype dispatch, pointer extraction, kernel
 /// launch and result wrapping — the entire `rocm_fwd` body that every binary

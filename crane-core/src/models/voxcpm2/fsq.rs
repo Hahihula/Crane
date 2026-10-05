@@ -1,5 +1,5 @@
 //! Scalar-quantization bottleneck applied to `base_lm`'s hidden state at
-//! audio positions — VoxCPM2's "tokenizer-free" discretization: a
+//! audio positions — `VoxCPM2`'s "tokenizer-free" discretization: a
 //! differentiable-in-training, hard-round-in-inference bottleneck instead of
 //! a VQ codebook lookup. Port of `layers/scalar_quantization_layer.py`
 //! (inference path only — no straight-through estimator, this crate never
@@ -47,7 +47,7 @@ impl ScalarQuantizationLayer {
 /// learns to push many dimensions right up against those boundaries — so
 /// the tie-breaking convention isn't a rounding-error footnote here, it's
 /// a real, discrete per-dimension divergence source. Found live: root cause
-/// of a multi-turn VoxCPM2 generation bug where autoregressively re-quantizing
+/// of a multi-turn `VoxCPM2` generation bug where autoregressively re-quantizing
 /// this layer's own prior output compounded these per-step discrete jumps
 /// into complete generation collapse after a few steps, reproducible
 /// identically in both bf16 and f32 (ruling out ordinary precision loss) —

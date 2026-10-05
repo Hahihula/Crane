@@ -1,4 +1,4 @@
-//! Micro-benchmark for the Prism PTQ1_0/PQ2_0 `TernaryLinear` CUDA path.
+//! Micro-benchmark for the Prism `PTQ1_0/PQ2_0` `TernaryLinear` CUDA path.
 //!
 //! Usage: `ternary_bench [output_rows] [cols] [input_rows] [iters]`
 //! Defaults to a representative Bonsai-27B decode projection: 5120x5120,

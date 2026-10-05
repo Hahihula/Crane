@@ -1,4 +1,4 @@
-//! Causal Conv1D over the QKV channels, in pure Candle ops.
+//! Causal `Conv1D` over the QKV channels, in pure Candle ops.
 //!
 //! Split out of `backend.rs`, which is at the workspace 400-line cap.
 //!
@@ -11,7 +11,7 @@ use candle_core::{Result, Tensor};
 use super::cache::GdnLayerCache;
 use super::config::GdnDims;
 
-/// Causal Conv1D over the QKV channels, continuing from the cached state.
+/// Causal `Conv1D` over the QKV channels, continuing from the cached state.
 ///
 /// One implementation covers every call shape: the first prefill (the state is
 /// zeros, so prepending it *is* the left zero-pad), a mid-prompt prefill chunk,

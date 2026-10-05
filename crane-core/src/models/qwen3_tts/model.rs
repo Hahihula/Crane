@@ -140,7 +140,7 @@ impl Model {
     /// Load from a HuggingFace-style directory.
     ///
     /// Expects:
-    ///   - `config.json` (Qwen3TTSConfig)
+    ///   - `config.json` (`Qwen3TTSConfig`)
     ///   - `tokenizer.json` (or `vocab.json` + `merges.txt`)
     ///   - `model.safetensors` / `model-*.safetensors` (talker weights)
     ///   - `speech_tokenizer/config.json` + `speech_tokenizer/model.safetensors` (preferred)
@@ -221,7 +221,7 @@ impl Model {
 
     /// Tokenize text input for TTS.
     ///
-    /// Returns raw text tokens (no ChatML wrapping).
+    /// Returns raw text tokens (no `ChatML` wrapping).
     /// The role prefix is added by the talker prefill construction.
     pub fn prepare_tts_input(&self, text: &str) -> Result<Vec<u32>> {
         let encoding = self.tokenizer.encode(text, false).map_err(E::msg)?;

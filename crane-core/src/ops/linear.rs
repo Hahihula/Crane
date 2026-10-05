@@ -72,7 +72,7 @@ impl QuantizedLinear {
 }
 
 /// A linear layer that can be either a standard (f16/f32) Linear or a
-/// quantized QMatMul. Both implement Module::forward identically from the
+/// quantized `QMatMul`. Both implement `Module::forward` identically from the
 /// caller's perspective. This allows the same model code to serve both
 /// safetensors and GGUF weights with zero duplication.
 #[derive(Clone)]
@@ -306,7 +306,7 @@ pub fn linear_layer(
 /// Reads from a CPU-scoped `vb_cpu` so the transient unquantized weight is
 /// ordinary, promptly-freed heap memory that never touches the target
 /// device — only the smaller quantized buffer does. Used by the
-/// KugelAudio decoder's `new_with_quant` path: per-tensor GPU-side staging
+/// `KugelAudio` decoder's `new_with_quant` path: per-tensor GPU-side staging
 /// wasn't being reclaimed between layers otherwise on Metal with an 18GB
 /// unified-memory budget.
 pub fn quantize_linear_onto(

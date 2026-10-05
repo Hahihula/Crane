@@ -1,4 +1,4 @@
-//! Per-layer state for a Gated Delta Net: causal Conv1D ring buffer plus the
+//! Per-layer state for a Gated Delta Net: causal `Conv1D` ring buffer plus the
 //! recurrent `(K, V)` matrix per head.
 
 use candle_core::{DType, Device, Result, Tensor};
@@ -8,7 +8,7 @@ use super::config::GdnDims;
 /// State held by one Gated Delta Net layer across decoding steps.
 ///
 /// `conv_state` rolls the most recent `conv_kernel_size - 1` QKV channels so
-/// the next decode step can apply the causal Conv1D without reprocessing
+/// the next decode step can apply the causal `Conv1D` without reprocessing
 /// history. `recurrent_state` is the per-head `(K, V)` matrix that carries the
 /// linear-attention memory; always f32 regardless of model dtype.
 #[derive(Debug)]

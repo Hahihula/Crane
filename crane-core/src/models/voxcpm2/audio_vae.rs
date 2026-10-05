@@ -1,4 +1,4 @@
-//! AudioVAE V2 decoder: a DAC-style causal-conv decoder (Snake activations,
+//! `AudioVAE` V2 decoder: a DAC-style causal-conv decoder (Snake activations,
 //! weight-normed convs, sample-rate-conditioned super-resolution to 48kHz).
 //! **Decode-only** — no encoder, no streaming state — since zero-shot
 //! generation never needs `AudioVAE.encode()` (no reference audio) and this
@@ -10,7 +10,7 @@
 //! `depthwise=True` default changes which convs are grouped in a way that
 //! isn't obvious from the config alone (see module-level comments below).
 //!
-//! Weights ship in `audiovae.pth` (PyTorch pickle); candle has no pickle
+//! Weights ship in `audiovae.pth` (`PyTorch` pickle); candle has no pickle
 //! reader. `VoxCpm2Model::new` loads `audiovae.safetensors` from next to the
 //! checkpoint if present, else pulls the pre-converted file from the Hub
 //! (`hahihula/VoxCPM2-audiovae-safetensors`) — see
@@ -18,7 +18,7 @@
 //! `safetensors.torch.save_file` after `torch.load(..., weights_only=True)`
 //! (`tests/convert_voxcpm_audivae.py`).
 //! **Zero-padding**, not reflect-padding: this checkpoint's `CausalConv1d.forward`
-//! is `F.pad(x, (left_pad, 0))` with no `mode=` argument, i.e. PyTorch's default
+//! is `F.pad(x, (left_pad, 0))` with no `mode=` argument, i.e. `PyTorch`'s default
 //! `mode="constant", value=0` — different from `voxtral_tts::codec`'s causal
 //! convs (which reflect-pad), so this module writes its own causal conv
 //! wrappers rather than reusing that struct; only the dtype-independent

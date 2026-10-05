@@ -6,7 +6,7 @@
 //! with `hipcc` on first use and caches the code object on disk (see
 //! [`crate::ops::rocm`]). Every intrinsic the kernels need (`__shfl_down_sync`,
 //! `__shfl_sync`, `__syncthreads`, `__half2float`, dynamic shared memory) is
-//! either native on ROCm or already bridged by candle-rocm's HIP shim, so
+//! either native on `ROCm` or already bridged by candle-rocm's HIP shim, so
 //! this mirrors [`super::cuda`] exactly rather than needing a kernel rewrite.
 
 use candle_core::rocm_backend::rocm_rs;
@@ -19,7 +19,7 @@ use crate::quantized::ternary::{GdnPermutation, HadamardMode, TernaryEncoding};
 const MODULE_NAME: &str = "crane_quant_ternary";
 const SOURCE: &str = include_str!("../../../kernels/cuda/quant_ternary.cu");
 
-/// `input` (`[rows, cols]`, ROCm f32) times the packed ternary weight
+/// `input` (`[rows, cols]`, `ROCm` f32) times the packed ternary weight
 /// (`[output_rows, cols]`), returning `[rows, output_rows]` f32.
 ///
 /// Mirrors [`super::cuda::linear_f32`]: optionally applies a forward
@@ -29,7 +29,7 @@ const SOURCE: &str = include_str!("../../../kernels/cuda/quant_ternary.cu");
 /// # Errors
 ///
 /// Returns an error if `mode` is [`HadamardMode::Inverse`], if any tensor is
-/// not on a ROCm device with the expected dtype, or if a kernel launch fails.
+/// not on a `ROCm` device with the expected dtype, or if a kernel launch fails.
 #[allow(clippy::too_many_arguments)]
 pub fn linear_f32(
     input: &Tensor,

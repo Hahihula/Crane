@@ -1,9 +1,9 @@
-//! CosyVoice2's `UpsampleConformerEncoderV2` — the first stage of the
+//! `CosyVoice2`'s `UpsampleConformerEncoderV2` — the first stage of the
 //! Token2wav vocoder, turning (prompt + generated) speech-token embeddings
 //! into a `mu` conditioning sequence for the DiT/CFM decoder.
 //!
 //! Ported from `stepaudio2.cosyvoice2.transformer.upsample_encoder_v2` (real
-//! reference source, from the `minicpmo-utils` PyPI sdist — see the plan
+//! reference source, from the `minicpmo-utils` `PyPI` sdist — see the plan
 //! doc). Despite the "conformer" name, these blocks have **no macaron FFN
 //! and no convolution module** — just relative-position MHA + a single FFN,
 //! pre-norm. Non-streaming (`forward`) only; the `forward_chunk` /
@@ -17,7 +17,7 @@ use candle_nn::{Activation, LayerNorm, Linear, VarBuilder, layer_norm, linear, l
 // ── Relative positional encoding ────────────────────────────────────────
 
 /// Fixed sinusoidal Transformer-XL-style relative position table (**not**
-/// RoPE). Precomputes both positive and negative offsets once up to
+/// `RoPE`). Precomputes both positive and negative offsets once up to
 /// `max_len`; `position_encoding(size)` slices out the `2*size-1`-wide
 /// window centered on offset 0, matching
 /// `EspnetRelPositionalEncoding.position_encoding`.

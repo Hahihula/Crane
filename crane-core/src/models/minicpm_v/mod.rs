@@ -2,7 +2,7 @@
 //!
 //! Reuses [`crate::models::qwen3_5::Qwen3_5TextModel`] unmodified for the
 //! text backbone (a field-for-field-compatible `qwen3_5_text` config); the
-//! vision tower (NaViT SigLIP-style ViT + mid-stack window-attention merger
+//! vision tower (`NaViT` SigLIP-style `ViT` + mid-stack window-attention merger
 //! + hierarchical downsample merger) is new. See `config.rs` for the full
 //! rationale and `vlm.rs` for the top-level entry point.
 

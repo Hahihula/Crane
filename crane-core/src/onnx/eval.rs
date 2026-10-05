@@ -2949,7 +2949,7 @@ pub(crate) fn to_scalar_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> 
     }
 }
 
-/// Same as to_scalar_flexible but returns via to_vec0 for types that need it.
+/// Same as `to_scalar_flexible` but returns via `to_vec0` for types that need it.
 fn to_vec0_flexible<T: candle::WithDType>(t: &Tensor) -> Result<T> {
     if t.rank() > 0 && t.elem_count() == 1 {
         t.flatten_all()?.i(0)?.to_vec0::<T>()

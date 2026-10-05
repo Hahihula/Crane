@@ -1,6 +1,6 @@
 //! CJK multi-character-token splitting wrapper.
 //!
-//! VoxCPM2 was trained with every multi-character Chinese *vocab* token
+//! `VoxCPM2` was trained with every multi-character Chinese *vocab* token
 //! split into individual characters, so inference must apply the same
 //! transform or Chinese text tokenizes into pieces the model never saw.
 //!
@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use tokenizers::Tokenizer;
 
-/// SentencePiece's word-boundary marker (`▁`, U+2581), stripped before the
+/// `SentencePiece`'s word-boundary marker (`▁`, U+2581), stripped before the
 /// multichar-CJK check.
 const SP_MARKER: char = '\u{2581}';
 

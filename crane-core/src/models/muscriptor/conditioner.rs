@@ -1,10 +1,10 @@
-//! Conditioning pipeline for MuScriptor.
+//! Conditioning pipeline for `MuScriptor`.
 //!
 //! Three parallel conditioners, each of which runs once per 5-second
 //! audio chunk:
 //!
 //! * `MelSpectrogramConditioner` — 16 kHz mono audio → log-magnitude
-//!   mel spectrogram (n_fft=2048, hop=160 → 100 Hz × 512 bins) →
+//!   mel spectrogram (`n_fft`=2048, hop=160 → 100 Hz × 512 bins) →
 //!   linear projection to `dim`. Produces ~500 frames per 5-second
 //!   chunk (the prefix tokens fed to the transformer).
 //! * `ClassConditioner` for `instrument_group` (1000 + 1 pads) —
@@ -262,7 +262,7 @@ impl ClassConditioner {
 
     /// Build from a directly-supplied embedding weight tensor.
     /// Useful when the weight sits at a path `VarBuilder::pp` can't
-    /// reach (e.g. the upstream MuScriptor checkpoints store
+    /// reach (e.g. the upstream `MuScriptor` checkpoints store
     /// `condition_provider.conditioners.instrument_group.embed.weight`
     /// as a non-`Parameter` module attribute).
     pub fn from_embedding_tensor(

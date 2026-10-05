@@ -1,10 +1,10 @@
-//! Crane Added 20260731: ONNX ConvTranspose backed by Candle kernels.
+//! Crane Added 20260731: ONNX `ConvTranspose` backed by Candle kernels.
 
 use candle_core::{Result, Tensor, bail};
 
 use crate::onnx::proto::{self, NodeProto};
 
-/// Executes ONNX ConvTranspose with Candle's transposed-convolution kernels.
+/// Executes ONNX `ConvTranspose` with Candle's transposed-convolution kernels.
 ///
 /// The ONNX and Candle weight layouts are identical: `[C_in, C_out / group,
 /// spatial...]`.  This deliberately calls Tensor kernels directly instead of

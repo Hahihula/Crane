@@ -4,10 +4,10 @@
 //! (`MiniCPMV4_6VisionEmbeddings`, `MiniCPMV4_6VisionEncoder`,
 //! `MiniCPMV4_6ViTWindowAttentionMerger`, `MiniCPMV4_6VisionModel`).
 //!
-//! # Key departures from a "plain SigLIP ViT"
+//! # Key departures from a "plain `SigLIP` `ViT`"
 //!
-//! - **NaViT packing.** All patches from every image/slice in a request are
-//!   concatenated into one `[1, C, patch_size, total_patches]` "pixel_values"
+//! - **`NaViT` packing.** All patches from every image/slice in a request are
+//!   concatenated into one `[1, C, patch_size, total_patches]` "`pixel_values`"
 //!   tensor (built by [`super::preprocess`]) and patch-embedded in a single
 //!   `Conv2d(kernel=patch_size, stride=patch_size)` pass — the unusual shape
 //!   makes each patch occupy its own `patch_size`-wide column, so the conv's
@@ -66,7 +66,7 @@ impl VisionAttention {
     }
 
     /// Full (non-causal) self-attention over `xs` `[chunk_len, dim]` — a
-    /// single block. No batch dim: callers operate at `B=1` throughout (NaViT
+    /// single block. No batch dim: callers operate at `B=1` throughout (`NaViT`
     /// packing puts everything in one sequence) and slice out chunks
     /// themselves; see [`blocked_self_attention`].
     fn forward_block(&self, xs: &Tensor) -> Result<Tensor> {

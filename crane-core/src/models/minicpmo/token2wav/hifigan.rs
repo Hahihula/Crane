@@ -1,4 +1,4 @@
-//! CosyVoice2's `HiFTGenerator` — HiFTNet (Neural Source Filter + ISTFTNet):
+//! `CosyVoice2`'s `HiFTGenerator` — `HiFTNet` (Neural Source Filter + ISTFTNet):
 //! turns [`super::flow::Flow`]'s mel spectrogram into a waveform. Ported
 //! from `stepaudio2.flashcosyvoice.modules.hifigan[_components]` (real
 //! reference source — see the plan doc). The largest single component in
@@ -281,7 +281,7 @@ fn f0_to_sines(
 
 /// Nearest-neighbor-free linear interpolation along the last dim,
 /// `align_corners=False` (`F.interpolate(..., mode="linear")`'s default),
-/// matching PyTorch's sampling-coordinate convention
+/// matching `PyTorch`'s sampling-coordinate convention
 /// `src = (dst + 0.5) * (src_len / dst_len) - 0.5`.
 fn linear_interpolate_1d(x: &Tensor, out_len: usize) -> Result<Tensor> {
     let (b, c, in_len) = x.dims3()?;
@@ -690,7 +690,7 @@ fn reflection_pad_left1(x: &Tensor) -> Result<Tensor> {
 /// The source branch and the main upsampling branch can differ by a
 /// handful of frames (STFT framing vs `ConvTranspose1d` framing round
 /// differently) — narrow (or zero-pad) the source branch to match exactly,
-/// matching PyTorch's implicit broadcasting-by-equal-shape assumption (the
+/// matching `PyTorch`'s implicit broadcasting-by-equal-shape assumption (the
 /// reference code assumes they already match; this keeps Rust's stricter
 /// shape checking happy without changing the math when they do).
 fn crop_or_pad_time(x: &Tensor, target: usize) -> Result<Tensor> {

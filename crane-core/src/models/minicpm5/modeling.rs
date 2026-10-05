@@ -1,15 +1,15 @@
-//! MiniCPM5 (OpenBMB) dense decoder.
+//! `MiniCPM5` (`OpenBMB`) dense decoder.
 //!
-//! Despite the "MiniCPM" name this checkpoint is architecturally a plain
+//! Despite the "`MiniCPM`" name this checkpoint is architecturally a plain
 //! `LlamaForCausalLM` (per `openbmb/MiniCPM5-1B`'s own `config.json` and
-//! README: `"architectures": ["LlamaForCausalLM"]`) — GQA, RoPE, SwiGLU,
-//! RMSNorm, no attention bias, no QK-norm, no cross-layer attention sharing.
-//! Older MiniCPM releases (1–3) used bespoke `scale_emb`/`scale_depth`/
+//! README: `"architectures": ["LlamaForCausalLM"]`) — GQA, `RoPE`, `SwiGLU`,
+//! `RMSNorm`, no attention bias, no QK-norm, no cross-layer attention sharing.
+//! Older `MiniCPM` releases (1–3) used bespoke `scale_emb`/`scale_depth`/
 //! `dim_model_base` tricks; none of that applies here. This module is
 //! structurally a trimmed copy of `crate::models::hunyuan_dense::modeling`
 //! (same GQA/merged-QKV/GGUF-quantized `LinearLayer` pattern) with the
 //! QK-norm and CLA (cross-layer attention sharing) branches removed, since
-//! MiniCPM5 has neither.
+//! `MiniCPM5` has neither.
 //!
 //! Cross-checked against the MIT-licensed `AspadaX/tiny-llm` (a minimal
 //! educational Rust MiniCPM5-1B implementation) for the overall
@@ -94,7 +94,7 @@ struct Attention {
     k_proj: LinearLayer,
     v_proj: LinearLayer,
     o_proj: LinearLayer,
-    /// Merged QKV weight [q_dim + 2*kv_dim, hidden_size] — one gemv instead of 3.
+    /// Merged QKV weight [`q_dim` + 2*`kv_dim`, `hidden_size`] — one gemv instead of 3.
     /// Only set for Standard (non-quantized) weights.
     qkv_proj: Option<Linear>,
     num_heads: usize,
@@ -240,7 +240,7 @@ impl Attention {
     ///
     /// Uses `slice_set` for O(1) in-place writes when the buffer has room.
     /// Falls back to cat + reallocate when the buffer is full.
-    /// Returns (k_full, v_full) views covering all valid cached data.
+    /// Returns (`k_full`, `v_full`) views covering all valid cached data.
     fn update_kv_cache(&mut self, k: Tensor, v: Tensor) -> Result<(Tensor, Tensor)> {
         // slice_set requires contiguous tensors; K/V after transpose(1,2) are strided.
         let k = k.contiguous()?;
@@ -656,7 +656,7 @@ impl MiniCpm5Model {
     }
 
     /// Construct from a GGUF file. Reads config from GGUF metadata and loads
-    /// all weights as quantized tensors (QMatMul for linear layers, dequantized
+    /// all weights as quantized tensors (`QMatMul` for linear layers, dequantized
     /// for embeddings and norms).
     pub fn from_gguf<R: Read + Seek>(
         ct: gguf_file::Content,

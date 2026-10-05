@@ -1,14 +1,14 @@
-//! Micro-benchmark for the GPU top-k kernel (CUDA or ROCm).
+//! Micro-benchmark for the GPU top-k kernel (CUDA or `ROCm`).
 //!
 //! Times the device kernel against the host sort it replaces, on the same
 //! logits, so a kernel change can be judged without running a whole decode.
 //! Usage:
-//!   topk_bench [N] [K] [iters]
+//!   `topk_bench` [N] [K] [iters]
 //! Defaults model Qwen3.5 sampling: N=248320 (vocab), K=40, 200 iterations.
 //!
 //! Both arms synchronise the device on each side of the timed region, so the
 //! numbers are kernel time and not queue time. The first run of the process
-//! also pays a `hipcc` compile on ROCm, so a warmup is discarded.
+//! also pays a `hipcc` compile on `ROCm`, so a warmup is discarded.
 //!
 //! Needs `--features cuda` or `--features rocm`; `required-features` cannot
 //! express that (it is an AND), so the no-backend build is a stub that errors.

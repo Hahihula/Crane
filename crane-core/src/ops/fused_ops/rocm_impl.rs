@@ -5,7 +5,7 @@
 //! object on disk (see [`crate::ops::rocm`]).
 //!
 //! Every entry point falls back to [`super::portable`] (or to the op chain it
-//! replaces) off a ROCm device: a `rocm` build still runs on CPU when no AMD
+//! replaces) off a `ROCm` device: a `rocm` build still runs on CPU when no AMD
 //! GPU is present.
 
 use candle_core::{DType, Result, Tensor};
@@ -151,7 +151,7 @@ pub fn topk_indices(logits: &Tensor, k: usize) -> Result<Tensor> {
 /// Fused `silu(gate) * up` over a `[..., 2 * intermediate_size]` tensor.
 ///
 /// Replaces the `narrow + silu + mul` chain (3 launches, 2 intermediates) with
-/// one launch. Falls back to that chain off a ROCm device.
+/// one launch. Falls back to that chain off a `ROCm` device.
 ///
 /// # Errors
 ///

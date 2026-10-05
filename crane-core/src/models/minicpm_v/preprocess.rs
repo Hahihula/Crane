@@ -192,7 +192,7 @@ pub(crate) fn to_normalized_chw(
     Ok(Tensor::from_vec(chw, (3, h, w), device)?)
 }
 
-/// `[C, H, W]` (H = h_patches*patch, W = w_patches*patch) -> NaViT-packed
+/// `[C, H, W]` (H = `h_patches`*patch, W = `w_patches`*patch) -> NaViT-packed
 /// `[C, patch, h_patches*w_patches*patch]`, patches enumerated row-major.
 /// Direct port of `reshape_by_patch` (re-derived via reshape/permute instead
 /// of literally reimplementing `F.unfold`, since candle has no unfold op —
@@ -287,7 +287,7 @@ pub fn process_image(
     })
 }
 
-/// Pack multiple already-processed images into one NaViT batch (`[1, C,
+/// Pack multiple already-processed images into one `NaViT` batch (`[1, C,
 /// patch_size, total_patches*patch_size]`) plus the flat, in-order
 /// `target_sizes` list `VisionModel::forward` expects.
 pub fn pack_images(images: &[ProcessedImage]) -> Result<(Tensor, Vec<(usize, usize)>)> {

@@ -6,7 +6,7 @@
 //! status — do not assume any capability beyond what's listed there):
 //!
 //! 1. `llm` — the plain Qwen3 LLM tower standalone (text-only). Implemented.
-//! 2. `vision`/`resampler`/`preprocess` — SigLIP + perceiver `Resampler` +
+//! 2. `vision`/`resampler`/`preprocess` — `SigLIP` + perceiver `Resampler` +
 //!    image preprocessing. Implemented.
 //! 3. `audio_encoder`/`audio`/`vlm` — Whisper-medium encoder + projector,
 //!    spliced together with vision into `llm` for live omni (image + audio)
@@ -23,7 +23,7 @@
 //!    Sub-phased (see `duplex.rs`'s module doc): 6a (WebSocket-ready chunked
 //!    listen/speak arbitration, matching upstream's default
 //!    `sliding_window_mode: "off"` config), 6b (opt-in basic-mode
-//!    sliding-window KV eviction + RoPE cache realignment, `sliding_window.rs`),
+//!    sliding-window KV eviction + `RoPE` cache realignment, `sliding_window.rs`),
 //!    6c (opt-in context-preserve sliding-window mode), and 6d (incremental
 //!    per-chunk TTS speech-token generation, `MiniCpmTts::generate_chunk`)
 //!    are implemented. **Deliberately not ported**: the real streaming

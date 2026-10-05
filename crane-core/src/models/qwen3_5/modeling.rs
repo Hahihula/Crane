@@ -397,7 +397,7 @@ pub struct FullAttention {
 
 impl FullAttention {
     /// Run the K/V cache and attention in `dtype` instead of the activations'
-    /// dtype: Q/K/V are cast after RoPE and the output back before the gate.
+    /// dtype: Q/K/V are cast after `RoPE` and the output back before the gate.
     /// Lets F32 activations (no casts around every quantized linear) keep a
     /// half-precision cache, which is what long contexts are sized by.
     pub fn set_attention_dtype(&mut self, dtype: Option<DType>) {

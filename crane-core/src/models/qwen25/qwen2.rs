@@ -7,8 +7,8 @@
 //! Key characteristics:
 //! - Streaming decode support
 //! - Grouped query attention (GQA)
-//! - RMSNorm for layer normalization
-//! - Rotary positional embeddings (RoPE)
+//! - `RMSNorm` for layer normalization
+//! - Rotary positional embeddings (`RoPE`)
 //! - Support for 8-bit quantization
 //!
 //! References:

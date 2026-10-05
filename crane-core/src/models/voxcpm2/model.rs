@@ -1,4 +1,4 @@
-//! VoxCPM2 orchestration: loads all five sub-networks and implements the
+//! `VoxCPM2` orchestration: loads all five sub-networks and implements the
 //! generation loop for all four reference-audio-conditioning modes (see
 //! [`VoxCpm2Conditioning`]) plus prompt-cache reuse (see
 //! [`VoxCpm2PromptCache`]). Incremental streaming is supported via
@@ -48,7 +48,7 @@ const REF_AUDIO_END_TOKEN: u32 = 104;
 
 /// `_inference`'s `streaming_prefix_len` default. In non-streaming
 /// generation it controls how many of a continuation prompt's trailing real
-/// audio patches get included in the AudioVAE decode call before being
+/// audio patches get included in the `AudioVAE` decode call before being
 /// trimmed back off — see [`VoxCpm2Model::generate_conditioned_inner`]'s doc
 /// comment. Incremental streaming has its own decode-overlap knob
 /// ([`VoxCpm2StreamConfig::decode_left_context_patches`]); this constant is
@@ -90,7 +90,7 @@ impl Default for VoxCpm2GenerationConfig {
 
 /// Shape/runtime fields read out of `config.json`'s generic
 /// `audio_vae_config` block (kept as `serde_json::Value` in
-/// [`VoxCpm2Config`] since the AudioVAE decoder only needs a handful of its
+/// [`VoxCpm2Config`] since the `AudioVAE` decoder only needs a handful of its
 /// fields — see `config.rs`'s module docs).
 #[derive(Debug, Clone, Deserialize)]
 struct AudioVaeShapeConfig {
@@ -135,12 +135,12 @@ pub struct VoxCpm2Model {
     dtype: DType,
     pub sample_rate: u32,
     /// Sample rate `encode_reference_audio` expects its input already
-    /// resampled to (the AudioVAE encoder's native rate — distinct from
+    /// resampled to (the `AudioVAE` encoder's native rate — distinct from
     /// [`Self::sample_rate`], which is the *decoder's* output rate).
     pub encoder_sample_rate: u32,
 }
 
-/// Hub repo holding the pre-converted AudioVAE weights (candle can't read the
+/// Hub repo holding the pre-converted `AudioVAE` weights (candle can't read the
 /// upstream `audiovae.pth` pickle — see [`super::audio_vae`]'s module docs).
 const AUDIOVAE_HF_REPO: &str = "hahihula/VoxCPM2-audiovae-safetensors";
 const AUDIOVAE_FILENAME: &str = "audiovae.safetensors";
@@ -468,7 +468,7 @@ impl VoxCpm2Model {
     /// get wrong**: for [`VoxCpm2Conditioning::Continuation`]/
     /// [`VoxCpm2Conditioning::RefContinuation`] (where the conditioning
     /// tensor's last position is real prompt audio, not text), the
-    /// AudioVAE's causal-conv decoder produces a warm-up transient at the
+    /// `AudioVAE`'s causal-conv decoder produces a warm-up transient at the
     /// very start of whatever it decodes. Decoding *only* the newly
     /// generated patches in isolation would put that transient right at the
     /// start of the returned audio (an audible glitch/discontinuity at the
@@ -599,7 +599,7 @@ impl VoxCpm2Model {
     }
 
     /// Stack per-step `[1, P, D]` latent patches into a `[1, D, n*P]` latent
-    /// sequence and run it through the AudioVAE decoder, returning a
+    /// sequence and run it through the `AudioVAE` decoder, returning a
     /// `[1, 1, T]` f32 waveform. `trim_patches` leading patches' worth of
     /// samples are dropped from the front — used both for the continuation
     /// seam ([`Self::generate_conditioned_inner`]) and for streaming
@@ -648,7 +648,7 @@ impl VoxCpm2Model {
     /// The waveform is bit-for-bit the same as the non-streaming path for the
     /// same inputs (each chunk is decoded with
     /// [`VoxCpm2StreamConfig::decode_left_context_patches`] patches of real
-    /// left context re-fed to the causal AudioVAE decoder, then trimmed), with
+    /// left context re-fed to the causal `AudioVAE` decoder, then trimmed), with
     /// two deliberate differences: the stop head is checked every step (no
     /// deferred-sync batching — a stream must not emit audio it may later have
     /// to retract), and the near-silent-output retry in
@@ -899,7 +899,7 @@ enum StepOutcome {
     Finished,
 }
 
-/// The mutable state of VoxCPM2's autoregressive patch loop, factored out of
+/// The mutable state of `VoxCPM2`'s autoregressive patch loop, factored out of
 /// [`VoxCpm2Model::generate_conditioned_inner`] so the batch and streaming
 /// paths share exactly one copy of the per-patch numerics. Port of
 /// `_inference`'s decode loop (`voxcpm2.py`).
@@ -1201,7 +1201,7 @@ pub struct VoxCpm2StreamConfig {
     pub first_chunk_patches: usize,
     /// Patches per subsequent chunk.
     pub chunk_patches: usize,
-    /// Trailing already-emitted patches re-fed to the causal AudioVAE decoder
+    /// Trailing already-emitted patches re-fed to the causal `AudioVAE` decoder
     /// as left context on every chunk (then trimmed back off), so each chunk's
     /// samples match a full-sequence decode. Must exceed the decoder's
     /// latent-frame receptive field (~2 patches); `4` leaves headroom.

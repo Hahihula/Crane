@@ -4,11 +4,11 @@
 //! plain Qwen3 decoder.
 //!
 //! Mirrors `crate::models::minicpm_v::vlm::MinicpmV46VLModel`'s shape, with
-//! two real differences: positions are **plain scalar** (Qwen3 has no MRoPE,
+//! two real differences: positions are **plain scalar** (Qwen3 has no `MRoPE`,
 //! unlike MiniCPM-V-4.6's Qwen-3.5 backbone — no `[3, S]` position tensor
-//! needed), and the vision pipeline is SigLIP + `Resampler` (see
+//! needed), and the vision pipeline is `SigLIP` + `Resampler` (see
 //! `super::vision`/`super::resampler` module docs on the packed-pixel-values
-//! convention and the fixed per-image token count) rather than NaViT +
+//! convention and the fixed per-image token count) rather than `NaViT` +
 //! window-merger + hierarchical `Merger`.
 //!
 //! Image and audio **understanding** only — no speech output (see the

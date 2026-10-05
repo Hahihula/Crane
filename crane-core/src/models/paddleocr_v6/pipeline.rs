@@ -1,4 +1,4 @@
-//! Complete two-stage PaddleOCR v6 pipeline.
+//! Complete two-stage `PaddleOCR` v6 pipeline.
 //!
 //! This module owns all v6-specific preprocessing, detector postprocessing,
 //! crop recognition, CTC decoding, and reading-order assembly.

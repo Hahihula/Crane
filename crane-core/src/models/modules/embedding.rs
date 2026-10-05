@@ -2,7 +2,7 @@
 //!
 //! The default GGUF path dequantizes `token_embd.weight` to the compute dtype
 //! at load. For small vocabularies that is free, but modern Qwen checkpoints
-//! carry a 248320-row table: on Qwen 3.8-27B it is 0.67 GiB of Q4_K on disk
+//! carry a 248320-row table: on Qwen 3.8-27B it is 0.67 GiB of `Q4_K` on disk
 //! and **2.37 GiB** once expanded to BF16 — more than the KV cache, spent
 //! entirely on rows that are never read. A forward pass touches at most
 //! `seq_len` of them.
@@ -126,7 +126,7 @@ impl EmbeddingLayer {
 
     /// The output projection for a checkpoint with tied weights.
     ///
-    /// Tying means the lm_head *is* this table, so a quantized table yields a
+    /// Tying means the `lm_head` *is* this table, so a quantized table yields a
     /// quantized `QMatMul` over the very same buffer — no second copy, which
     /// is the other half of the memory saving on tied models.
     ///

@@ -10,7 +10,7 @@ use tokenizers::pre_tokenizers::sequence::Sequence as PreTokenizerSequence;
 use tokenizers::pre_tokenizers::split::Split;
 use tokenizers::{AddedToken, SplitDelimiterBehavior, Tokenizer};
 
-/// Qwen's pre-tokenizer split pattern, as it appears in HuggingFace's
+/// Qwen's pre-tokenizer split pattern, as it appears in `HuggingFace`'s
 /// `tokenizer.json` for every Qwen 2/2.5/3/3.5 checkpoint (and as llama.cpp's
 /// `qwen2` pre-tokenizer implements it).
 ///
@@ -239,7 +239,7 @@ fn is_gguf_added_token(token_type: i32) -> bool {
 /// Whether a GGUF token type means "special" in the `tokenizers` sense, i.e.
 /// dropped by `decode(skip_special_tokens = true)`.
 ///
-/// Only CONTROL (3) is. USER_DEFINED (4) tokens must be *added* (so they
+/// Only CONTROL (3) is. `USER_DEFINED` (4) tokens must be *added* (so they
 /// tokenize as one unit) but NOT special, so they survive decoding — this
 /// mirrors HF's `tokenizer.json`, where Qwen 3.5 declares `<|im_start|>` /
 /// `<|im_end|>` with `"special": true` but `<think>` / `</think>` /
@@ -263,7 +263,7 @@ fn is_gguf_special_token(token_type: i32) -> bool {
 /// 1. The optional `tokenizer.ggml.added_tokens` array (used by recent
 ///    llama.cpp builds) gives an explicit list with `special: true`.
 /// 2. The per-id `tokenizer.ggml.token_type` array — tokens with type 3
-///    (CONTROL) or 4 (USER_DEFINED) are registered as special. Type 5
+///    (CONTROL) or 4 (`USER_DEFINED`) are registered as special. Type 5
 ///    placeholders (`[PADxxx]`) and type 6 byte fallbacks are skipped.
 pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
     let tokens_arr = ct

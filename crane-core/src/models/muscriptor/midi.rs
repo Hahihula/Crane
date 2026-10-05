@@ -1,4 +1,4 @@
-//! Minimal Standard MIDI File (SMF) writer for MuScriptor output.
+//! Minimal Standard MIDI File (SMF) writer for `MuScriptor` output.
 //!
 //! Implements just enough of SMF type-1 to round-trip the notes
 //! `TranscriptionModel` produces:
@@ -7,22 +7,22 @@
 //!   * one `MTrk` per program (or one drum track), holding `program_change`
 //!     followed by absolute-tick `note_on` / `note_off` messages
 //!
-//! Tempo defaults to 500_000 µs/quarter = 120 BPM. Multi-track layout
+//! Tempo defaults to `500_000` µs/quarter = 120 BPM. Multi-track layout
 //! matches the upstream `note_event2midi` so a downstream DAW (Ableton,
-//! Logic, MuseScore) sees the same per-instrument splits.
+//! Logic, `MuseScore`) sees the same per-instrument splits.
 //!
 //! Out of scope: SMPTE timecode, mid-track tempo changes, control
-//! changes, sysex. MuScriptor never produces those, and Crane doesn't
+//! changes, sysex. `MuScriptor` never produces those, and Crane doesn't
 //! have a use case for them.
 
 use std::io::Write;
 
-/// Default tempo: 120 BPM (500_000 µs / quarter).
+/// Default tempo: 120 BPM (`500_000` µs / quarter).
 pub const DEFAULT_TEMPO: u32 = 500_000;
 /// Default ticks per quarter note. 480 is the de-facto DAW standard and
 /// matches the upstream `note_event2midi` default.
 pub const DEFAULT_TICKS_PER_BEAT: u16 = 480;
-/// Velocity baked into every emitted `note_on` (the MuScriptor vocab
+/// Velocity baked into every emitted `note_on` (the `MuScriptor` vocab
 /// doesn't carry dynamics).
 pub const DEFAULT_VELOCITY: u8 = 100;
 
@@ -67,7 +67,7 @@ enum TrackEvent {
 }
 
 /// Builder for a multi-track Standard MIDI File. Drop-in replacement for
-/// the upstream `notes_to_midi(...)` call inside MuScriptor's
+/// the upstream `notes_to_midi(...)` call inside `MuScriptor`'s
 /// `transcribe_to_midi`.
 pub struct MidiWriter {
     tempo: u32,

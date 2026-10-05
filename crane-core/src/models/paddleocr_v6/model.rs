@@ -1,4 +1,4 @@
-//! PaddleOCR v6 ONNX forward models.
+//! `PaddleOCR` v6 ONNX forward models.
 //!
 //! The complete detector/recognizer pipeline lives beside this file in
 //! `pipeline.rs`; higher-level crates only select and invoke the backend.
@@ -17,7 +17,7 @@ pub const DETECTOR_FILE: &str = "pp-ocrv6_small_det.onnx";
 pub const RECOGNIZER_FILE: &str = "pp-ocrv6_small_rec.onnx";
 pub const DICTIONARY_FILE: &str = "ppocrv6_dict.txt";
 
-/// Small PaddleOCR v6 detector/recognizer pair backed by Crane ONNX.
+/// Small `PaddleOCR` v6 detector/recognizer pair backed by Crane ONNX.
 pub struct PaddleOcrV6 {
     detector: Session,
     recognizer: Session,

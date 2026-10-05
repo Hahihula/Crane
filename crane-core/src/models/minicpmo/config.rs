@@ -32,7 +32,7 @@ pub struct AudioConfig {
 /// Mirrors `MiniCPMTTSConfig`'s fields that actually get consumed for
 /// zero-shot (no reference audio) non-streaming generation — `backbone_model`
 /// is always `"llama"` for real checkpoints, so a `LlamaConfig` is built
-/// directly from these; RoPE theta/eps aren't in `MiniCPMTTSConfig` at all,
+/// directly from these; `RoPE` theta/eps aren't in `MiniCPMTTSConfig` at all,
 /// so HF's `LlamaConfig` defaults (`rope_theta=10000.0`, `rms_norm_eps=1e-6`)
 /// apply — see `tts_llm.rs`.
 #[derive(Debug, Clone, Deserialize)]

@@ -10,13 +10,13 @@
 use std::collections::HashMap;
 
 /// External reference CER for the held-out `en_us` test set
-/// (`g2p/en_us/test.tsv` in the `crane-local-ai/test-data` HuggingFace dataset).
+/// (`g2p/en_us/test.tsv` in the `crane-local-ai/test-data` `HuggingFace` dataset).
 /// This is the regression threshold `en_us` CER must stay at or below once the lexicon/OOV/rules
 /// tiers exist to benchmark against.
 pub const REFERENCE_CER_EN_US: f64 = 0.2558;
 
 /// Regression threshold for the held-out `de` test set
-/// (`g2p/de_de/test.tsv` in the `crane-local-ai/test-data` HuggingFace
+/// (`g2p/de_de/test.tsv` in the `crane-local-ai/test-data` `HuggingFace`
 /// dataset): `GermanG2p`'s own measured CER
 /// (lexicon + compound decomposition + hand rules, with those words excluded
 /// from the lexicon so they exercise the fallback tiers) must stay at or

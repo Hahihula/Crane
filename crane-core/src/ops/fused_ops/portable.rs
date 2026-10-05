@@ -8,7 +8,7 @@ use candle_core::{Device, Result, Tensor};
 
 /// Argmax over a flattened logits tensor.
 ///
-/// On a GPU device this is a device-side reduction plus a 4-byte DtoH, not a
+/// On a GPU device this is a device-side reduction plus a 4-byte `DtoH`, not a
 /// full-vocab copy, so there is nothing for a custom kernel to save here.
 ///
 /// # Errors

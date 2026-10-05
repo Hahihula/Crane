@@ -1,4 +1,4 @@
-//! RMSNorm with a gated output: `y = (x / rms(x)) * weight * act(gate)`.
+//! `RMSNorm` with a gated output: `y = (x / rms(x)) * weight * act(gate)`.
 //!
 //! This is the output-side normalization used by every Gated Delta Net layer —
 //! the `z` projection gate modulates the normalized recurrence output before it

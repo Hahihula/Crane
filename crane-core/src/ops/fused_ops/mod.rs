@@ -4,7 +4,7 @@
 //! - `fused_silu_mul` — Fused SiLU(gate) * up in one pass
 //! - `gpu_argmax` — GPU-side argmax for greedy sampling
 //! - `topk_indices` — GPU top-k on 1D f32 tensors
-//! - `copy_from_slice_u32` — HtoD: create a new U32 tensor from a host slice
+//! - `copy_from_slice_u32` — `HtoD`: create a new U32 tensor from a host slice
 //! - `copy_from_tensor_f32` — contiguous copy of a device f32 tensor
 //!
 //! Each operation eliminates multiple kernel launches and intermediate

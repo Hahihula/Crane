@@ -11,7 +11,7 @@
 //! per forward pass. Set `CRANE_GDN_PORTABLE=1` to force the op-by-op path back
 //! on and cross-check numerics on the same device.
 //!
-//! Inputs must be contiguous f32 ROCm tensors in the layouts documented on
+//! Inputs must be contiguous f32 `ROCm` tensors in the layouts documented on
 //! [`gdn_recurrence_rocm`]; `q` is expected pre-scaled by `1/sqrt(K)` (the
 //! caller does this, matching the CPU reference).
 
@@ -22,7 +22,7 @@ use crate::ops::rocm::{self, arg};
 const MODULE_NAME: &str = "crane_gdn";
 const SOURCE: &str = include_str!("../../../kernels/cuda/gdn.cu");
 
-/// Run the gated delta rule recurrence on ROCm.
+/// Run the gated delta rule recurrence on `ROCm`.
 ///
 /// Shapes: `q,k = [BH,S,K]`, `v = [BH,S,V]`, `g,beta = [BH,S]`,
 /// `state = [BH,K,V]`. Returns `(y = [BH,S,V], state_out = [BH,K,V])`.
@@ -30,7 +30,7 @@ const SOURCE: &str = include_str!("../../../kernels/cuda/gdn.cu");
 /// # Errors
 ///
 /// Returns an error if `head_k_dim > 256` (the kernel's staging limit), if any
-/// operand is not a contiguous f32 ROCm tensor, or if the launch fails.
+/// operand is not a contiguous f32 `ROCm` tensor, or if the launch fails.
 pub fn gdn_recurrence_rocm(
     q: &Tensor,
     k: &Tensor,

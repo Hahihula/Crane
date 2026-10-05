@@ -1,4 +1,4 @@
-//! MT3-style MIDI event tokenizer (audiocraft-trans / YourMT3+ lineage).
+//! MT3-style MIDI event tokenizer (audiocraft-trans / `YourMT3+` lineage).
 //!
 //! The vocabulary is fixed at construction time and intentionally never
 //! trained against new tokens — extending it would invalidate every
@@ -193,7 +193,7 @@ impl Default for MT3Tokenizer {
 }
 
 impl MT3Tokenizer {
-    /// Build a tokenizer matching the upstream defaults (MT3_FULL_PLUS
+    /// Build a tokenizer matching the upstream defaults (`MT3_FULL_PLUS`
     /// vocabulary, 1001 shift steps, 100 Hz frame rate).
     #[must_use]
     pub fn new() -> Self {

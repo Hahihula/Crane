@@ -1,4 +1,4 @@
-//! CosyVoice2's `CausalMaskedDiffWithXvec` — glues the speech-token
+//! `CosyVoice2`'s `CausalMaskedDiffWithXvec` — glues the speech-token
 //! embedding, [`super::conformer::UpsampleConformerEncoderV2`], and
 //! [`super::dit::DiT`]/[`super::cfm`] into the full speech-token-ids ->
 //! mel-spectrogram pipeline. Ported from

@@ -3,7 +3,7 @@
 //! of `locdit/unified_cfm.py`'s `UnifiedCFM` (`forward`/`solve_euler`/
 //! `optimized_scale`) — no `compute_loss`, this crate never trains.
 //!
-//! The single most algorithmically distinct piece of VoxCPM2 relative to
+//! The single most algorithmically distinct piece of `VoxCPM2` relative to
 //! the rest of Crane: `crate::models::voxtral_tts::modeling::flow_match_inference`
 //! is a real precedent for the overall shape (batched cond/uncond forward
 //! through the same estimator, `x = x - dt*v`) but has neither sway sampling
@@ -17,7 +17,7 @@ use super::local_dit::VoxCpmLocDit;
 pub struct UnifiedCfm {
     estimator: VoxCpmLocDit,
     in_channels: usize,
-    /// `dit_config.mean_mode` — always `false` for the current VoxCPM2
+    /// `dit_config.mean_mode` — always `false` for the current `VoxCPM2`
     /// checkpoint, which zeroes `dt` unconditionally; implemented for
     /// fidelity with configs that do set it.
     mean_mode: bool,

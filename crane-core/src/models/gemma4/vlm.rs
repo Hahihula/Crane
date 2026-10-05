@@ -100,7 +100,7 @@ impl Gemma4VLModel {
     /// Forward pass for VLM: embed text, splice in vision features, run decoder.
     ///
     /// * `input_ids` — token IDs including image placeholder tokens
-    /// * `image_embeds` — projected vision features [B, num_image_tokens, hidden_size]
+    /// * `image_embeds` — projected vision features [B, `num_image_tokens`, `hidden_size`]
     /// * `start_pos` — KV cache position
     pub fn forward(
         &mut self,
@@ -147,7 +147,7 @@ impl Gemma4VLModel {
             .map_err(Into::into)
     }
 
-    /// Replace positions where input_ids == image_token_id with image embeddings.
+    /// Replace positions where `input_ids` == `image_token_id` with image embeddings.
     fn splice_image_features(
         &self,
         input_ids: &Tensor,

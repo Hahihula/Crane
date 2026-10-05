@@ -1,14 +1,14 @@
-//! HF-compatible config types for VoxCPM2.
+//! HF-compatible config types for `VoxCPM2`.
 //!
 //! Ported from `voxcpm/modules/minicpm4/config.py` (`MiniCPM4Config`,
 //! `RopeScalingConfig`) and `voxcpm/model/voxcpm2.py` (`VoxCPMConfig`,
 //! `VoxCPMEncoderConfig`, `VoxCPMDitConfig`).
 //!
-//! Four of VoxCPM2's five sub-networks (`base_lm`, `residual_lm`,
+//! Four of `VoxCPM2`'s five sub-networks (`base_lm`, `residual_lm`,
 //! `feat_encoder`, `feat_decoder.estimator`) are the *same* decoder-block
 //! class (see `minicpm4.rs`) with different [`MiniCpm4Config`] values — this
 //! module's job is just deserializing those four variants plus the
-//! non-transformer pieces (FSQ, DiT wrapper, CFM sampler params).
+//! non-transformer pieces (FSQ, `DiT` wrapper, CFM sampler params).
 //!
 //! `dim_model_base` is deserialized (present in every real `config.json`)
 //! but deliberately unused — the upstream Python (`minicpm4/model.py`)
@@ -16,7 +16,7 @@
 
 use serde::Deserialize;
 
-/// LongRoPE scaling block. Two regimes (`short_factor` below
+/// `LongRoPE` scaling block. Two regimes (`short_factor` below
 /// `original_max_position_embeddings`, `long_factor` above) — see
 /// [`super::minicpm4::LongRoPE`] for the frequency-scaling math.
 #[derive(Debug, Clone, Deserialize)]
@@ -70,7 +70,7 @@ impl MiniCpm4Config {
     /// Build a derived config for `feat_encoder`/`feat_decoder`: same
     /// `lm_config` base, sized/reshaped per `encoder_config`/`dit_config`,
     /// `vocab_size = 0` (no token embedding — these consume precomputed
-    /// hidden vectors, matching HF's `nn.Identity()` embed_tokens when
+    /// hidden vectors, matching HF's `nn.Identity()` `embed_tokens` when
     /// `vocab_size == 0`).
     pub fn derive(&self, sub: &SubNetworkConfig) -> Self {
         Self {
@@ -143,8 +143,8 @@ pub struct DitConfig {
     pub cfm_config: CfmConfig,
 }
 
-/// Top-level VoxCPM2 config (`config.json`). `audio_vae_config` is
-/// deserialized generically ([`serde_json::Value`]) — the AudioVAE decoder
+/// Top-level `VoxCPM2` config (`config.json`). `audio_vae_config` is
+/// deserialized generically ([`serde_json::Value`]) — the `AudioVAE` decoder
 /// (`audio_vae.rs`) reads the handful of fields it needs (`decoder_rates`,
 /// `sr_bin_boundaries`, `latent_dim`, `decoder_dim`, `out_sample_rate`)
 /// directly rather than duplicating the full schema here.
@@ -189,7 +189,7 @@ fn default_max_length() -> usize {
     8192
 }
 
-/// Load `config.json` for a VoxCPM2 checkpoint.
+/// Load `config.json` for a `VoxCPM2` checkpoint.
 pub fn load_config(path: &str) -> candle_core::Result<VoxCpm2Config> {
     let data = std::fs::read(path)
         .map_err(|e| candle_core::Error::Msg(format!("read config {path}: {e}")))?;
