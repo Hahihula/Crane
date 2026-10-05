@@ -281,7 +281,7 @@ pub fn load_wav_f32(path: &str, target_sr: u32) -> Result<Vec<f32>> {
 /// Decode an audio file to mono f32 samples and resample it to `target_sr`.
 ///
 /// WAV files use the existing hound path. Other supported containers/codecs
-/// (notably MP3, used by bundled VoxCPM2 voices) are decoded with Symphonia.
+/// (notably MP3, used by bundled `VoxCPM2` voices) are decoded with `Symphonia`.
 pub fn load_audio_f32(path: &str, target_sr: u32) -> Result<Vec<f32>> {
     if let Ok(reader) = hound::WavReader::open(path) {
         return read_wav_f32(reader, target_sr);
