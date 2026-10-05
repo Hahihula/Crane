@@ -1,6 +1,6 @@
-//! VoxCPM2 Simple Example
+//! `VoxCPM2` Simple Example
 //!
-//! Generates speech from text using VoxCPM2 (OpenBMB): zero-shot, or with
+//! Generates speech from text using `VoxCPM2` (OpenBMB): zero-shot, or with
 //! reference-audio conditioning / voice cloning (all three real modes —
 //! see `crane_core::models::voxcpm2::VoxCpm2Conditioning`). Pass `--stream`
 //! (zero-shot only) to drive the incremental
@@ -37,7 +37,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(about = "VoxCPM2 TTS demo: zero-shot or reference-audio-conditioned (voice cloning)")]
 struct Args {
-    /// Path to the VoxCPM2 checkpoint directory (must contain
+    /// Path to the `VoxCPM2` checkpoint directory (must contain
     /// model.safetensors, audiovae.safetensors, config.json, tokenizer.json)
     model_path: String,
     /// Text to synthesize. Falls back to two built-in example sentences in

@@ -5,8 +5,8 @@
 //! `vision_config` and will be rejected at load).
 //!
 //! Usage:
-//!   cargo run --bin qwen3_5_vl_simple -- /path/to/Qwen3.5-4B image.png
-//!   cargo run --bin qwen3_5_vl_simple --features cuda -- <model> <image> "what colour is the bird?"
+//!   cargo run --bin `qwen3_5_vl_simple` -- /path/to/Qwen3.5-4B image.png
+//!   cargo run --bin `qwen3_5_vl_simple` --features cuda -- <model> <image> "what colour is the bird?"
 
 use anyhow::{Context, Result};
 use crane_core::models::DType;

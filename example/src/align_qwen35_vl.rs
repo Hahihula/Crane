@@ -1,17 +1,17 @@
 //! Alignment + speed harness for Crane's Qwen3.5-2B multimodal model.
 //!
 //! Reads the reference inputs/logits/tokens produced by
-//! `tests/align_qwen35_vl_reference.py` (PyTorch / HuggingFace Transformers)
+//! `tests/align_qwen35_vl_reference.py` (`PyTorch` / `HuggingFace` Transformers)
 //! from a directory, runs the SAME forward + greedy decode with Crane on Metal,
 //! and reports:
 //!   * vision-embedding cosine similarity (identical pixel inputs)
 //!   * prefill logits cosine similarity + top-1 argmax agreement
 //!   * greedy-decoded token agreement (longest common prefix, accuracy)
-//!   * prefill & decode throughput, compared against PyTorch's numbers.
+//!   * prefill & decode throughput, compared against `PyTorch`'s numbers.
 //!
 //! Usage:
-//!   cargo run --release --features metal,accelerate --bin align_qwen35_vl -- \
-//!       checkpoints/Qwen3.5-2B tests/align_out
+//!   cargo run --release --features metal,accelerate --bin `align_qwen35_vl` -- \
+//!       checkpoints/Qwen3.5-2B `tests/align_out`
 
 use anyhow::{Context, Result};
 use crane_core::candle_core::{self, DType, Device, Tensor};
