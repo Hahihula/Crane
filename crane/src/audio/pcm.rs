@@ -282,6 +282,11 @@ pub fn load_wav_f32(path: &str, target_sr: u32) -> Result<Vec<f32>> {
 ///
 /// WAV files use the existing hound path. Other supported containers/codecs
 /// (notably MP3, used by bundled `VoxCPM2` voices) are decoded with `Symphonia`.
+///
+/// # Errors
+///
+/// Returns an error if the file can't be opened, has no default audio track,
+/// uses a codec `Symphonia` can't decode, or if resampling fails.
 pub fn load_audio_f32(path: &str, target_sr: u32) -> Result<Vec<f32>> {
     if let Ok(reader) = hound::WavReader::open(path) {
         return read_wav_f32(reader, target_sr);

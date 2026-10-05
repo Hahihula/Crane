@@ -41,6 +41,10 @@ pub struct OcrClient {
 }
 
 impl OcrClient {
+    /// # Errors
+    ///
+    /// Returns an error if `PaddleOcrV6` is requested without the `onnx` feature,
+    /// or if loading the configured OCR model fails.
     pub fn new(config: CommonConfig) -> CraneResult<Self> {
         ribo::utils::log::init_log(ribo::utils::log::LogLevel::INFO);
         let backend = match config.model_type {
@@ -72,6 +76,10 @@ impl OcrClient {
         Ok(Self { backend })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if OCR recognition fails (see
+    /// [`extract_text_with_locations`](OcrClient::extract_text_with_locations)).
     pub fn extract_text_from_image<P: AsRef<Path>>(
         &mut self,
         image_path: P,
@@ -79,6 +87,9 @@ impl OcrClient {
         Ok(self.extract_text_with_locations(image_path)?.text)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the backend's OCR recognition fails.
     pub fn extract_text_with_locations<P: AsRef<Path>>(
         &mut self,
         image_path: P,
@@ -100,6 +111,10 @@ impl OcrClient {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if OCR recognition fails (see
+    /// [`extract_with_task_stream`](OcrClient::extract_with_task_stream)).
     pub fn extract_text_from_image_stream<P: AsRef<Path>>(
         &mut self,
         image_path: P,
@@ -107,6 +122,9 @@ impl OcrClient {
         self.extract_with_task_stream(image_path, OcrTask::Ocr, 896, |token| print!("{token}"))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the backend's OCR recognition fails.
     pub fn extract_with_task<P: AsRef<Path>>(
         &mut self,
         image_path: P,
@@ -128,6 +146,9 @@ impl OcrClient {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the backend's OCR recognition fails.
     pub fn extract_with_task_stream<P: AsRef<Path>, F>(
         &mut self,
         image_path: P,

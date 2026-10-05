@@ -55,6 +55,8 @@ impl<'a> TtsStream<'a> {
 
     /// Returns the next chunk of f32 PCM audio, or `None` when generation is complete.
     ///
+    /// # Errors
+    ///
     /// Returns `Err` if the underlying model encounters a generation error.
     pub fn next_chunk(&mut self) -> Result<Option<Tensor>> {
         self.inner.next().transpose()
@@ -109,6 +111,10 @@ pub trait Tts {
     /// The tensor shape is model-dependent; callers should use `.flatten_all()` to
     /// obtain a flat sample buffer before passing to [`crate::audio::pcm_f32_to_i16`].
     /// The sample rate is available via [`audio_info`](Tts::audio_info).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying model fails to generate speech for `text`.
     fn generate_speech(
         &mut self,
         text: &str,
@@ -151,6 +157,10 @@ pub trait Tts {
     /// The default implementation calls [`generate_speech`](Tts::generate_speech)
     /// and wraps the result in a single-chunk stream. Models that support true
     /// incremental generation override this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying model fails to generate speech for `text`.
     fn generate_speech_stream(
         &mut self,
         text: &str,

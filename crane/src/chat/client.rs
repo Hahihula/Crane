@@ -14,6 +14,11 @@ pub struct ChatClient {
 
 impl ChatClient {
     /// Create a new chat client with the given configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying LLM client fails to initialize (e.g.
+    /// an unsupported device or model type).
     pub fn new(config: ChatConfig) -> CraneResult<Self> {
         let started_at = Instant::now();
         let llm_client = LlmClient::new(config.common.clone())?;
@@ -28,6 +33,10 @@ impl ChatClient {
     }
 
     /// Send a message and get a response
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying LLM fails to generate a response.
     pub fn send_message(&mut self, message: &str) -> CraneResult<String> {
         // Add user message to history
         self.history.add_message(ChatMessage {
@@ -50,6 +59,11 @@ impl ChatClient {
     }
 
     /// Send a message and get a streaming response
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying LLM fails to generate a response, or if
+    /// the generation thread panics.
     pub fn send_message_streaming<F>(&mut self, message: &str, callback: F) -> CraneResult<String>
     where
         F: Fn(&str),

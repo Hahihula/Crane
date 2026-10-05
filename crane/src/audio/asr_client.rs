@@ -12,11 +12,21 @@ pub struct AsrClient {
 
 impl AsrClient {
     /// Create a new ASR client with the given configuration
+    ///
+    /// # Errors
+    ///
+    /// Never fails currently; returns `Result` for consistency with other clients.
     pub fn new(config: CommonConfig) -> CraneResult<Self> {
         Ok(Self { config })
     }
 
     /// Transcribe audio from a file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured device is unavailable or crane was built
+    /// without the required backend feature, if the Moonshine model fails to load,
+    /// if `audio_file` is not a 16kHz mono 16-bit WAV file, or if transcription fails.
     pub fn transcribe_from_file<P: AsRef<Path>>(&self, audio_file: P) -> CraneResult<String> {
         let device = match &self.config.device {
             DeviceConfig::Cpu => crane_core::models::Device::Cpu,
@@ -89,6 +99,10 @@ impl AsrClient {
     }
 
     /// Transcribe audio from raw audio data (placeholder implementation)
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error: audio-data transcription is not implemented yet.
     pub fn transcribe_from_data(&self, _audio_data: &[u8]) -> CraneResult<String> {
         // This would be implemented based on the specific ASR model requirements
         Err(CraneError::Other(
