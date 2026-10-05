@@ -7,7 +7,7 @@
 //! # Algorithm
 //!
 //! Given per-timestep Q, K, V, g (decay), β (write strength), and a learned
-//! negative-exponent A_log used to derive per-head decay, the recurrence is:
+//! negative-exponent `A_log` used to derive per-head decay, the recurrence is:
 //!
 //! ```text
 //! S = S * exp(g)                  // decay state by head-dependent factor
@@ -20,7 +20,7 @@
 //! State shape: `[batch, num_v_heads, head_k_dim, head_v_dim]`, kept in f32
 //! regardless of model dtype (`mamba_ssm_dtype: float32` in the HF config).
 //!
-//! The QKV input also passes through a causal Conv1D with kernel width 4
+//! The QKV input also passes through a causal `Conv1D` with kernel width 4
 //! (`linear_conv_kernel_dim`) before the recurrence; the conv state is
 //! maintained alongside the recurrent state for decode-step inference.
 //!

@@ -1,8 +1,8 @@
 //! Qwen3-TTS Simple Example (unified entry point)
 //!
-//! Auto-detects Base vs CustomVoice model and runs the appropriate demo.
+//! Auto-detects Base vs `CustomVoice` model and runs the appropriate demo.
 //! For dedicated examples, see:
-//! - `tts_custom_voice` — CustomVoice model with predefined speakers
+//! - `tts_custom_voice` — `CustomVoice` model with predefined speakers
 //! - `tts_voice_clone`  — Base model with reference-audio voice cloning
 //!
 //! # Usage
@@ -132,7 +132,7 @@ fn run_voice_clone(
     Ok(())
 }
 
-/// CustomVoice mode: predefined speaker.
+/// `CustomVoice` mode: predefined speaker.
 fn run_custom_voice(
     model: &mut crane_core::models::qwen3_tts::Model,
     output_dir: &str,

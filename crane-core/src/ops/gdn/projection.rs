@@ -1,6 +1,6 @@
 //! Input projections for a Gated Delta Net layer.
 //!
-//! Two linear projections from hidden_size:
+//! Two linear projections from `hidden_size`:
 //! 1. `in_proj_qkv` projects to `[Q | K | V]` (concatenated, length `conv_dim`).
 //! 2. `in_proj_z` projects to the gate `Z` (length `value_dim`).
 //! 3. `in_proj_b` projects to the per-head write strength `β` (length
@@ -259,7 +259,7 @@ impl GdnProjection {
     }
 
     /// Reassemble the Q|K|V channels into a single `[B, S, conv_dim]` tensor —
-    /// the input the causal Conv1D expects.
+    /// the input the causal `Conv1D` expects.
     pub fn conv_input(
         &self,
         dims: &super::config::GdnDims,

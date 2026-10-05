@@ -2,11 +2,11 @@
 //!
 //! Architecture:
 //! - Patch embedding with learned 2D position table
-//! - 16-layer bidirectional transformer with 2D RoPE
+//! - 16-layer bidirectional transformer with 2D `RoPE`
 //! - Gemma-style 4 norms per layer, QK+V norms
 //! - Clipped linears (input/output clamping applied at inference)
 //! - Spatial average pooling
-//! - RMSNorm + Linear projection to text hidden_size
+//! - `RMSNorm` + Linear projection to text `hidden_size`
 
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{Linear, RmsNorm, VarBuilder, linear_no_bias};
@@ -128,11 +128,11 @@ impl VisionRotaryEmbedding {
 
     /// Compute 2D cos/sin from pixel position IDs.
     ///
-    /// position_ids: [B, num_patches, 2] (x, y positions as i64)
-    /// Returns: (cos, sin) each [B, num_patches, head_dim].
+    /// `position_ids`: [B, `num_patches`, 2] (x, y positions as i64)
+    /// Returns: (cos, sin) each [B, `num_patches`, `head_dim`].
     ///
     /// For each spatial dimension, frequencies are doubled (cat(freqs, freqs))
-    /// before computing cos/sin, matching HF's rotate_half application.
+    /// before computing cos/sin, matching HF's `rotate_half` application.
     fn forward(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
         let mut all_cos = Vec::new();
         let mut all_sin = Vec::new();
@@ -163,7 +163,7 @@ impl VisionRotaryEmbedding {
     }
 }
 
-/// Apply rotate_half to a tensor: split last dim in half, negate+swap.
+/// Apply `rotate_half` to a tensor: split last dim in half, negate+swap.
 fn rotate_half(x: &Tensor) -> Result<Tensor> {
     let half = x.dim(D::Minus1)? / 2;
     let x1 = x.narrow(D::Minus1, 0, half)?;
@@ -171,13 +171,13 @@ fn rotate_half(x: &Tensor) -> Result<Tensor> {
     Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)
 }
 
-/// Apply 2D RoPE to Q or K (multidimensional RoPE).
+/// Apply 2D `RoPE` to Q or K (multidimensional `RoPE`).
 ///
-/// x: [B, H, num_patches, head_dim]
-/// cos/sin: [B, num_patches, head_dim] (concatenated X and Y, each doubled)
+/// x: [B, H, `num_patches`, `head_dim`]
+/// cos/sin: [B, `num_patches`, `head_dim`] (concatenated X and Y, each doubled)
 ///
 /// Splits x and cos/sin into per-spatial-dimension parts and applies
-/// rotate_half independently to each, matching HF's apply_multidimensional_rope.
+/// `rotate_half` independently to each, matching HF's `apply_multidimensional_rope`.
 fn apply_2d_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let head_dim = x.dim(D::Minus1)?;
     let ndim = 2; // 2D spatial
@@ -228,10 +228,10 @@ impl VisionPatchEmbedder {
         })
     }
 
-    /// Compute 2D position embeddings using index_select from the learned table.
+    /// Compute 2D position embeddings using `index_select` from the learned table.
     ///
-    /// pixel_position_ids: [B, num_patches, 2] (i64)
-    /// padding_positions: [B, num_patches] (bool-like)
+    /// `pixel_position_ids`: [B, `num_patches`, 2] (i64)
+    /// `padding_positions`: [B, `num_patches`] (bool-like)
     fn position_embeddings(
         &self,
         pixel_position_ids: &Tensor,
@@ -623,9 +623,9 @@ impl Gemma4VisionModel {
 
     /// Forward pass.
     ///
-    /// * `pixel_values`: [B, num_patches, 3*patch_size^2] — flattened patch pixels
-    /// * `pixel_position_ids`: [B, num_patches, 2] — (x, y) positions as i64
-    /// * `padding_positions`: [B, num_patches] — bool mask (true = padding)
+    /// * `pixel_values`: [B, `num_patches`, 3*`patch_size`^2] — flattened patch pixels
+    /// * `pixel_position_ids`: [B, `num_patches`, 2] — (x, y) positions as i64
+    /// * `padding_positions`: [B, `num_patches`] — bool mask (true = padding)
     pub fn forward(
         &self,
         pixel_values: &Tensor,
@@ -727,11 +727,11 @@ impl ImagePreprocessConfig {
 
 /// Result of preprocessing an image for Gemma4 vision.
 pub struct PreprocessedImage {
-    /// Flattened patches: [1, num_patches_padded, patch_size² * 3]
+    /// Flattened patches: [1, `num_patches_padded`, `patch_size`² * 3]
     pub pixel_values: Tensor,
-    /// 2D position IDs: [1, num_patches_padded, 2] as i64
+    /// 2D position IDs: [1, `num_patches_padded`, 2] as i64
     pub pixel_position_ids: Tensor,
-    /// Padding mask: [1, num_patches_padded] (1.0 = padding, 0.0 = real)
+    /// Padding mask: [1, `num_patches_padded`] (1.0 = padding, 0.0 = real)
     pub padding_positions: Tensor,
     /// Number of image placeholder tokens to insert in the prompt
     pub num_image_tokens: usize,

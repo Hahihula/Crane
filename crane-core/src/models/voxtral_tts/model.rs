@@ -677,8 +677,8 @@ pub struct SpeechStream<'a> {
 impl SpeechStream<'_> {
     /// Generate the next codec frame and append it to `all_codes`.
     ///
-    /// Returns `Ok(true)` if generation is complete (END_AUDIO_CODE or
-    /// max_frames reached), `Ok(false)` if more frames can be generated.
+    /// Returns `Ok(true)` if generation is complete (`END_AUDIO_CODE` or
+    /// `max_frames` reached), `Ok(false)` if more frames can be generated.
     #[allow(clippy::cast_precision_loss)]
     fn generate_one_frame(&mut self) -> anyhow::Result<bool> {
         if self.frame_idx >= self.max_frames {

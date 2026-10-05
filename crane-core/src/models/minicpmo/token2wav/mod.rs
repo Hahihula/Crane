@@ -1,10 +1,10 @@
 //! CosyVoice2-style Token2wav vocoder: turns MiniCPM-o's TTS speech-token
 //! ids (`super::tts_llm`'s output) into a waveform. Real reference source:
-//! `stepaudio2` (bundled in the `minicpmo-utils` PyPI sdist) — see the plan
+//! `stepaudio2` (bundled in the `minicpmo-utils` `PyPI` sdist) — see the plan
 //! doc for how it was obtained and the architecture summary.
 //!
 //! **Zero-shot here means "the checkpoint's own baked-in default voice"**,
-//! not "no reference audio" — CosyVoice2's flow model is an x-vector
+//! not "no reference audio" — `CosyVoice2`'s flow model is an x-vector
 //! (speaker-embedding) conditioned CFM with no no-reference mode. This pass
 //! precomputes the system default reference's `prompt_token`/`prompt_feat`/
 //! `spk_emb` once (offline, via a Python script using the real `s3tokenizer`

@@ -1,8 +1,8 @@
-//! Micro-benchmark for the fused GDN recurrence kernel (CUDA or ROCm).
+//! Micro-benchmark for the fused GDN recurrence kernel (CUDA or `ROCm`).
 //!
 //! Isolates the kernel from the rest of the model so kernel changes can be
 //! measured directly. Usage:
-//!   gdn_bench [BH] [S] [K] [V] [iters]
+//!   `gdn_bench` [BH] [S] [K] [V] [iters]
 //! Defaults model Qwen3.5-0.8B single-sequence prefill: BH=16 S=512 K=128 V=128.
 //!
 //! Needs `--features cuda` or `--features rocm`; `required-features` cannot

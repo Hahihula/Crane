@@ -1,9 +1,9 @@
 //! MiniCPM-o-4.5 vision tower.
 //!
 //! Ported from `modeling_navit_siglip.py`'s `SiglipVisionTransformer` — a
-//! **padded-batch** SigLIP (per-image `pixel_values` padded to a common
+//! **padded-batch** `SigLIP` (per-image `pixel_values` padded to a common
 //! `[B, C, max_H, max_W]` canvas, with a boolean `patch_attention_mask`
-//! marking real vs. padding patches), *not* the NaViT single-packed-sequence
+//! marking real vs. padding patches), *not* the `NaViT` single-packed-sequence
 //! variant `crate::models::minicpm_v::vision` implements for MiniCPM-V-4.6.
 //! The per-patch math (bucketized position embedding, pre-norm MHA, GELU-tanh
 //! MLP) is the same shape of problem, but the batching/masking mechanics
@@ -158,7 +158,7 @@ impl Mlp {
 
 impl Mlp {
     /// GGUF equivalent of [`Self::new`] — every tensor here is standard
-    /// PyTorch `(out_features, in_features)`, **but** llama.cpp's
+    /// `PyTorch` `(out_features, in_features)`, **but** llama.cpp's
     /// `clip.cpp` exporter's `ffn_up`/`ffn_down` names are swapped
     /// relative to what they'd naively suggest: `ffn_down`'s bias has
     /// `intermediate_size` elements (it's actually the `hidden ->

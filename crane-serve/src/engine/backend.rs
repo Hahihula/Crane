@@ -124,9 +124,9 @@ pub trait ModelBackend: Send + 'static {
         None
     }
 
-    /// Worst-case transient VRAM one in-flight MoE CPU-offload call needs
+    /// Worst-case transient VRAM one in-flight `MoE` CPU-offload call needs
     /// for a `chunk_tokens`-token prefill chunk. 0 for backends without
-    /// CPU-offloaded MoE experts (the default).
+    /// CPU-offloaded `MoE` experts (the default).
     fn moe_offload_reservation_bytes(&self, _chunk_tokens: usize) -> u64 {
         0
     }
@@ -777,7 +777,7 @@ pub struct ExpertPromotionPolicy {
     /// KV cache VRAM. `None` or `Some(0)` falls back to a conservative
     /// default.
     pub max_seq_len: Option<usize>,
-    /// Prefill chunk size used to estimate the transient MoE CPU-offload
+    /// Prefill chunk size used to estimate the transient `MoE` CPU-offload
     /// VRAM reservation (see `Model::moe_offload_reservation_bytes`).
     /// Promotion must subtract this same reservation before deciding how
     /// many layers fit, or the budget it leaves for the KV cache can't

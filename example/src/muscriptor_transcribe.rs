@@ -1,4 +1,4 @@
-//! MuScriptor: transcribe audio to MIDI.
+//! `MuScriptor`: transcribe audio to MIDI.
 //!
 //! Minimal CLI for now — `--list-fixtures` works without the model
 //! loaded, `--transcribe <wav>` needs a `model_dir` argument that
@@ -17,7 +17,7 @@ use crane_core::candle_core;
 #[derive(Parser, Debug)]
 #[command(about = "MuScriptor (muscriptor) audio-to-MIDI transcription CLI")]
 struct Args {
-    /// Path to the MuScriptor checkpoint directory. Must contain
+    /// Path to the `MuScriptor` checkpoint directory. Must contain
     /// `config.json` and `model.safetensors`.
     #[arg(long, required_unless_present = "list_fixtures")]
     model_dir: Option<String>,

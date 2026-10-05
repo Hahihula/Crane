@@ -1,10 +1,10 @@
 //! Basic-mode sliding-window KV cache eviction (phase 6b) — cache-length-
-//! triggered, drop the oldest whole "units", realign RoPE for the
+//! triggered, drop the oldest whole "units", realign `RoPE` for the
 //! survivors. Ported from `utils.py`'s `drop_tokens_from_cache`/
 //! `realign_rotary_suffix`/`get_rotary_cos_sin` (see the plan doc for the
 //! real reference source).
 //!
-//! Cached keys are stored **post-RoPE** (RoPE is applied before caching in
+//! Cached keys are stored **post-RoPE** (`RoPE` is applied before caching in
 //! `qwen3::modeling::Attention::forward`, same as the real HF
 //! `DynamicCache`), so dropping a range from the middle of the cache
 //! leaves the surviving suffix's rotation pointing at now-stale absolute
@@ -47,7 +47,7 @@ fn full_width_cos_sin(
     Ok((cos, sin))
 }
 
-/// Re-derive RoPE for `keys` (shape `[B, H, len, D]`, currently rotated as
+/// Re-derive `RoPE` for `keys` (shape `[B, H, len, D]`, currently rotated as
 /// if positioned at `old_start..old_start+len`) so they read as if
 /// originally rotated at `new_start..new_start+len` instead — undo the old
 /// rotation, then reapply at the new positions. Mirrors
@@ -75,7 +75,7 @@ pub(crate) fn realign_rotary_suffix(
 
 /// Drop `length` cached tokens starting right after the first `preserve`
 /// tokens (protecting e.g. the system prompt), realigning the survivors'
-/// RoPE so they read as a contiguous, un-gapped sequence. Mirrors
+/// `RoPE` so they read as a contiguous, un-gapped sequence. Mirrors
 /// `drop_tokens_from_cache` in `utils.py`. Operates on the `(K, V)` pairs
 /// from `MiniCpmOLlm::get_kv_caches`; pass the result to
 /// `MiniCpmOLlm::set_kv_caches` afterward.

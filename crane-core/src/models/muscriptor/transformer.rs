@@ -1,4 +1,4 @@
-//! Streaming causal transformer used by MuScriptor.
+//! Streaming causal transformer used by `MuScriptor`.
 //!
 //! Faithful port of the upstream `muscriptor/modules/transformer.py`:
 //!
@@ -13,10 +13,10 @@
 //! * Attention is bottom-right aligned. Two fast paths hit the simple
 //!   matmul/softmax kernel: `T_q == 1` (decode, no mask needed) and
 //!   `T_q == T_k` (prefill, full causal).
-//! * No RoPE, no QK-norm, no GQA — plain multi-head attention.
+//! * No `RoPE`, no QK-norm, no GQA — plain multi-head attention.
 //! * Linear projections carry no bias.
 //! * Feed-forward uses GELU.
-//! * Pre-norm LayerNorm, eps = `1e-5`.
+//! * Pre-norm `LayerNorm`, eps = `1e-5`.
 
 use candle_core::quantized::GgmlDType;
 use candle_core::{D, DType, Device, Module, Result, Tensor};

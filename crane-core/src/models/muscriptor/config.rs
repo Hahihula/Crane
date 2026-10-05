@@ -20,7 +20,7 @@
 use candle_core::DType;
 use serde::Deserialize;
 
-/// Sample rate (Hz) the upstream MelSpectrogramConditioner expects.
+/// Sample rate (Hz) the upstream `MelSpectrogramConditioner` expects.
 pub const SAMPLE_RATE: usize = 16_000;
 /// Segment duration (seconds) the model emits tokens over per forward
 /// pass. Matches `_SEGMENT_DURATION` in `transcription_model.py`.

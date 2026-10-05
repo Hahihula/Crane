@@ -110,7 +110,7 @@ pub fn build_kokoro_normalizer(
 /// whether a vowel sits next to `ʁ`) — changing this set affects both.
 ///
 /// Taken from the actual character inventory of `g2p/de_de/test.tsv` in the
-/// `crane-local-ai/test-data` HuggingFace dataset (the Duden/CELEX-style
+/// `crane-local-ai/test-data` `HuggingFace` dataset (the Duden/CELEX-style
 /// reference corpus `dict.tsv` is drawn from), plus the orthographic
 /// umlauts `ä ö ü` defensively (Crane's own G2P rules convert these to
 /// their IPA equivalents before this function ever sees them, but there's

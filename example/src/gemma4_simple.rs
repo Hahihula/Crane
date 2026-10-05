@@ -1,7 +1,7 @@
 //! Simple Gemma 4 text generation example using crane-core directly.
 //!
 //! Usage:
-//!   cargo run --bin gemma4_simple -- /path/to/gemma-4-E2B
+//!   cargo run --bin `gemma4_simple` -- /path/to/gemma-4-E2B
 
 use anyhow::Result;
 use crane_core::generation::GenerationConfig;

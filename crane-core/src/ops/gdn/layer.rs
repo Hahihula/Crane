@@ -1,5 +1,5 @@
 //! Top-level `GatedDeltaNet` layer: orchestrates input projection, causal
-//! Conv1D, gated delta rule recurrence, gated RMSNorm, and output projection.
+//! `Conv1D`, gated delta rule recurrence, gated `RMSNorm`, and output projection.
 
 use candle_core::quantized::GgmlDType;
 use candle_core::{Module, Result, Tensor};
@@ -44,7 +44,7 @@ impl GatedDeltaNet {
     /// `cfg` supplies the dimensions; `projection_kind` selects the QKV/Z/B/A
     /// weight layout (Qwen 3.5 uses [`GdnInputProjectionKind::Split`]).
     /// `quant` requests in-situ quantization of the large projections
-    /// (conv1d / dt_bias / A_log / norm always stay in full precision).
+    /// (conv1d / `dt_bias` / `A_log` / norm always stay in full precision).
     pub fn load(
         vb: VarBuilder,
         cfg: &dyn GdnConfig,

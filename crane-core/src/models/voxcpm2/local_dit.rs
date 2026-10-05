@@ -1,6 +1,6 @@
-//! The flow-matching velocity estimator: a DiT whose conditioning (LM
+//! The flow-matching velocity estimator: a `DiT` whose conditioning (LM
 //! context `mu`, timestep `t`, previous-patch `cond`) is concatenated as
-//! extra sequence tokens rather than injected via AdaLN. Port of
+//! extra sequence tokens rather than injected via `AdaLN`. Port of
 //! `locdit/local_dit_v2.py`'s `VoxCPMLocDiT` (imported upstream as
 //! `VoxCPMLocDiTV2` — `locdit/__init__.py` aliases it on import; the class
 //! itself is named identically to the older, structurally different V1 in
@@ -13,7 +13,7 @@ use super::config::MiniCpm4Config;
 use super::minicpm4::MiniCpm4Model;
 
 /// Functional (no learnable params) sinusoidal timestep embedding. Port of
-/// `SinusoidalPosEmb` — output width is `2 * freqs.len()` (the DiT's
+/// `SinusoidalPosEmb` — output width is `2 * freqs.len()` (the `DiT`'s
 /// `hidden_size`). `freqs` is the precomputed `[hidden_size/2]` frequency
 /// table (see [`VoxCpmLocDit::time_freqs`]) — identical on every call, so it
 /// is built once at construction instead of re-uploaded per Euler step.

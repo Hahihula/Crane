@@ -390,7 +390,7 @@ fn dequantize_q2_0(blocks: &[u8], out: &mut [f32]) {
 }
 
 /// Whether linear layers keep i-quant weights packed and run them through
-/// the native kernels (CUDA / SYCL / Metal / ROCm). True unless
+/// the native kernels (CUDA / SYCL / Metal / `ROCm`). True unless
 /// `CRANE_IQ_REQUANT` names an explicit target, which forces re-quantization
 /// everywhere (handy for A/B comparisons).
 pub fn native_enabled() -> bool {
@@ -398,7 +398,7 @@ pub fn native_enabled() -> bool {
 }
 
 /// Candle-native type to re-quantize i-quant tensors into when they are not
-/// run natively: on non-CUDA devices, for embeddings and packed MoE experts,
+/// run natively: on non-CUDA devices, for embeddings and packed `MoE` experts,
 /// or everywhere when `CRANE_IQ_REQUANT` is set.
 ///
 /// `CRANE_IQ_REQUANT` picks it (`q4k`, `q5k`, `q6k`, `q8_0`); unset or
@@ -512,7 +512,7 @@ const PREFILL_CHUNK_BYTES: usize = 256 << 20;
 /// device (see `kernels/cuda/quant_iq4.cu`,
 /// `kernels/sycl/quant_iq.cpp`, `kernels/metal/quant_iq.metal`).
 ///
-/// Only built for CUDA / SYCL / Metal / ROCm by [`Gguf`](super::gguf_file::Gguf);
+/// Only built for CUDA / SYCL / Metal / `ROCm` by [`Gguf`](super::gguf_file::Gguf);
 /// other devices get a re-quantized `QMatMul` instead. The CPU path here
 /// dequantizes the whole weight per call and exists for tests and device
 /// fallbacks.

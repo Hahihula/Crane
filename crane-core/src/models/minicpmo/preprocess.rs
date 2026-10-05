@@ -189,7 +189,7 @@ pub fn process_image(
     })
 }
 
-/// Pack multiple already-processed images into one NaViT batch (`[1, C,
+/// Pack multiple already-processed images into one `NaViT` batch (`[1, C,
 /// patch_size, total_patches*patch_size]`) plus the flat, in-order
 /// `target_sizes` list `VisionModel::forward` expects.
 pub fn pack_images(images: &[ProcessedImage]) -> Result<(Tensor, Vec<(usize, usize)>)> {

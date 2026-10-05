@@ -52,7 +52,7 @@ pub trait ChatTemplateProcessor: Send + Sync {
 /// assistant's `tool_calls` so the template can re-render them, otherwise the
 /// model sees its own call vanish from the history and calls again forever.
 ///
-/// `arguments` is translated from OpenAI's JSON *string* into an object,
+/// `arguments` is translated from `OpenAI`'s JSON *string* into an object,
 /// because the Qwen templates iterate it (`tool_call.arguments|items`) and a
 /// string would fail that filter.
 fn message_to_json(m: &ChatMessage) -> serde_json::Value {

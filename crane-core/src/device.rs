@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 //! Device assignment and reusable VRAM-accounting primitives for models
-//! with offloadable sub-components (e.g. MoE experts).
+//! with offloadable sub-components (e.g. `MoE` experts).
 
 use candle_core::Device;
 
@@ -50,7 +50,7 @@ pub const fn kv_batch_factor(max_concurrent: usize) -> u64 {
 /// overlap, plus [`KV_SAFETY_MARGIN_BYTES`] for allocator fragmentation.
 ///
 /// Used at model-load time to reserve VRAM headroom for the KV cache
-/// before deciding how much is left for other uses (e.g. MoE expert
+/// before deciding how much is left for other uses (e.g. `MoE` expert
 /// placement). Inverse: [`kv_budget_from_headroom`].
 #[must_use]
 pub const fn kv_vram_overhead(raw_kv_bytes: u64, max_concurrent: usize) -> u64 {
@@ -65,7 +65,7 @@ pub const fn kv_budget_from_headroom(headroom_bytes: u64, max_concurrent: usize)
     headroom_bytes.saturating_sub(KV_SAFETY_MARGIN_BYTES) / kv_batch_factor(max_concurrent)
 }
 
-/// Bundles the primary inference device with the device MoE expert weights
+/// Bundles the primary inference device with the device `MoE` expert weights
 /// load onto.
 ///
 /// Two adjacent same-typed `&Device` parameters invite an unchecked swap at
@@ -73,15 +73,15 @@ pub const fn kv_budget_from_headroom(headroom_bytes: u64, max_concurrent: usize)
 /// impossibility instead of a silent bug.
 #[derive(Debug, Clone)]
 pub struct DeviceAssignment {
-    /// Device for model weights and inference (everything but MoE experts).
+    /// Device for model weights and inference (everything but `MoE` experts).
     pub main: Device,
-    /// Device for MoE expert weights. Same as `main` when expert offloading
-    /// is not needed; ignored by models and formats without MoE experts.
+    /// Device for `MoE` expert weights. Same as `main` when expert offloading
+    /// is not needed; ignored by models and formats without `MoE` experts.
     pub expert: Device,
 }
 
 impl DeviceAssignment {
-    /// All weights, including MoE experts, on the same device.
+    /// All weights, including `MoE` experts, on the same device.
     pub fn uniform(device: &Device) -> Self {
         Self {
             main: device.clone(),

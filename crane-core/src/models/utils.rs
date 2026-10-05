@@ -1,4 +1,4 @@
-//! Shared utilities: repeat_kv, repeat_penalty, causal mask.
+//! Shared utilities: `repeat_kv`, `repeat_penalty`, causal mask.
 
 use candle_core::{Device, Result, Tensor};
 

@@ -1,6 +1,6 @@
-//! CosyVoice2's `CausalConditionalCFM` — the Euler ODE sampler driving
+//! `CosyVoice2`'s `CausalConditionalCFM` — the Euler ODE sampler driving
 //! [`super::dit::DiT`]. Ported from `stepaudio2.cosyvoice2.flow.flow_matching`
-//! (real reference source). Simpler than VoxCPM2's CFM: plain cosine-warped
+//! (real reference source). Simpler than `VoxCPM2`'s CFM: plain cosine-warped
 //! timesteps (no sway-sampling) and plain linear classifier-free guidance
 //! (no CFG-Zero-star) — see the module doc on `Token2wav` for the summary.
 //! Non-streaming (`forward`/`solve_euler`) only.

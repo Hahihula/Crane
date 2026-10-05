@@ -2,7 +2,7 @@
 //! `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF`).
 //!
 //! Usage:
-//!   cargo run --release --features sycl --bin qwen4_exp_simple -- \
+//!   cargo run --release --features sycl --bin `qwen4_exp_simple` -- \
 //!       /path/to/Model-00001-of-00002.gguf "Write a Rust function that reverses a string."
 //!
 //! Pass the first shard; the n-gram table in the second one is memory-mapped

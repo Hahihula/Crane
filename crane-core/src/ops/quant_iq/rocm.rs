@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-//! Launchers for `kernels/cuda/quant_iq4.cu` (IQ4_XS `dp4a` decode, IQ4
+//! Launchers for `kernels/cuda/quant_iq4.cu` (`IQ4_XS` `dp4a` decode, IQ4
 //! dequant) and `kernels/cuda/quant_iq.cu` (every other type's float matvec
 //! and dequant, plus the by-expert-id routing packed `MoE` experts need) on
 //! ROCm/HIP.
@@ -150,11 +150,11 @@ fn matvec_geometry(rows: usize, output_rows: usize) -> Result<(usize, Dim3, Dim3
     Ok((nr, grid, block))
 }
 
-/// `input` (`[rows, cols]`, ROCm f32/f16/bf16) times the transposed packed
+/// `input` (`[rows, cols]`, `ROCm` f32/f16/bf16) times the transposed packed
 /// weight (`[output_rows, cols]`), returning `[rows, output_rows]` in
 /// `out_dtype`.
 ///
-/// IQ4_XS quantizes the activations to int8 (one scale per 32 values) and
+/// `IQ4_XS` quantizes the activations to int8 (one scale per 32 values) and
 /// runs an integer `dp4a` dot product, like llama.cpp, writing the output
 /// directly in `out_dtype`. Every other type runs `quant_iq.cu`'s
 /// type-generic float kernel instead (see [`launch_generic_matvec`]). Meant
@@ -163,7 +163,7 @@ fn matvec_geometry(rows: usize, output_rows: usize) -> Result<(usize, Dim3, Dim3
 ///
 /// # Errors
 ///
-/// Returns an error if the tensors are not on a ROCm device, `out_dtype`
+/// Returns an error if the tensors are not on a `ROCm` device, `out_dtype`
 /// isn't F32/F16/BF16, or a kernel launch fails.
 pub fn matvec(
     input: &Tensor,
@@ -305,7 +305,7 @@ fn matvec_xs(
 ///
 /// # Errors
 ///
-/// Returns an error if `packed` is not a ROCm u8 tensor, `dtype` isn't
+/// Returns an error if `packed` is not a `ROCm` u8 tensor, `dtype` isn't
 /// F32/F16/BF16, or the kernel launch fails.
 pub fn dequantize(
     packed: &Tensor,
@@ -366,7 +366,7 @@ pub fn dequantize(
 }
 
 /// `output[p, r] = dot(W_e[r], input[p / x_div])` via `quant_iq.cu`'s
-/// type-generic `matvec_{type}_{dtype}` kernels — every type but the IQ4_XS
+/// type-generic `matvec_{type}_{dtype}` kernels — every type but the `IQ4_XS`
 /// dp4a fast path (see [`matvec`]), and the only `ROCm` path with expert-id
 /// routing built in (`ids`/`has_ids`), which [`matvec_indexed`] uses.
 #[allow(clippy::too_many_arguments)]
@@ -474,7 +474,7 @@ fn launch_generic_matvec(
 /// Decode `n_mats` matrices of `n_rows` x `cols` from `packed` (optionally
 /// one per entry of `ids`) into `[n_mats * n_rows, cols]`, via
 /// `quant_iq.cu`'s type-generic `dequant_{type}_{dtype}` kernels — every
-/// type but IQ4_XS/IQ4_NL (see [`dequantize`]), and the only `ROCm` path that
+/// type but `IQ4_XS`/`IQ4_NL` (see [`dequantize`]), and the only `ROCm` path that
 /// can decode a list of experts in one launch (see [`dequantize_experts`]).
 #[allow(clippy::too_many_arguments)]
 fn launch_generic_dequant(
@@ -578,7 +578,7 @@ fn launch_generic_dequant(
 ///
 /// # Errors
 ///
-/// Returns an error if the tensors are not on a ROCm device, `dtype` isn't
+/// Returns an error if the tensors are not on a `ROCm` device, `dtype` isn't
 /// F32/F16/BF16, or the kernel launch fails.
 pub fn dequantize_experts(
     packed: &Tensor,
@@ -601,7 +601,7 @@ pub fn dequantize_experts(
 ///
 /// # Errors
 ///
-/// Returns an error if the tensors are not on a ROCm device, `ids` is not
+/// Returns an error if the tensors are not on a `ROCm` device, `ids` is not
 /// `U32`, `out_dtype` isn't F32/F16/BF16, or the kernel launch fails.
 #[allow(clippy::too_many_arguments)]
 pub fn matvec_indexed(

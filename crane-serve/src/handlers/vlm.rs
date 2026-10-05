@@ -1,4 +1,4 @@
-//! VLM (Vision-Language Model) handlers for PaddleOCR-VL and Gemma4VL.
+//! VLM (Vision-Language Model) handlers for PaddleOCR-VL and `Gemma4VL`.
 //!
 //! These handlers bypass the text-only engine and use VLM models directly
 //! for image+text inference.
@@ -48,7 +48,7 @@ pub enum VlmRequest {
 
 /// Decode an image from either an HTTP(S) URL or a `data:image/...;base64,...`
 /// inline URI to a temporary file. Returns the path to the temp file (the
-/// file persists until the TempDir is dropped).
+/// file persists until the `TempDir` is dropped).
 async fn download_image(url: &str) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
     let dir = tempfile::TempDir::new().map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
@@ -821,7 +821,7 @@ pub async fn minicpm_v_vlm_chat_completions(
     Ok(Json(response).into_response())
 }
 
-/// Gemma4VL chat completions handler.
+/// `Gemma4VL` chat completions handler.
 pub async fn gemma4_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,

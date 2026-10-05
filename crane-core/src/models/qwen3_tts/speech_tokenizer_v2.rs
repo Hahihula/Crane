@@ -1052,7 +1052,7 @@ impl EncoderResidualUnit {
     }
 }
 
-/// EnCodec encoder block: residual units + downsampling conv.
+/// `EnCodec` encoder block: residual units + downsampling conv.
 #[derive(Debug, Clone)]
 struct EncoderBlock {
     residuals: Vec<EncoderResidualUnit>,
@@ -1106,7 +1106,7 @@ impl EncoderBlock {
 }
 
 /// Encoder transformer layer (same architecture as decoder, reused).
-/// Uses LayerNorm (not RMSNorm) and GELU activation.
+/// Uses `LayerNorm` (not `RMSNorm`) and GELU activation.
 #[derive(Debug, Clone)]
 struct EncoderTransformerLayer {
     input_ln: LayerNorm,
@@ -1195,7 +1195,7 @@ impl EncoderTransformerLayer {
     }
 }
 
-/// EuclideanCodebook encode: nearest-neighbor lookup.
+/// `EuclideanCodebook` encode: nearest-neighbor lookup.
 impl EuclideanCodebook {
     #[allow(dead_code)]
     fn encode(&self, x: &Tensor) -> Result<Tensor> {
@@ -1334,7 +1334,7 @@ impl EncVectorQuantization {
     }
 }
 
-/// Encoder-side SplitRVQ: encode audio latent → [B, T, n_q] codes.
+/// Encoder-side `SplitRVQ`: encode audio latent → [B, T, `n_q`] codes.
 struct EncoderSplitRVQ {
     semantic_input_proj: PointwiseProjNoBias,
     acoustic_input_proj: PointwiseProjNoBias,
@@ -1382,7 +1382,7 @@ impl EncoderSplitRVQ {
         })
     }
 
-    /// Encode: x [B, D, T] → codes [B, T, n_q_total].
+    /// Encode: x [B, D, T] → codes [B, T, `n_q_total`].
     fn encode(&self, x: &Tensor) -> Result<Tensor> {
         let sem_x = self.semantic_input_proj.forward(x)?; // [B, dim, T]
         let aco_x = self.acoustic_input_proj.forward(x)?;
@@ -1409,7 +1409,7 @@ impl EncoderSplitRVQ {
     }
 }
 
-/// Full Mimi encoder: audio [B, 1, N] → codes [B, T, n_q].
+/// Full Mimi encoder: audio [B, 1, N] → codes [B, T, `n_q`].
 #[allow(dead_code)]
 pub struct MimiEncoder {
     encoder_layers: Vec<EncoderBlock>,
@@ -1522,7 +1522,7 @@ impl MimiEncoder {
         })
     }
 
-    /// Encode audio [B, 1, N] → codes [B, T, valid_n_q].
+    /// Encode audio [B, 1, N] → codes [B, T, `valid_n_q`].
     pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
         // audio: [B, 1, N], CausalConvNet expects [B, C, T]
         // Ensure audio is F32 to match encoder weights (loaded in F32)
@@ -1581,7 +1581,7 @@ pub struct NativeSpeechTokenizerDecoder {
     dtype: DType,
 }
 
-/// HF Mimi encoder path (official-style): audio [B,1,N] -> codes [B,T,valid_n_q].
+/// HF Mimi encoder path (official-style): audio [B,1,N] -> codes [`B,T,valid_n_q`].
 /// This implementation mirrors the vendor qwen3-tts-rs-3 encoder for ref-code extraction.
 struct HfMimiEncoder {
     encoder: mimi::seanet::SeaNetEncoder,

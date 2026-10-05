@@ -1,8 +1,8 @@
 //! Numerical kernels for Gated Delta Net: L2 normalization, softplus, the
-//! gated delta rule recurrence, causal Conv1D, and dispatch.
+//! gated delta rule recurrence, causal `Conv1D`, and dispatch.
 //!
 //! The portable recurrence is a composition of Candle tensor ops, so it runs
-//! on any device (CPU/CUDA/Metal/ROCm). On CUDA and ROCm a fused kernel is
+//! on any device (CPU/CUDA/Metal/ROCm). On CUDA and `ROCm` a fused kernel is
 //! also available (see [`super::cuda_backend`] / [`super::rocm_backend`]) and
 //! is used by default; set `CRANE_GDN_PORTABLE=1` to force the portable
 //! op-by-op path for cross-checking numerics.
@@ -218,7 +218,7 @@ pub fn compute_beta_g(
 ///
 /// The recurrence is written in pure-Candle tensor ops, so it runs on any
 /// device (CPU/CUDA/Metal/ROCm) — every op has a native backend kernel. On
-/// CUDA and ROCm the fused single-launch kernel is used by default (see
+/// CUDA and `ROCm` the fused single-launch kernel is used by default (see
 /// [`super::cuda_backend`] / [`super::rocm_backend`]); set
 /// `CRANE_GDN_PORTABLE=1` to force the portable op-by-op path for
 /// cross-checking numerics.

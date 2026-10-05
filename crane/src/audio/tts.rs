@@ -17,7 +17,7 @@ use super::pcm::AudioInfo;
 /// Wyoming `info` event and the HTTP API voice listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceInfo {
-    /// Voice identifier (e.g. "neutral_female", "Chelsie").
+    /// Voice identifier (e.g. "`neutral_female`", "Chelsie").
     pub name: String,
     /// Language identifiers this voice supports (e.g. `["en", "zh"]`).
     ///

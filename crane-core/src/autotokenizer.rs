@@ -178,7 +178,7 @@ impl AutoTokenizer {
     }
 
     /// Build an `AutoTokenizer` from a `.gguf` file using its embedded
-    /// tokenizer and chat_template metadata. Returns an error if the GGUF
+    /// tokenizer and `chat_template` metadata. Returns an error if the GGUF
     /// lacks `tokenizer.ggml.tokens` (older / third-party quantizers).
     pub fn from_gguf<P: AsRef<std::path::Path>>(
         path: P,

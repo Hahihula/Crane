@@ -1,5 +1,5 @@
-//! Config structs for Qwen3-ASR checkpoint layouts. HuggingFace checkpoints
-//! keep `audio_config`/`text_config` at the root, while ModelScope wraps them
+//! Config structs for Qwen3-ASR checkpoint layouts. `HuggingFace` checkpoints
+//! keep `audio_config`/`text_config` at the root, while `ModelScope` wraps them
 //! in `thinker_config`.
 
 use candle_nn::Activation;
@@ -147,10 +147,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parses either the flat HuggingFace layout or ModelScope's
-    /// `thinker_config`-wrapped layout. ModelScope omits a few fields that are
+    /// Parses either the flat `HuggingFace` layout or `ModelScope`'s
+    /// `thinker_config`-wrapped layout. `ModelScope` omits a few fields that are
     /// fixed for released Qwen3-ASR checkpoints; those are restored from the
-    /// published HuggingFace defaults. When defaults are applied, the returned
+    /// published `HuggingFace` defaults. When defaults are applied, the returned
     /// string lists every substituted field and value for logging.
     pub fn from_json_slice(data: &[u8]) -> Result<(Self, Option<String>), serde_json::Error> {
         let value: serde_json::Value = serde_json::from_slice(data)?;

@@ -24,9 +24,9 @@ pub struct MemoryConfig {
     /// `(gpu_memory_limit_bytes - baseline)` so that the limit represents
     /// the *total* allowed usage, not just KV-cache growth.
     pub baseline_gpu_bytes: u64,
-    /// Reserved VRAM for one worst-case MoE CPU-offload burst during
+    /// Reserved VRAM for one worst-case `MoE` CPU-offload burst during
     /// prefill. Subtracted from the limit before computing `kv_budget`. 0
-    /// for non-MoE models or when every MoE layer is GPU-resident.
+    /// for non-`MoE` models or when every `MoE` layer is GPU-resident.
     pub moe_offload_reservation_bytes: u64,
 }
 

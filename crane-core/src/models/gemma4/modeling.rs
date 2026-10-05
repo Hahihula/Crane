@@ -4,19 +4,19 @@
 //!
 //! 1. **Hybrid attention** — sliding window (512 tokens) + full causal attention
 //!    per a repeating `layer_types` pattern.
-//! 2. **Dual RoPE** — sliding: theta=10K, full rotation over head_dim=256.
-//!    Full: theta=1M, partial rotation (25%) over global_head_dim=512.
+//! 2. **Dual `RoPE`** — sliding: theta=10K, full rotation over `head_dim`=256.
+//!    Full: theta=1M, partial rotation (25%) over `global_head_dim`=512.
 //! 3. **Per-Layer Embeddings (PLE)** — gated per-layer token embeddings applied
 //!    after attention+MLP as a final residual step in each decoder layer.
 //! 4. **KV cache sharing** — layers 15-34 share K/V from prior non-shared layers
 //!    of the same type (sliding→layer 13, full→layer 14).
-//! 5. **GELU-tanh activation** — MLP uses `gelu_pytorch_tanh` instead of SiLU.
+//! 5. **GELU-tanh activation** — MLP uses `gelu_pytorch_tanh` instead of `SiLU`.
 //! 6. **Logit softcapping** — `tanh(logits / cap) * cap` before output.
 //! 7. **Pre-allocated KV cache** with in-place `slice_set` writes.
-//! 8. **GQA-grouped SDPA** for decode (seq_len=1).
+//! 8. **GQA-grouped SDPA** for decode (`seq_len`=1).
 //! 9. **GGUF quantization** via the polymorphic `LinearLayer` enum.
 //! 10. **Pre+post norm pairs** — 4 norms per layer (Gemma-style).
-//! 11. **QK norms** — per-head RMSNorm applied before RoPE.
+//! 11. **QK norms** — per-head `RMSNorm` applied before `RoPE`.
 //! 12. **Layer scalar** — learnable per-layer scaling factor.
 
 use candle_core::quantized::gguf_file;
@@ -227,7 +227,7 @@ fn apply_partial_rope(
     ))
 }
 
-/// RMS normalization without learnable scale (Gemma4's v_norm uses with_scale=False).
+/// RMS normalization without learnable scale (Gemma4's `v_norm` uses `with_scale`=False).
 pub fn rms_normalize(x: &Tensor, eps: f64) -> Result<Tensor> {
     let dtype = x.dtype();
     let x_f32 = x.to_dtype(DType::F32)?;
@@ -836,7 +836,7 @@ pub struct Gemma4Model {
 }
 
 impl Gemma4Model {
-    /// Construct from safetensors / HuggingFace checkpoint.
+    /// Construct from safetensors / `HuggingFace` checkpoint.
     /// `is_multimodal` controls whether tensors are under `model.language_model.` or `model.`.
     pub fn new(config: &Gemma4TextConfig, vb: VarBuilder, is_multimodal: bool) -> Result<Self> {
         let dtype = vb.dtype();
@@ -1210,7 +1210,7 @@ impl Gemma4Model {
         self.forward_inner(input_ids, hidden_states, start_pos)
     }
 
-    /// Expose embed_tokens for VLM use (embed + scale).
+    /// Expose `embed_tokens` for VLM use (embed + scale).
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {
         let hidden_states = self.embed_tokens.forward(input_ids)?.to_dtype(self.dtype)?;
         hidden_states * self.embed_scale

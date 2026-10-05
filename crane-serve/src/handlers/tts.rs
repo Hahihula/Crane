@@ -33,9 +33,9 @@ pub struct TtsGenerateRequest {
     pub top_p: Option<f64>,
     pub repetition_penalty: f32,
     pub max_tokens: usize,
-    /// VoxCPM2 only: flow-matching sampler steps per frame (`None` = model default).
+    /// `VoxCPM2` only: flow-matching sampler steps per frame (`None` = model default).
     pub cfm_steps: Option<usize>,
-    /// VoxCPM2 only: classifier-free guidance strength (`None` = model default).
+    /// `VoxCPM2` only: classifier-free guidance strength (`None` = model default).
     pub cfg_scale: Option<f64>,
     /// Reference audio path for voice cloning (Base model only).
     pub reference_audio: Option<String>,

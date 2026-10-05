@@ -6,8 +6,8 @@
 //! verbatim — so it's reused directly instead of duplicated.
 //!
 //! The vision tower (`vision_config`) is architecturally unrelated to Qwen's
-//! own ViT (Conv3d + `PatchMerger`) and to MiniCPM-o's classic Perceiver
-//! `Resampler`; see `vision.rs` / `merger.rs` for the actual (NaViT + mid-stack
+//! own `ViT` (Conv3d + `PatchMerger`) and to MiniCPM-o's classic Perceiver
+//! `Resampler`; see `vision.rs` / `merger.rs` for the actual (`NaViT` + mid-stack
 //! window-attention merger + hierarchical downsample) design.
 
 use serde::Deserialize;
@@ -98,7 +98,7 @@ pub struct Config {
     /// Number of iterative merge rounds in the `Merger`.
     #[serde(default = "default_merger_times")]
     pub merger_times: usize,
-    /// `"16x"` (default, full merge pipeline) or `"4x"` (skip the vit_merger,
+    /// `"16x"` (default, full merge pipeline) or `"4x"` (skip the `vit_merger`,
     /// keep 4x more visual tokens). Only `"16x"` is exercised by this MVP.
     #[serde(default = "default_downsample_mode")]
     pub downsample_mode: String,

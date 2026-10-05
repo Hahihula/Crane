@@ -350,7 +350,7 @@ pub async fn detokenize(
 //  Helpers
 // ─────────────────────────────────────────────────────────────
 
-/// Collect all response chunks into (full_text, prompt_tokens, completion_tokens, finish_reason).
+/// Collect all response chunks into (`full_text`, `prompt_tokens`, `completion_tokens`, `finish_reason`).
 async fn collect_response(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineResponse>,
 ) -> Result<(String, usize, usize, String), (StatusCode, Json<ErrorResponse>)> {

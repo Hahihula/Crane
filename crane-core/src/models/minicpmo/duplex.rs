@@ -11,7 +11,7 @@
 //!
 //! **Scope simplification (deliberate, not yet ported)**: the real
 //! `_generate_waveform_from_tokens` also streams the *vocoder* itself
-//! (`Token2wav.stream`, CosyVoice2's genuine chunked CFM + streaming
+//! (`Token2wav.stream`, `CosyVoice2`'s genuine chunked CFM + streaming
 //! HiFi-GAN with a cached reference-prompt encoding and a lookahead
 //! buffer) so audio can start playing mid-turn. That's a novel subsystem
 //! with no analog anywhere in this codebase — in particular the DiT/CFM's
@@ -37,7 +37,7 @@
 //! `StreamDecoder.feed`/`decode`/`register_unit_start`/`register_unit_end`/
 //! `enforce_window`/`enforce_window_with_context`/`_update_previous`/
 //! `_rebuild_cache_with_previous` (real reference source — see the plan
-//! doc). Basic-mode eviction's RoPE realignment
+//! doc). Basic-mode eviction's `RoPE` realignment
 //! (`drop_tokens_from_cache`/`realign_rotary_suffix`) lives in
 //! `super::sliding_window`, kept separate so its math can be
 //! hand-computed-value unit tested without needing a model loaded — see
@@ -198,7 +198,7 @@ pub struct DuplexSession {
     /// here — it gets an independent short-circuit check first, same as Python).
     forbidden_token_ids: Vec<u32>,
 
-    /// Table for the sliding-window RoPE realignment
+    /// Table for the sliding-window `RoPE` realignment
     /// (`super::sliding_window`) — sized to the LLM's own
     /// `max_position_embeddings`/`rope_theta`/`head_dim`, independent of
     /// `MiniCpmOLlm`'s internal rotary table.
@@ -283,7 +283,7 @@ impl DuplexSession {
     /// quantized GGUF file instead of the checkpoint's own bf16/f32
     /// safetensors weights (see [`MiniCpmOLlm::from_gguf`]) — the other
     /// towers still load from `model_path`'s safetensors as usual.
-    /// Q8_0 is roughly half the VRAM of bf16, which is the difference
+    /// `Q8_0` is roughly half the VRAM of bf16, which is the difference
     /// between a full session barely fitting on a 24GB card (near-zero
     /// headroom) and fitting comfortably. Kept as a convenience wrapper
     /// around [`Self::new_with_gguf`] — the LLM swap is the one with a real
@@ -322,7 +322,7 @@ impl DuplexSession {
     /// still loads its weights from there too.
     ///
     /// Only the LLM's GGUF (`gguf.llm`) has a real VRAM payoff (its
-    /// upstream GGUF release is genuinely quantized, e.g. Q8_0 at roughly
+    /// upstream GGUF release is genuinely quantized, e.g. `Q8_0` at roughly
     /// half of bf16's size). The audio/TTS GGUF releases
     /// (`openbmb/MiniCPM-o-4_5-gguf`'s `/audio`, `/tts` — vision's `/vision`
     /// GGUF is validated too, see `VisionModel::from_gguf`/

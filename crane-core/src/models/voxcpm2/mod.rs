@@ -1,4 +1,4 @@
-//! VoxCPM2 (OpenBMB): tokenizer-free diffusion-autoregressive TTS.
+//! `VoxCPM2` (`OpenBMB`): tokenizer-free diffusion-autoregressive TTS.
 //!
 //! Five sub-networks — `base_lm`/`residual_lm` (causal, share
 //! [`minicpm4::MiniCpm4Model`]), `feat_encoder`/`feat_decoder` (non-causal,

@@ -1,6 +1,6 @@
-//! Shared MiniCPM4 decoder-block stack, used by four of VoxCPM2's five
+//! Shared `MiniCPM4` decoder-block stack, used by four of `VoxCPM2`'s five
 //! sub-networks (`base_lm`, `residual_lm`, `feat_encoder`, `feat_decoder`'s
-//! DiT) with different [`MiniCpm4Config`] values. Ported from
+//! `DiT`) with different [`MiniCpm4Config`] values. Ported from
 //! `voxcpm/modules/minicpm4/model.py`.
 //!
 //! `embed_tokens` is exposed but never called from [`MiniCpm4Model::forward`]
@@ -21,7 +21,7 @@ use crate::models::utils::release_load_staging;
 
 // ── LongRoPE ─────────────────────────────────────────────────────────────
 
-/// Two-regime (`short_factor` / `long_factor`) frequency-scaled RoPE table.
+/// Two-regime (`short_factor` / `long_factor`) frequency-scaled `RoPE` table.
 /// Ported from `MiniCPMLongRoPE`.
 ///
 /// Produces half-width `[max_pos, head_dim/2]` cos/sin tables for
@@ -271,7 +271,7 @@ impl MiniCpm4Model {
 
     /// Single-position incremental step. `inputs_embeds`: `[B, H]` (one
     /// position, no explicit seq dim). `position_id`: absolute position for
-    /// both the RoPE table lookup and (implicitly, via each layer's
+    /// both the `RoPE` table lookup and (implicitly, via each layer's
     /// [`GqaAttention`] internal cache) the KV-cache write slot — the caller
     /// is responsible for calling this only in strictly increasing position
     /// order (matching `GqaAttention`'s append-only cache).

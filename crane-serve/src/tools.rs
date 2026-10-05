@@ -1,4 +1,4 @@
-//! Tool (function) calling: parsing what the model emits back into OpenAI shape.
+//! Tool (function) calling: parsing what the model emits back into `OpenAI` shape.
 //!
 //! The request side needs no code — `tools` is handed to the Jinja chat
 //! template verbatim (`tool | tojson`), and the template owns the prompt
@@ -185,7 +185,7 @@ pub fn parse_output(text: &str) -> ParsedOutput {
     }
 }
 
-/// Parse one `<function=NAME>…</function>` body into an OpenAI tool call.
+/// Parse one `<function=NAME>…</function>` body into an `OpenAI` tool call.
 fn parse_call(block: &str, index: usize) -> Option<ToolCall> {
     let name_start = block.find(FN_OPEN)? + FN_OPEN.len();
     let name_end = block[name_start..].find('>')? + name_start;
@@ -239,7 +239,7 @@ fn coerce(raw: &str) -> Value {
 /// Streaming filter that keeps tool-call markup out of `content` deltas.
 ///
 /// A tool call cannot be streamed incrementally the way text can: the client
-/// needs a complete, parseable call before it can run anything, and OpenAI's
+/// needs a complete, parseable call before it can run anything, and `OpenAI`'s
 /// own incremental `tool_calls` deltas assume a JSON grammar this template
 /// does not use. So text streams normally until `<tool_call>` (or a bare
 /// `<function=`, see `parse_output`'s doc) appears, after which everything is

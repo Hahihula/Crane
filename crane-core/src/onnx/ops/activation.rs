@@ -4,7 +4,7 @@ use candle_core::{Result, Tensor, bail};
 
 use crate::onnx::proto::{self, NodeProto};
 
-/// ONNX HardSigmoid: `clip(alpha * x + beta, 0, 1)`.
+/// ONNX `HardSigmoid`: `clip(alpha * x + beta, 0, 1)`.
 ///
 /// ONNX defaults are `alpha = 0.2` and `beta = 0.5`; do not use a fixed
 /// backend hard-sigmoid because exported models may override those attributes.

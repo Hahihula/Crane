@@ -1,11 +1,11 @@
-//! CosyVoice2's `DiT` flow-matching velocity estimator ("DiT-v5" per the
+//! `CosyVoice2`'s `DiT` flow-matching velocity estimator ("DiT-v5" per the
 //! reference source's own comment — adds a causal-conv branch to each block
-//! "to increase high-freq component", on top of a standard AdaLN-Zero DiT).
+//! "to increase high-freq component", on top of a standard AdaLN-Zero `DiT`).
 //!
 //! Ported from `stepaudio2.cosyvoice2.flow.decoder_dit` (real reference
 //! source — see the plan doc). Conditioning is **channel-concatenation**
 //! (`x`/`mu`/broadcast-`spks`/`cond` stacked along the channel dim before
-//! `in_proj`), unlike VoxCPM2's DiT which concatenates along the token
+//! `in_proj`), unlike `VoxCPM2`'s `DiT` which concatenates along the token
 //! (sequence) axis instead — genuinely different mechanism, no shared code
 //! with `voxcpm2::local_dit`. Single sequence, no padding (`B` here is the
 //! doubled cond/uncond CFG batch, not a real padding batch), so attention
@@ -14,10 +14,10 @@
 use candle_core::{D, Module, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, LayerNorm, Linear, VarBuilder, layer_norm, linear};
 
-/// Parameterless LayerNorm (`elementwise_affine=False` — no learned
-/// weight/bias, confirmed against the checkpoint: DiT blocks' `norm1`/`norm2`/
+/// Parameterless `LayerNorm` (`elementwise_affine=False` — no learned
+/// weight/bias, confirmed against the checkpoint: `DiT` blocks' `norm1`/`norm2`/
 /// `norm3`/`final_layer.norm_final` have no corresponding tensors at all).
-/// AdaLN's `modulate()` step supplies the scale/shift instead.
+/// `AdaLN`'s `modulate()` step supplies the scale/shift instead.
 fn norm_no_affine(x: &Tensor, eps: f64) -> Result<Tensor> {
     let mean = x.mean_keepdim(D::Minus1)?;
     let centered = x.broadcast_sub(&mean)?;

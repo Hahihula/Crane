@@ -58,7 +58,7 @@ pub struct Args {
     /// of `--model-path` when unset.
     #[arg(long, help_heading = "Model")]
     pub model_name: Option<String>,
-    /// Directory containing built-in VoxCPM2 reference audio files. Each
+    /// Directory containing built-in `VoxCPM2` reference audio files. Each
     /// filename stem (without `.wav`, `.mp3`, etc.) becomes a `voice` value.
     /// Embeddings are cached in this directory after the first startup.
     #[arg(long, default_value = "data/voices", help_heading = "Model")]
@@ -103,7 +103,7 @@ pub struct Args {
     #[arg(long, default_value = "auto", help_heading = "Model")]
     pub format: String,
     /// Quantize the model on load to reduce memory usage (e.g. `q4k`,
-    /// `q8_0`). Supported for Qwen 3.5 and KugelAudio models with
+    /// `q8_0`). Supported for Qwen 3.5 and `KugelAudio` models with
     /// safetensors weights. Other models ignore it with a warning.
     /// Overrides `CRANE_ISQ`.
     #[arg(long, help_heading = "Model")]
@@ -725,24 +725,24 @@ fn run_duplex_loop(
     }
 }
 
-/// Returns `true` if `device` is a real GPU backend (CUDA or ROCm) rather
+/// Returns `true` if `device` is a real GPU backend (CUDA or `ROCm`) rather
 /// than CPU or a backend (e.g. Metal) without fused-kernel/device-side
 /// sampling support.
 ///
 /// Centralizes the `is_cuda() || is_rocm()` check so call sites don't
 /// hand-roll a `#[cfg(feature = "cuda")]`-only version of it, which
-/// silently forces CPU on ROCm builds (the bug this replaced in the
+/// silently forces CPU on `ROCm` builds (the bug this replaced in the
 /// TTS/ASR/duplex/VLM device-selection code below).
 pub(crate) fn is_gpu_device(device: &crane_core::models::Device) -> bool {
     device.is_cuda() || device.is_rocm() || device.is_sycl()
 }
 
 /// Resolve the compute dtype. An explicit `--dtype` always wins; otherwise
-/// BF16 on CUDA, F16 on ROCm and Metal, and F32 on CPU. Metal's F16 path
+/// BF16 on CUDA, F16 on `ROCm` and Metal, and F32 on CPU. Metal's F16 path
 /// substantially reduces model and KV-cache memory use; pass `--dtype f32`
 /// to explicitly prefer full precision.
 ///
-/// ROCm excludes Qwen3-ASR from its F16 default: the audio encoder's
+/// `ROCm` excludes Qwen3-ASR from its F16 default: the audio encoder's
 /// intermediate activations overflow F16's smaller range (vs. the BF16 the
 /// checkpoint was trained in), producing NaN/garbage logits that never
 /// sample EOS and run decode out to `max_new_tokens` every time. Metal has
@@ -2111,7 +2111,7 @@ pub async fn run(mut args: Args) -> Result<()> {
 }
 
 /// Maximum accepted size for `/v1/audio/transcriptions` uploads, matching the
-/// OpenAI transcription API's limit. Axum's default body limit (2 MiB) is far
+/// `OpenAI` transcription API's limit. Axum's default body limit (2 MiB) is far
 /// too small for real audio files.
 const MAX_TRANSCRIPTION_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 

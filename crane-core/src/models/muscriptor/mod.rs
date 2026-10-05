@@ -1,4 +1,4 @@
-//! MuScriptor: multi-instrument audio-to-MIDI transcription.
+//! `MuScriptor`: multi-instrument audio-to-MIDI transcription.
 //!
 //! Decoder-only transformer with a mel-spectrogram **prefix conditioner**
 //! prepended to the token sequence. Auto-regressively predicts MT3-style
@@ -7,12 +7,12 @@
 //! *weights* are CC BY-NC 4.0; the *code* here is Crane's standard MIT.
 //!
 //! Reading order (top-down = dependency order):
-//!   `mt3`        → MT3Tokenizer (vocab + encode/decode + tie section)
+//!   `mt3`        → `MT3Tokenizer` (vocab + encode/decode + tie section)
 //!   `midi`       → minimal Standard MIDI File writer
 //!   `transformer` → streaming MHA + sinusoidal pos + transformer layers
 //!   `conditioner` → mel + class prefix conditioners
 //!   `config`     → variant (small/medium/large) + DSP params
-//!   `model`      → LMModel assembly + generate loop + public `TranscriptionModel`
+//!   `model`      → `LMModel` assembly + generate loop + public `TranscriptionModel`
 
 // Many of these items are scaffolding for follow-up PRs (CFG plumbing,
 // tie-section forcing, polyphonic note reconstruction, etc.).

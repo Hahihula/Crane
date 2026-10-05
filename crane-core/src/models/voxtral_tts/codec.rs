@@ -47,7 +47,7 @@ const SPECIAL_TOKEN_OFFSET: f64 = 2.0;
 /// `pub(crate)`: also reused by `voxcpm2::audio_vae` — the math is
 /// independent of which tensor names a checkpoint stores `weight_g`/
 /// `weight_v` under (this one happens to read `original0`/`original1`,
-/// VoxCPM2's AudioVAE reads `weight_g`/`weight_v` — the reconstruction
+/// `VoxCPM2`'s `AudioVAE` reads `weight_g`/`weight_v` — the reconstruction
 /// itself is identical either way).
 pub(crate) fn reconstruct_weight_norm(weight_v: &Tensor, weight_g: &Tensor) -> Result<Tensor> {
     let original_dtype = weight_v.dtype();
@@ -466,7 +466,7 @@ pub struct CodecDecoder {
     /// Number of PCM samples produced per input frame.
     ///
     /// Equals `total_upsample × pretransform_patch_size`. For the standard
-    /// Voxtral codec (strides `[1,2,2,2]`, patch_size=240): `8 × 240 = 1920`
+    /// Voxtral codec (strides `[1,2,2,2]`, `patch_size`=240): `8 × 240 = 1920`
     /// (80 ms at 24 kHz).
     samples_per_frame: usize,
 }
@@ -672,7 +672,7 @@ impl CodecDecoder {
 
     /// Number of PCM samples produced per input frame.
     ///
-    /// For the standard Voxtral codec (strides `[1,2,2,2]`, patch_size=240)
+    /// For the standard Voxtral codec (strides `[1,2,2,2]`, `patch_size`=240)
     /// this is `1920` (80 ms at 24 kHz).
     #[must_use]
     pub fn samples_per_frame(&self) -> usize {

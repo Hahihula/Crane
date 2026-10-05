@@ -87,7 +87,7 @@ fn build_causal_mask(
 /// conversion time to `q_proj`/`k_proj` (and only those — never `v_proj`/
 /// `o_proj`) so its own native `ggml_rope` kernel (adjacent-pair
 /// "interleaved" convention) produces results equivalent to the original
-/// HF checkpoint's `rotate_half` (contiguous-halves) RoPE convention. Since
+/// HF checkpoint's `rotate_half` (contiguous-halves) `RoPE` convention. Since
 /// this port uses `rotate_half` directly (`candle_nn::rotary_emb::rope`,
 /// matching the original safetensors checkpoint — see `RopeMode::HalfSplit`
 /// elsewhere in this codebase), the GGUF-loaded Q/K weights need converting
@@ -336,8 +336,8 @@ impl MiniCpmTts {
         }
     }
 
-    /// Build the conditioning sequence for one chat response: `emb_text(token)
-    /// + projector_semantic(hidden_state)` per position, direct port of
+    /// Build the conditioning sequence for one chat response: `emb_text(token)`
+    /// + `projector_semantic(hidden_state)` per position, direct port of
     /// `_generate_speech_non_streaming`'s `condition_type == "hidden_text_merge"`
     /// branch. `llm_tokens`/`llm_hidden_states` are the chat LLM's response
     /// text-token ids and the matching intermediate-layer hidden states

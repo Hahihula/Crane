@@ -3,11 +3,11 @@
 //! Implements the two-level architecture:
 //! 1. **Talker** — main transformer with rotary position encoding that
 //!    generates the first-codebook token at each step.
-//! 2. **CodePredictor** — small transformer that autoregressively predicts
+//! 2. **`CodePredictor`** — small transformer that autoregressively predicts
 //!    the remaining `num_code_groups - 1` codebook tokens given the talker
 //!    hidden state.
 //!
-//! Weight layout follows the HuggingFace `Qwen3TTSForConditionalGeneration`
+//! Weight layout follows the `HuggingFace` `Qwen3TTSForConditionalGeneration`
 //! checkpoint:
 //!   - `talker.model.*`       — talker backbone
 //!   - `talker.codec_head.*`  — linear head for first-codebook logits
@@ -275,11 +275,11 @@ impl ResizeMlp {
 /// The code predictor predicts codebook groups 1..N-1 given the talker hidden
 /// state and previously predicted codes.
 pub struct CodePredictor {
-    /// Embeddings per code group: codec_embedding[i] for group i+1
+    /// Embeddings per code group: `codec_embedding[i]` for group i+1
     codec_embeddings: Vec<Embedding>,
     layers: Vec<TransformerBlock>,
     norm: RmsNorm,
-    /// Linear heads per code group: lm_head[i] for group i+1
+    /// Linear heads per code group: `lm_head[i]` for group i+1
     lm_heads: Vec<Linear>,
     /// Projection from talker hidden → code predictor hidden (if sizes differ)
     small_to_mtp_projection: Option<Linear>,
@@ -584,16 +584,16 @@ impl TalkerModel {
     ///
     /// Matches the vendor reference implementation:
     ///
-    /// `text_token_ids` = raw text tokens (no ChatML wrapping).
+    /// `text_token_ids` = raw text tokens (no `ChatML` wrapping).
     ///
     /// Prefill construction:
-    ///   [role_prefix(3)]                          — text_proj([im_start, assistant, newline])
-    ///   + [tts_pad/bos overlay + codec_prefix]    — tts_pad×(N-2)+tts_bos overlaid on codec[:-1]
-    ///   + [first_text + codec_bos]                — text_proj(text[0]) + codec_embed(bos)
+    ///   [`role_prefix(3)`]                          — `text_proj`([`im_start`, assistant, newline])
+    ///   + [`tts_pad`/bos overlay + `codec_prefix`]    — tts_pad×(N-2)+tts_bos overlaid on codec[:-1]
+    ///   + [`first_text` + `codec_bos`]                — `text_proj`(text[0]) + `codec_embed`(bos)
     ///
-    /// trailing_text_hidden = text_proj(text[1:]) + tts_eos — fed step-by-step during generation
+    /// `trailing_text_hidden` = `text_proj`(text[1:]) + `tts_eos` — fed step-by-step during generation
     ///
-    /// Returns (input_embeds, trailing_text_hidden, tts_pad_embed)
+    /// Returns (`input_embeds`, `trailing_text_hidden`, `tts_pad_embed`)
     pub fn build_prefill_embeds(
         &self,
         text_token_ids: &[u32],
@@ -728,7 +728,7 @@ impl TalkerModel {
 
     /// Run the talker transformer forward on input embeddings.
     ///
-    /// `seq_offset`: the position offset for RoPE. During prefill this is 0;
+    /// `seq_offset`: the position offset for `RoPE`. During prefill this is 0;
     /// during autoregressive generation step N this is `prefill_len + N`.
     pub fn forward_embeds(
         &mut self,
@@ -751,12 +751,12 @@ impl TalkerModel {
         self.codec_head.forward(hidden_state)
     }
 
-    /// Build ICL voice-clone base prefill (9 positions, no first_text + codec_bos).
+    /// Build ICL voice-clone base prefill (9 positions, no `first_text` + `codec_bos`).
     ///
     /// Matches the vendor `prefill_voice_clone(icl_mode=true)`:
-    ///   [role_prefix(3)] + [tts_pad/bos overlay + codec[think..pad]](6) = 9 positions
+    ///   [`role_prefix(3)`] + [`tts_pad`/bos overlay + codec[think..pad]](6) = 9 positions
     ///
-    /// The codec_bos is NOT included here — it starts the ICL prompt instead.
+    /// The `codec_bos` is NOT included here — it starts the ICL prompt instead.
     ///
     /// Returns `(prefill_embeds, tts_pad_embed)`.
     pub fn build_voice_clone_prefill(
@@ -852,12 +852,12 @@ impl TalkerModel {
     /// Matches the official Python `generate_icl_prompt(non_streaming_mode=False)`
     /// and the vendor Rust-3 `build_icl_prompt(non_streaming=false)`:
     ///
-    /// Text = text_proj([ref_text, target_text, tts_eos])
-    /// Codec = codec_embed([codec_bos, ref_codec_embeds])
+    /// Text = `text_proj`([`ref_text`, `target_text`, `tts_eos`])
+    /// Codec = `codec_embed`([`codec_bos`, `ref_codec_embeds`])
     ///
     /// Streaming overlay:
-    ///   If text > codec → overlay first n_codec text with codec, remaining text as trailing
-    ///   If text ≤ codec → pad text with tts_pad, overlay all, trailing = tts_pad
+    ///   If text > codec → overlay first `n_codec` text with codec, remaining text as trailing
+    ///   If text ≤ codec → pad text with `tts_pad`, overlay all, trailing = `tts_pad`
     ///
     /// Returns `(icl_embed, trailing_text_hidden)`.
     pub fn build_icl_prompt(
@@ -952,7 +952,7 @@ impl TalkerModel {
 use candle_nn::{Conv1d, Conv1dConfig};
 
 /// Apply 1D reflect padding to a `[B, C, T]` tensor along the time dimension.
-/// Uses index_select to avoid contiguity issues with narrow+flip.
+/// Uses `index_select` to avoid contiguity issues with narrow+flip.
 fn reflect_pad_1d(x: &Tensor, pad_left: usize, pad_right: usize) -> Result<Tensor> {
     if pad_left == 0 && pad_right == 0 {
         return Ok(x.clone());
@@ -1010,7 +1010,7 @@ impl ReflectConv1d {
     }
 }
 
-/// TimeDelayNetBlock: reflect-padded Conv1d + ReLU.
+/// `TimeDelayNetBlock`: reflect-padded Conv1d + `ReLU`.
 struct TdnnBlock {
     conv: ReflectConv1d,
 }
@@ -1033,7 +1033,7 @@ impl TdnnBlock {
     }
 }
 
-/// Res2Net block (scale=8 chunks, residual accumulation).
+/// `Res2Net` block (scale=8 chunks, residual accumulation).
 struct Res2NetBlock {
     blocks: Vec<TdnnBlock>,
     scale: usize,
@@ -1111,7 +1111,7 @@ impl SeBlock {
     }
 }
 
-/// SqueezeExcitationRes2NetBlock: TDNN1 → Res2Net → TDNN2 → SE + residual.
+/// `SqueezeExcitationRes2NetBlock`: TDNN1 → `Res2Net` → TDNN2 → SE + residual.
 struct SeRes2NetBlock {
     tdnn1: TdnnBlock,
     res2net: Res2NetBlock,
@@ -1322,7 +1322,7 @@ impl SpeakerEncoder {
 pub struct StreamingState {
     /// Last hidden state from the talker transformer, shape `[1, 1, D]`.
     pub past_hidden: Tensor,
-    /// Number of tokens in the prefill (positions 0..prefill_len in the KV cache).
+    /// Number of tokens in the prefill (positions 0..`prefill_len` in the KV cache).
     pub prefill_len: usize,
     /// Number of codec frames generated so far.
     pub step: usize,
@@ -1425,7 +1425,7 @@ impl Qwen3TTSModel {
 
     /// Generate speech codec tokens from text.
     ///
-    /// Returns a Vec of (num_code_groups) tokens per time step.
+    /// Returns a Vec of (`num_code_groups`) tokens per time step.
     pub fn generate_speech_codes(
         &mut self,
         text_token_ids: &[u32],

@@ -1,4 +1,4 @@
-//! MuScriptor `LMModel` + weight loading + chunked transcription driver.
+//! `MuScriptor` `LMModel` + weight loading + chunked transcription driver.
 //!
 //! Three public surfaces:
 //!

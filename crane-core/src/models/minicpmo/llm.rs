@@ -68,7 +68,7 @@ impl MiniCpmOLlm {
     /// no MiniCPM-o-specific prefix or layout — so this reuses
     /// [`Qwen3Model::from_gguf`] unmodified, the same loader already used
     /// for standalone Qwen3/Qwen3.5 GGUF checkpoints) instead of the real
-    /// checkpoint's own safetensors weights. Dramatically cuts VRAM (Q8_0
+    /// checkpoint's own safetensors weights. Dramatically cuts VRAM (`Q8_0`
     /// is roughly half of bf16) — this is what makes a full `DuplexSession`
     /// fit comfortably instead of needing nearly the whole GPU. The other
     /// towers (audio/TTS/Token2wav) are unaffected and still load from
@@ -194,9 +194,9 @@ impl MiniCpmOLlm {
     }
 
     /// Per-layer `(K, V)` cache tensors, `[1, num_kv_heads, seq_len, head_dim]`
-    /// each, post-RoPE (RoPE is applied before caching, same as the real
+    /// each, post-RoPE (`RoPE` is applied before caching, same as the real
     /// HF `DynamicCache`) — needed for sliding-window eviction, which must
-    /// realign the survivors' RoPE after dropping a range from the middle.
+    /// realign the survivors' `RoPE` after dropping a range from the middle.
     #[must_use]
     pub fn get_kv_caches(&self) -> Vec<Option<(Tensor, Tensor)>> {
         self.inner.get_kv_caches()

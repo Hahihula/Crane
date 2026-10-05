@@ -1,4 +1,4 @@
-//! Qwen3-TTS CustomVoice Example
+//! Qwen3-TTS `CustomVoice` Example
 //!
 //! Demonstrates text-to-speech with predefined speakers using
 //! the `Qwen3-TTS-12Hz-0.6B-CustomVoice` model.

@@ -1,4 +1,4 @@
-//! VoxCPM2 TTS adapter with persistent built-in voice embeddings.
+//! `VoxCPM2` TTS adapter with persistent built-in voice embeddings.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,7 +19,7 @@ use super::tts::{Tts, TtsStream, VoiceInfo};
 const CACHE_DIR: &str = ".voxcpm2-cache";
 const CACHE_TENSOR: &str = "embedding";
 
-/// VoxCPM2 plus reference-audio embeddings loaded once at startup.
+/// `VoxCPM2` plus reference-audio embeddings loaded once at startup.
 pub struct VoxCpm2Tts {
     model: VoxCpm2Model,
     voices: BTreeMap<String, Tensor>,

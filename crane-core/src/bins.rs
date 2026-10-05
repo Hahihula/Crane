@@ -7,7 +7,7 @@ use std::io::Read;
 /**
  * Code for loading tensor data from python
  * it reads tensor by order:
- * [tensor1(dtype, shape_len, shape, data), tensor2, tensor3]
+ * [tensor1(dtype, `shape_len`, shape, data), tensor2, tensor3]
  */
 
 pub fn load_tensors(path: &str) -> Result<Vec<Tensor>> {

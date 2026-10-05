@@ -1,6 +1,6 @@
 //! SGLang-compatible native API types.
 //!
-//! Covers the non-OpenAI endpoints inspired by SGLang's native interface:
+//! Covers the non-OpenAI endpoints inspired by `SGLang`'s native interface:
 //!
 //! * `POST /generate`       — native text generation
 //! * `GET  /model_info`     — model metadata
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Native generation request.
 ///
 /// Accepts either a text prompt or raw token IDs.
-/// Follows SGLang's `GenerateReqInput` pattern with sensible defaults.
+/// Follows `SGLang`'s `GenerateReqInput` pattern with sensible defaults.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerateRequest {
     /// Prompt text. Mutually exclusive with `input_ids`.
@@ -39,7 +39,7 @@ pub struct GenerateRequest {
 
 /// Sampling parameters for the `/generate` endpoint.
 ///
-/// Modeled after SGLang's `SamplingParams` with reasonable defaults.
+/// Modeled after `SGLang`'s `SamplingParams` with reasonable defaults.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct SamplingParams {
