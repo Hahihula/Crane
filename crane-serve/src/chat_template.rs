@@ -33,10 +33,20 @@ impl RenderOptions<'_> {
 
 /// Formats chat messages into a model-specific prompt string.
 pub trait ChatTemplateProcessor: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error if the messages cannot be rendered into a prompt,
+    /// e.g. because the underlying template engine rejects the input.
     fn apply(&self, messages: &[ChatMessage]) -> Result<String, String>;
 
     /// Render with reasoning controls and tool specs. Defaults to ignoring
     /// both, which is correct for templates that support neither (Hunyuan).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the messages cannot be rendered into a prompt,
+    /// e.g. because the underlying template engine rejects the input or the
+    /// requested reasoning options.
     fn apply_with(
         &self,
         messages: &[ChatMessage],
@@ -93,6 +103,9 @@ pub struct AutoChatTemplate {
 }
 
 impl AutoChatTemplate {
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer fails to load from `model_path`.
     pub fn new(model_path: &str) -> Result<Self, String> {
         let tokenizer = AutoTokenizer::from_pretrained(model_path, None)
             .map_err(|e| format!("Failed to load AutoTokenizer: {e}"))?;

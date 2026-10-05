@@ -204,6 +204,12 @@ fn extract_optional_image_and_text(
 ///
 /// Extracts image URLs and text from multimodal messages, downloads
 /// images, and runs PaddleOCR-VL inference.
+///
+/// # Errors
+///
+/// Returns an error response if no VLM model is loaded, if the messages
+/// don't contain an image, if the image fails to download, if the VLM
+/// worker thread has crashed, or if inference fails.
 pub async fn vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
@@ -384,6 +390,12 @@ pub async fn vlm_chat_completions(
 // ─────────────────────────────────────────────────────────────
 
 /// VLM-aware generate handler for SGLang-style `/generate`.
+///
+/// # Errors
+///
+/// Returns an error response if no VLM model is loaded, if `image_url` is
+/// missing from the request, if the image fails to download, if the VLM
+/// worker thread has crashed, or if inference fails.
 pub async fn vlm_generate(
     state: Arc<AppState>,
     req: GenerateRequest,
@@ -588,6 +600,12 @@ fn vlm_token_sse(
 }
 
 /// Qwen 3.5 VL chat completions handler.
+///
+/// # Errors
+///
+/// Returns an error response if no Qwen 3.5 VL model is loaded, if a
+/// supplied image fails to download, if the VLM worker thread has crashed,
+/// or if inference fails.
 pub async fn qwen3_5_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
@@ -712,6 +730,12 @@ pub struct MinicpmVVlmRequest {
 /// MiniCPM-V-4.6 chat completions handler. Mirrors
 /// [`qwen3_5_vlm_chat_completions`] — same request/response shape, same
 /// single-image-per-turn extraction via [`extract_image_and_text`].
+///
+/// # Errors
+///
+/// Returns an error response if no MiniCPM-V-4.6 model is loaded, if a
+/// supplied image fails to download, if the VLM worker thread has crashed,
+/// or if inference fails.
 pub async fn minicpm_v_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
@@ -822,6 +846,12 @@ pub async fn minicpm_v_vlm_chat_completions(
 }
 
 /// `Gemma4VL` chat completions handler.
+///
+/// # Errors
+///
+/// Returns an error response if no Gemma4 VLM model is loaded, if the
+/// messages don't contain an image, if the image fails to download, if the
+/// VLM worker thread has crashed, or if inference fails.
 pub async fn gemma4_vlm_chat_completions(
     state: Arc<AppState>,
     req: ChatCompletionRequest,

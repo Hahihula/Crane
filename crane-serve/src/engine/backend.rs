@@ -605,6 +605,10 @@ impl Qwen3_5Backend {
 
     /// `quant` requests in-situ quantization (`--quant` / `CRANE_ISQ`);
     /// `None` falls back to the `CRANE_ISQ` env var inside the model loader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model fails to load from `model_path`.
     pub fn new_with_options(
         model_path: &str,
         device: &Device,
