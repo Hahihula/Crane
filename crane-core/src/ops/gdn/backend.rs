@@ -23,6 +23,11 @@ use crate::utils::DeviceExt;
 ///
 /// Device-portable reference. [`l2_norm_fused`] is the one the layer calls;
 /// this stays as the definition both the tests and the CPU path check against.
+///
+/// # Errors
+///
+/// Returns an error if the underlying tensor ops fail, e.g. on a shape or
+/// device mismatch.
 pub fn l2_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
     let inv_norm = x
         .sqr()?
@@ -48,6 +53,11 @@ pub fn l2_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
 ///
 /// `alpha` is the precomputed `[K]` vector of `1/sqrt(K)`; building it per call
 /// would reintroduce the host-to-device copy this exists to remove.
+///
+/// # Errors
+///
+/// Returns an error if `x`'s last dimension cannot be read, the dtype cast
+/// of `alpha` fails, or the fused `rms_norm` kernel rejects the input shapes.
 pub fn l2_norm_fused(x: &Tensor, alpha: &Tensor, eps: f64) -> Result<Tensor> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     let eps_mean = (eps / x.dim(D::Minus1)? as f64) as f32;
@@ -56,6 +66,11 @@ pub fn l2_norm_fused(x: &Tensor, alpha: &Tensor, eps: f64) -> Result<Tensor> {
 }
 
 /// The `[K]` vector of `1/sqrt(K)` that [`l2_norm_fused`] scales by.
+///
+/// # Errors
+///
+/// Returns an error if allocating the tensor on `device` or casting it to
+/// `dtype` fails.
 pub fn l2_alpha(head_k_dim: usize, dtype: DType, device: &candle_core::Device) -> Result<Tensor> {
     #[allow(clippy::cast_precision_loss)]
     let v = 1.0 / (head_k_dim as f64).sqrt();
@@ -66,6 +81,11 @@ pub fn l2_alpha(head_k_dim: usize, dtype: DType, device: &candle_core::Device) -
 ///
 /// `affine` rather than `ones_like() + …`: it folds the `+1` into the same
 /// launch instead of materializing a whole tensor of ones first.
+///
+/// # Errors
+///
+/// Returns an error if the underlying `exp`, `affine`, or `log` tensor ops
+/// fail.
 pub fn softplus(x: &Tensor) -> Result<Tensor> {
     x.exp()?.affine(1.0, 1.0)?.log()
 }
@@ -87,6 +107,11 @@ pub fn softplus(x: &Tensor) -> Result<Tensor> {
 ///
 /// This is the exact CPU fallback lifted from mistral.rs
 /// (`mistralrs-core/src/gdn/backend.rs:30-81`). Output dtype matches `q.dtype()`.
+///
+/// # Errors
+///
+/// Returns an error if `q`, `k`, `v`, `g`, `beta`, or `state` have
+/// incompatible shapes/dtypes for the per-timestep tensor ops.
 pub fn gated_delta_rule_recurrence(
     q: &Tensor,
     k: &Tensor,
@@ -175,6 +200,11 @@ pub struct GdnGateConsts {
 
 impl GdnGateConsts {
     /// Derive from the raw `A_log` and `dt_bias` weights (both `[H]`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dtype cast or reshape of `a_log`/`dt_bias`
+    /// fails.
     pub fn new(a_log: &Tensor, dt_bias: &Tensor) -> Result<Self> {
         Ok(Self {
             neg_exp_a_log: a_log
@@ -194,6 +224,11 @@ impl GdnGateConsts {
 /// `b: [B, S, H]` raw logits → `beta = sigmoid(b)`.
 /// `a: [B, S, H]` raw values → combined with `A_log` (negative log of decay
 /// rate) and `dt_bias` to produce `g = -exp(A_log) * softplus(a + dt_bias)`.
+///
+/// # Errors
+///
+/// Returns an error if `b`/`a` have shapes incompatible with `consts`, or if
+/// the underlying tensor ops fail.
 pub fn compute_beta_g(
     b: &Tensor,
     a: &Tensor,
@@ -222,6 +257,12 @@ pub fn compute_beta_g(
 /// [`super::cuda_backend`] / [`super::rocm_backend`]); set
 /// `CRANE_GDN_PORTABLE=1` to force the portable op-by-op path for
 /// cross-checking numerics.
+///
+/// # Errors
+///
+/// Returns an error if the fused device kernel (when used) rejects the input
+/// layout, or if the portable recurrence fails due to a shape/dtype
+/// mismatch.
 #[allow(unused_variables)]
 pub fn apply_recurrence(
     q: &Tensor,

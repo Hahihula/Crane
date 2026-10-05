@@ -76,6 +76,10 @@ pub struct VoxCpmLocDit {
 }
 
 impl VoxCpmLocDit {
+    /// # Errors
+    ///
+    /// Returns an error if any projection, the timestep MLPs, or the inner
+    /// decoder's weights can't be loaded from `vb`.
     pub fn new(
         cfg: &MiniCpm4Config,
         in_channels: usize,
@@ -109,6 +113,12 @@ impl VoxCpmLocDit {
     ///
     /// Stateless / one-shot, same reasoning as [`super::local_encoder::VoxCpmLocEnc`]
     /// — always clears the inner decoder's KV cache first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `mu`'s width isn't a multiple of the model's
+    /// hidden size, or if any projection or the inner decoder's forward
+    /// pass fails on `x`/`cond`/`t`/`dt`'s shapes.
     pub fn forward(
         &mut self,
         x: &Tensor,

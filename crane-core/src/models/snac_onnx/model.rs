@@ -14,6 +14,10 @@ pub struct SNAC24DecoderONNX {
 impl SNAC24DecoderONNX {
     const SNAC_24_DECODER_ONNX_MODEL_PATH: &str = "checkpoints/snac_24khz_sim.onnx";
 
+    /// # Errors
+    ///
+    /// Returns an error if `model_path` doesn't exist on disk, or if the
+    /// ONNX model file can't be read or parsed.
     pub fn new(model_path: Option<&str>, device: Option<&Device>) -> Result<Self> {
         let _target_device = device.unwrap_or(&Device::Cpu);
         let model_path = model_path.unwrap_or(Self::SNAC_24_DECODER_ONNX_MODEL_PATH);
@@ -27,6 +31,10 @@ impl SNAC24DecoderONNX {
         Ok(Self { model })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if evaluating the decoder's ONNX graph on the given
+    /// codes fails.
     pub fn forward(
         &self,
         audio_code0: &Tensor,

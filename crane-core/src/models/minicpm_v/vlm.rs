@@ -99,6 +99,13 @@ pub struct MinicpmV46VLModel {
 }
 
 impl MinicpmV46VLModel {
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer, safetensors weights, or
+    /// `config.json`/`preprocessor_config.json` can't be found or loaded
+    /// from `model_path`, if building the vision tower, merger, or text
+    /// model fails, or if the tokenizer has neither an `<|im_end|>` nor
+    /// `<|endoftext|>` token.
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let tokenizer_path = std::path::Path::new(model_path).join("tokenizer.json");
         if !tokenizer_path.exists() {
@@ -177,6 +184,11 @@ impl MinicpmV46VLModel {
     /// `target_sizes`: per-image/-slice `(h, w)` patch-grid dims.
     ///
     /// Returns `[total_image_tokens, llm_hidden]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vision tower or merger forward pass fails,
+    /// e.g. from a `target_sizes`/`pixel_values` mismatch.
     pub fn encode_images(
         &self,
         pixel_values: &Tensor,
@@ -198,6 +210,12 @@ impl MinicpmV46VLModel {
     /// (see [`Self::render_prompt`]).
     ///
     /// Returns logits `[1, V]` (last position only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if image encoding fails, if splicing image features
+    /// into the input embeddings fails (e.g. a placeholder-token count
+    /// mismatch), or if the text model's forward pass fails.
     pub fn forward(
         &mut self,
         input_ids: &Tensor,
@@ -230,6 +248,11 @@ impl MinicpmV46VLModel {
     }
 
     /// Decode one new token. The KV cache must already hold the prefill.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the text model's embedding lookup or forward pass
+    /// fails.
     pub fn decode_step(&mut self, token: u32, start_pos: usize) -> Result<Tensor> {
         let input = Tensor::from_vec(vec![token], (1usize, 1usize), &self.device)?;
         let hidden = self.text.embed_only(&input)?;
@@ -251,6 +274,11 @@ impl MinicpmV46VLModel {
     /// full structured placeholder (`<image>...</image>` [+ `<slice>...
     /// </slice>` per tile]). Returns `None` for `ProcessedImage`/pixel data
     /// when `image` is `None` (text-only turn).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if image preprocessing fails or if the rendered
+    /// prompt can't be tokenized.
     pub fn render_prompt(
         &self,
         image: Option<&image::DynamicImage>,
@@ -287,6 +315,11 @@ impl MinicpmV46VLModel {
 
     /// Answer `user_text` about `image` (pass `None` for a text-only turn).
     /// Resets the KV cache, so each call is an independent single turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if prompt rendering, the prefill/decode forward
+    /// passes, the KV cache reset, or final detokenization fails.
     pub fn generate(
         &mut self,
         image: Option<&image::DynamicImage>,

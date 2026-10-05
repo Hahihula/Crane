@@ -107,6 +107,11 @@ pub struct Config {
 }
 
 /// Load a HF `config.json` for a MiniCPM-V-4.6 checkpoint.
+///
+/// # Errors
+///
+/// Returns an error if `path` cannot be read or its contents aren't valid
+/// JSON matching [`Config`]'s schema.
 pub fn load_config(path: &str) -> candle_core::Result<Config> {
     let data = std::fs::read(path)
         .map_err(|e| candle_core::Error::Msg(format!("read config {path}: {e}")))?;

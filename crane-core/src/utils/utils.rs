@@ -13,6 +13,11 @@ pub fn print_candle_build_info() {
     );
 }
 
+/// # Errors
+///
+/// Returns an error if `model.safetensors.index.json` exists but is
+/// malformed, lists a shard file that does not exist on disk, or if neither
+/// the index nor a single `model.safetensors` file is found.
 pub fn get_safetensors_files(model_path: &str) -> Result<Vec<std::path::PathBuf>> {
     let model_dir = Path::new(model_path);
 

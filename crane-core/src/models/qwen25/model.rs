@@ -57,6 +57,11 @@ impl TextGeneration {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the prompt cannot be tokenized, the `<|im_end|>`
+    /// end-of-sequence token is missing from the tokenizer, or a forward pass,
+    /// sampling step, or stdout flush fails during generation.
     pub fn run(&mut self, prompt: &str, sample_len: usize) -> Result<()> {
         use std::io::Write;
         self.model.clear_kv_cache();
@@ -139,6 +144,11 @@ pub enum ModelTyped {
 }
 
 impl Model {
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer or `config.json` is missing or
+    /// malformed, no safetensors files are found, or model weight loading
+    /// fails.
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         Self::from_pretrained(model_path, device, dtype)
     }
@@ -158,6 +168,11 @@ impl Model {
     }
 
     /// Run a single forward step, returning raw logits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input tensor cannot be constructed or the
+    /// underlying model's forward pass fails.
     pub fn forward_step(
         &mut self,
         input_ids: &[u32],
@@ -198,6 +213,10 @@ impl Model {
         self.max_position_embeddings
     }
 
+    /// # Errors
+    ///
+    /// Never returns `Err`; a tokenizer encoding failure currently causes a
+    /// panic via `.unwrap()` rather than propagating an error.
     pub fn prepare_inputs(&self, inputs: &str) -> Result<Vec<u32>> {
         let input_ids = self
             .tokenizer

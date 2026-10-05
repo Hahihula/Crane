@@ -50,17 +50,29 @@ impl TokenOutputStream {
     }
 
     // https://github.com/huggingface/text-generation-inference/blob/5ba53d44a18983a4de32d122f4cb46f4a17d9ef6/server/text_generation_server/models/model.py#L68
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer fails to decode the accumulated
+    /// token sequence.
     pub fn next_token(&mut self, token: u32) -> Result<Option<String>> {
         self.tokens.push(token);
         let decoded = self.decode(&self.tokens)?;
         Ok(self.safe_delta(decoded))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer fails to decode the accumulated
+    /// token sequence.
     pub fn decode_rest(&mut self) -> Result<Option<String>> {
         let decoded = self.decode(&self.tokens)?;
         Ok(self.safe_delta(decoded))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer fails to decode the accumulated
+    /// token sequence.
     pub fn decode_all(&self) -> Result<String> {
         self.decode(&self.tokens)
     }

@@ -10,6 +10,13 @@ use std::io::Read;
  * [tensor1(dtype, `shape_len`, shape, data), tensor2, tensor3]
  */
 
+/// # Errors
+///
+/// Returns an error if `path` cannot be opened, the file is truncated or
+/// malformed mid-record, the dtype name is not valid UTF-8 or not one of the
+/// supported dtypes (`int32` is explicitly rejected as unsupported by
+/// candle), a shape dimension is negative, or tensor construction from the
+/// raw bytes fails.
 pub fn load_tensors(path: &str) -> Result<Vec<Tensor>> {
     let mut file = File::open(path)?;
     let mut tensors = Vec::new();

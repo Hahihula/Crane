@@ -45,6 +45,12 @@ impl GatedDeltaNet {
     /// weight layout (Qwen 3.5 uses [`GdnInputProjectionKind::Split`]).
     /// `quant` requests in-situ quantization of the large projections
     /// (conv1d / `dt_bias` / `A_log` / norm always stay in full precision).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required weight is missing from `vb`, the
+    /// config names an unsupported gate activation, or a loaded tensor's
+    /// shape does not match `cfg`'s dimensions.
     pub fn load(
         vb: VarBuilder,
         cfg: &dyn GdnConfig,
@@ -177,6 +183,11 @@ impl GatedDeltaNet {
     ///
     /// This rather than a struct literal: `derived` has to stay consistent with
     /// `a_log` and `dt_bias`, and a literal would let a caller forget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deriving the gate constants from `a_log`/`dt_bias`
+    /// or building the L2-norm scale vector fails.
     #[allow(clippy::too_many_arguments)]
     pub fn with_derived(
         input_proj: GdnInputProjection,
@@ -213,6 +224,13 @@ impl GatedDeltaNet {
     /// place.
     ///
     /// `x: [B, S, hidden_size]`. Returns `[B, S, hidden_size]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `x` is not 3-dimensional or if any stage —
+    /// input projection, causal `Conv1D`, the gated delta rule recurrence,
+    /// gated `RMSNorm`, or output projection — fails on a shape/dtype
+    /// mismatch.
     pub fn forward(&self, x: &Tensor, dims: &GdnDims, cache: &mut GdnLayerCache) -> Result<Tensor> {
         use crate::utils::prof::{Span, timed};
 

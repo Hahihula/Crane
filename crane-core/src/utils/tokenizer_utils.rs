@@ -184,6 +184,10 @@ fn load_hf_bpe_tokenizer(dir: &Path) -> Result<Tokenizer> {
     Ok(tokenizer)
 }
 
+/// # Errors
+///
+/// Returns an error if `model_dir/tokenizer.json` exists but fails to parse,
+/// or if falling back to the HF BPE vocab/merges files fails.
 pub fn load_tokenizer_from_model_dir<P: AsRef<Path>>(model_dir: P) -> Result<Tokenizer> {
     let model_dir = model_dir.as_ref();
     let tokenizer_json = model_dir.join("tokenizer.json");
@@ -265,6 +269,13 @@ fn is_gguf_special_token(token_type: i32) -> bool {
 /// 2. The per-id `tokenizer.ggml.token_type` array — tokens with type 3
 ///    (CONTROL) or 4 (`USER_DEFINED`) are registered as special. Type 5
 ///    placeholders (`[PADxxx]`) and type 6 byte fallbacks are skipped.
+///
+/// # Errors
+///
+/// Returns an error if `ct` is missing `tokenizer.ggml.tokens` or
+/// `tokenizer.ggml.merges`, if a merge entry is not in `<left> <right>`
+/// form, or if building the BPE model or registering added/special tokens
+/// fails.
 pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
     let tokens_arr = ct
         .metadata
@@ -379,6 +390,11 @@ pub fn build_tokenizer_from_gguf(ct: &Content) -> Result<Tokenizer> {
 /// Returns `Ok(None)` if the GGUF lacks `tokenizer.ggml.tokens` /
 /// `tokenizer.ggml.merges` (caller should fall back to a sibling
 /// `tokenizer.json`); errors out on real I/O / parse problems.
+///
+/// # Errors
+///
+/// Returns an error if `path` cannot be opened/memory-mapped, its GGUF
+/// header fails to parse, or [`build_tokenizer_from_gguf`] fails.
 pub fn build_tokenizer_from_gguf_path<P: AsRef<Path>>(path: P) -> Result<Option<Tokenizer>> {
     let path = path.as_ref();
     let mmap = crate::quantized::gguf_file::mmap_gguf_file(path)

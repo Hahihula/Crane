@@ -68,6 +68,11 @@ impl SpeechDecoderBackend {
 #[cfg(feature = "onnx")]
 impl SpeechTokenizerDecoder {
     /// Load from a pre-exported ONNX file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `onnx_path` does not exist or the ONNX file cannot
+    /// be parsed.
     pub fn new(onnx_path: &str, sample_rate: Option<u32>) -> Result<Self> {
         if !std::path::Path::new(onnx_path).exists() {
             anyhow::bail!(
@@ -85,6 +90,11 @@ impl SpeechTokenizerDecoder {
     }
 
     /// Decode `[batch, num_quantizers, seq_len]` codes → `[batch, 1, samples]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if ONNX graph evaluation fails or the expected output
+    /// tensor is missing from the graph's outputs.
     pub fn decode(&self, codes: &Tensor) -> Result<Tensor> {
         let inputs = std::collections::HashMap::from_iter([("codes".to_string(), codes.clone())]);
         let out = crate::onnx::simple_eval(&self.model, inputs)?;
@@ -145,6 +155,12 @@ impl Model {
     ///   - `model.safetensors` / `model-*.safetensors` (talker weights)
     ///   - `speech_tokenizer/config.json` + `speech_tokenizer/model.safetensors` (preferred)
     ///   - `speech_tokenizer/speech_tokenizer_decoder.onnx` (optional fallback)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `config.json` or the tokenizer is missing or
+    /// malformed, no safetensors files are found, or talker model weight
+    /// loading fails.
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let model_dir = std::path::Path::new(model_path);
 
@@ -223,6 +239,10 @@ impl Model {
     ///
     /// Returns raw text tokens (no `ChatML` wrapping).
     /// The role prefix is added by the talker prefill construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer fails to encode `text`.
     pub fn prepare_tts_input(&self, text: &str) -> Result<Vec<u32>> {
         let encoding = self.tokenizer.encode(text, false).map_err(E::msg)?;
         Ok(encoding.get_ids().to_vec())
@@ -232,6 +252,12 @@ impl Model {
     ///
     /// Returns `(audio_tensor, sample_rate)`.  
     /// `audio_tensor` shape: `[1, 1, samples]` (f32).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model isn't in `custom_voice` mode, text
+    /// tokenization or codec code generation fails, no codes are generated,
+    /// no speech decoder is loaded, or waveform decoding fails.
     pub fn generate_speech(
         &mut self,
         text: &str,
@@ -286,6 +312,11 @@ impl Model {
     /// Returns a [`SpeechStream`] that yields audio chunks as codec frames are
     /// generated. The first chunk arrives after [`STREAM_FIRST_CHUNK_SIZE`] frames
     /// (~0.4 s); subsequent chunks every [`STREAM_CHUNK_SIZE`] frames (~2 s).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model isn't in `custom_voice` mode, text
+    /// tokenization fails, or streaming state preparation fails.
     pub fn generate_speech_streaming(
         &mut self,
         text: &str,
@@ -313,6 +344,11 @@ impl Model {
 
     /// Generate only the codec codes (no waveform decode).
     /// Useful when you have an external vocoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model isn't in `custom_voice` mode, text
+    /// tokenization fails, or codec code generation fails.
     pub fn generate_codes(
         &mut self,
         text: &str,
@@ -328,6 +364,11 @@ impl Model {
     }
 
     /// Convert pre-generated codes to raw audio bytes (PCM 16-bit LE).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no speech decoder is loaded or waveform decoding
+    /// fails.
     pub fn codes_to_pcm(&self, codes: &[Vec<u32>]) -> Result<Vec<u8>> {
         let speech_decoder = self
             .speech_decoder
@@ -386,6 +427,14 @@ impl Model {
     /// `language`: target language ("japanese", "chinese", "english", "auto", …).
     ///
     /// Returns `(audio_tensor, sample_rate)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model isn't a `base`-type model, `ref_samples_spk`
+    /// is empty, the speaker encoder or native speech tokenizer isn't loaded
+    /// (ONNX-only decoders can't encode reference audio), or any step of
+    /// speaker-embedding extraction, reference encoding, codec generation, or
+    /// waveform decoding fails.
     pub fn generate_voice_clone(
         &mut self,
         text: &str,

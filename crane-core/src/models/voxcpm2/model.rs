@@ -177,6 +177,13 @@ fn resolve_audiovae_safetensors(model_path: &str) -> Result<std::path::PathBuf> 
 }
 
 impl VoxCpm2Model {
+    /// # Errors
+    ///
+    /// Returns an error if `config.json`, the tokenizer, or
+    /// `model.safetensors` can't be read from `model_path`, if any
+    /// sub-network's weights are missing or mismatched, or if the
+    /// `AudioVAE` weights can't be found locally and downloading them from
+    /// the Hub fails.
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let timing = std::env::var_os("CRANE_VOXCPM2_TIMING").is_some();
         /// `phys_footprint` in GiB, for the load-phase log lines.
@@ -393,12 +400,24 @@ impl VoxCpm2Model {
     /// Zero-shot text-to-speech: `text` in, a `[1, 1, T]` f32 waveform in
     /// `[-1, 1]` at [`Self::sample_rate`] out. Thin wrapper over
     /// [`Self::generate_speech_conditioned`] with [`VoxCpm2Conditioning::ZeroShot`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if generation fails — see
+    /// [`Self::generate_speech_conditioned`].
     pub fn generate_speech(&mut self, text: &str, cfg: &VoxCpm2GenerationConfig) -> Result<Tensor> {
         self.generate_speech_conditioned(text, &VoxCpm2Conditioning::ZeroShot, cfg)
     }
 
     /// Text-to-speech with optional reference-audio conditioning / voice
     /// cloning. See [`VoxCpm2Conditioning`] for the four supported modes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if tokenizing `target_text` fails, if the
+    /// conditioning tensors' shapes are inconsistent, if the autoregressive
+    /// decode loop or the `AudioVAE` decoder fails, or if generation
+    /// produces zero new audio patches.
     pub fn generate_speech_conditioned(
         &mut self,
         target_text: &str,
@@ -654,6 +673,11 @@ impl VoxCpm2Model {
     /// to retract), and the near-silent-output retry in
     /// [`Self::generate_conditioned_retrying`] is skipped (early chunks are
     /// already gone by the time the whole clip's amplitude is known).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `stream_cfg`'s chunk sizes are zero, or if
+    /// building the initial conditioning/prefill state fails.
     pub fn generate_speech_streaming(
         &mut self,
         target_text: &str,
@@ -809,6 +833,11 @@ impl VoxCpm2Model {
     /// multiple, VAE-encode, reshape `[D, T']` into `[T'/patch_size,
     /// patch_size, D]` patches (`.view(D,-1,P).permute(1,2,0)` in the
     /// reference — note the axis order here, batch dim included).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `AudioVAE` encoder fails on the padded
+    /// audio, or if its output length isn't a multiple of `patch_size`.
     pub fn encode_reference_audio(&self, samples: &[f32], pad_left: bool) -> Result<Tensor> {
         let patch_len = self.patch_size * self.encoder_chunk_size;
         let raw_len = samples.len();
@@ -849,6 +878,11 @@ impl VoxCpm2Model {
     /// Returns `(waveform, newly_generated_patches)` — pass the second
     /// value to [`Self::merge_prompt_cache`] to extend the cache with this
     /// turn's output for the next call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if generation fails — see
+    /// [`Self::generate_speech_conditioned`].
     pub fn generate_with_prompt_cache(
         &mut self,
         target_text: &str,
@@ -865,6 +899,11 @@ impl VoxCpm2Model {
     /// Port of `merge_prompt_cache`: fold newly generated text+audio into a
     /// (possibly `None`, i.e. first-turn) existing cache, stabilizing voice
     /// across a multi-turn session by growing the continuation prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if concatenating `new_audio_feat` with the existing
+    /// cached audio features fails (e.g. mismatched patch/feature dimensions).
     pub fn merge_prompt_cache(
         &self,
         original: Option<&VoxCpm2PromptCache>,
@@ -1160,6 +1199,10 @@ impl VoxCpm2PromptCache {
     /// `prompt` must be given. `prompt` is `(prompt_text, prompt_feat)` —
     /// both required together, matching the Python validation
     /// (`prompt_wav_path`/`prompt_text` must both be provided or both `None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if both `ref_audio_feat` and `prompt` are `None`.
     pub fn build(ref_audio_feat: Option<Tensor>, prompt: Option<(String, Tensor)>) -> Result<Self> {
         anyhow::ensure!(
             ref_audio_feat.is_some() || prompt.is_some(),

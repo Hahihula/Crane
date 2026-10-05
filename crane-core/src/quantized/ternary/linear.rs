@@ -35,6 +35,11 @@ pub struct TernaryWeight {
 }
 
 impl TernaryWeight {
+    /// # Errors
+    ///
+    /// Returns an error if `cols` is not a multiple of 128, if `rows * cols`
+    /// overflows, if `packed`'s length does not match the size implied by
+    /// `rows`/`cols`/`encoding`, or if allocating the device copy fails.
     pub fn new(
         encoding: TernaryEncoding,
         packed: Vec<u8>,
@@ -90,6 +95,11 @@ impl TernaryWeight {
         self.device.clone()
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `ids` contains a value outside the vocabulary
+    /// (`>= rows`), if decoding a packed ternary block fails, or if the
+    /// output tensor cannot be built or cast to `dtype`.
     pub fn embedding(
         &self,
         ids: &Tensor,
@@ -143,6 +153,13 @@ pub struct TernaryLinear {
 }
 
 impl TernaryLinear {
+    /// # Errors
+    ///
+    /// Returns an error if `mode` requires Hadamard transform parameters
+    /// (`block_size`, `signs`) that are invalid or mismatched with the
+    /// weight's width, if `gdn_permutation`'s geometry does not match the
+    /// weight's width, or if allocating the signs tensor on the weight's
+    /// device fails.
     pub fn new(
         weight: Arc<TernaryWeight>,
         signs: Arc<Vec<f32>>,
@@ -199,6 +216,12 @@ impl TernaryLinear {
         fwht_blocks(values, self.block_size);
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `xs`'s last dimension does not match the weight's
+    /// column count, if `xs` is on an unsupported device, if a CUDA/`ROCm`
+    /// weight has no device allocation, or if the underlying dot-product
+    /// computation fails.
     pub fn forward_f32(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = xs.to_dtype(DType::F32)?.contiguous()?;
         let dims = xs.dims();
@@ -265,6 +288,10 @@ impl TernaryLinear {
         Tensor::from_vec(output, out_dims, xs.device())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if [`Self::forward_f32`] fails or the result cannot
+    /// be cast back to `xs`'s dtype.
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let dtype = xs.dtype();
         let out = self.forward_f32(xs)?;

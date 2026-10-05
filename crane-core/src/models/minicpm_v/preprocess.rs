@@ -52,6 +52,11 @@ fn default_image_std() -> Vec<f32> {
     vec![0.5, 0.5, 0.5]
 }
 
+/// # Errors
+///
+/// Returns an error if `preprocessor_config.json` can't be read from
+/// `model_dir` or its contents aren't valid JSON matching
+/// [`PreprocessorConfig`]'s schema.
 pub fn load_preprocessor_config(model_dir: &str) -> Result<PreprocessorConfig> {
     let path = std::path::Path::new(model_dir).join("preprocessor_config.json");
     let data = std::fs::read(&path)
@@ -220,6 +225,11 @@ pub struct ProcessedImage {
 }
 
 /// Preprocess one image per MiniCPM-V-4.6's slicing algorithm.
+///
+/// # Errors
+///
+/// Returns an error if tensor construction or the patch-reshape fails, e.g.
+/// from an unexpected image size that doesn't divide evenly into patches.
 pub fn process_image(
     image: &DynamicImage,
     cfg: &PreprocessorConfig,
@@ -290,6 +300,11 @@ pub fn process_image(
 /// Pack multiple already-processed images into one `NaViT` batch (`[1, C,
 /// patch_size, total_patches*patch_size]`) plus the flat, in-order
 /// `target_sizes` list `VisionModel::forward` expects.
+///
+/// # Errors
+///
+/// Returns an error if the images' packed pixel tensors have mismatched
+/// shapes along the dimensions other than the concatenation axis.
 pub fn pack_images(images: &[ProcessedImage]) -> Result<(Tensor, Vec<(usize, usize)>)> {
     let pv: Vec<&Tensor> = images.iter().map(|im| &im.pixel_values).collect();
     let pixel_values = Tensor::cat(&pv, 2)?.unsqueeze(0)?;

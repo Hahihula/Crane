@@ -15,6 +15,10 @@ pub struct ScalarQuantizationLayer {
 }
 
 impl ScalarQuantizationLayer {
+    /// # Errors
+    ///
+    /// Returns an error if either projection's weight can't be loaded from
+    /// `vb`.
     pub fn new(
         in_dim: usize,
         out_dim: usize,
@@ -29,6 +33,10 @@ impl ScalarQuantizationLayer {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `hidden`'s last dimension doesn't match
+    /// `in_proj`'s expected input size.
     pub fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
         let hidden = self.in_proj.forward(hidden)?.tanh()?;
         let hidden = (round_half_to_even(&(hidden * self.scale)?)? / self.scale)?;

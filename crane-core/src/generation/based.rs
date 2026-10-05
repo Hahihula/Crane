@@ -4,6 +4,10 @@ use candle_core::Device;
 
 pub trait ModelForCausalLM {
     fn device(&self) -> &Device;
+    /// # Errors
+    ///
+    /// Returns an error if [`Self::generate_next_token`] fails, or if the
+    /// streamer fails to append a token or finalize.
     fn generate(
         &mut self,
         input_ids: &[u32],
@@ -28,6 +32,10 @@ pub trait ModelForCausalLM {
         Ok(output)
     }
 
+    /// # Errors
+    ///
+    /// The default implementation always panics; implementors should return
+    /// an error if their model's forward pass or sampling step fails.
     fn generate_next_token(&self, _input_ids: &[u32]) -> Result<u32> {
         unimplemented!("Implement specific token generation logic")
     }

@@ -32,6 +32,12 @@ use crate::ops::linear::{LinearLayer, linear_layer, quantize_linear};
 /// `create_sin_embedding`: `positions / max_period ** (i / (half_dim -
 /// 1))`, half-cos half-sin. Always computed in fp32. `positions` may be
 /// any shape; the result is `[..., dim]` with the same leading dims.
+///
+/// # Errors
+///
+/// Returns an error if any tensor op (dtype cast, reshape, broadcast, or
+/// concatenation) fails, e.g. because `dim` is odd or `positions` has an
+/// unsupported dtype.
 pub fn create_sin_embedding(
     positions: &Tensor,
     dim: usize,

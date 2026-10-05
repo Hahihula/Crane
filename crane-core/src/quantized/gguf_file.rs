@@ -106,6 +106,12 @@ impl<R: Read + Seek> Gguf<R> {
     /// Construct a GGUF reader for tensors Candle cannot parse itself:
     /// Prism `PTQ1_0/PQ2_0` ternary weights and/or llama.cpp i-quants.
     /// Unlike [`Self::new`], missing Prism metadata is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `CRANE_IQ_REQUANT` names an unsupported target, or
+    /// if `tensors` marks ternary weights present but the required Prism
+    /// metadata is missing from `ct`.
     pub fn new_extended(
         ct: gguf_file::Content,
         reader: R,

@@ -14,6 +14,10 @@ use candle_core::{Device, Result, Tensor};
 ///
 /// All models that maintain a KV cache should use this function so that
 /// batched user-turn prefill works correctly after prefix restoration.
+///
+/// # Errors
+///
+/// Returns an error if allocating the mask tensor on `device` fails.
 pub fn build_causal_mask(seq_len: usize, index_pos: usize, device: &Device) -> Result<Tensor> {
     let kv_len = index_pos + seq_len;
     let mask: Vec<u8> = (0..seq_len)
@@ -22,6 +26,10 @@ pub fn build_causal_mask(seq_len: usize, index_pos: usize, device: &Device) -> R
     Tensor::from_slice(&mask, (seq_len, kv_len), device)
 }
 
+/// # Errors
+///
+/// Returns an error if `logits` can't be converted to a flat `f32` vector
+/// (e.g. unexpected dtype or shape), or if rebuilding the output tensor fails.
 pub fn apply_repeat_penalty(logits: &Tensor, penalty: f32, context: &[u32]) -> Result<Tensor> {
     let device = logits.device();
     let mut logits = logits.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
@@ -45,6 +53,11 @@ pub fn apply_repeat_penalty(logits: &Tensor, penalty: f32, context: &[u32]) -> R
 
 /// Repeats a key or value tensor for grouped query attention
 /// The input tensor should have a shape `(batch, num_kv_heads, seq_len, head_dim)`,
+///
+/// # Errors
+///
+/// Returns an error if `xs` doesn't have exactly 4 dimensions, or if
+/// concatenating and reshaping it fails.
 pub fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {
         Ok(xs)

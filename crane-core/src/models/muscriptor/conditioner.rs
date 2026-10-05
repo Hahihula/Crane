@@ -87,6 +87,11 @@ impl MelSpectrogramConditioner {
     /// fetched filterbank tensor (the upstream stores it as a
     /// non-parameter buffer at save time, so `VarBuilder::pp(...)`
     /// can't reach it through the `nn.Module` API).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `output_proj` weight is missing from `vb` or
+    /// doesn't match `(N_MELS, output_dim)`.
     pub fn new(
         output_dim: usize,
         device: &Device,
@@ -112,6 +117,11 @@ impl MelSpectrogramConditioner {
     /// Convenience: build the conditioner without a per-checkpoint
     /// filterbank (e.g. in tests), using the deterministic Slaney
     /// construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the synthetic filterbank tensor cannot be built,
+    /// or if [`Self::new`] fails to build the `output_proj` weight from `vb`.
     pub fn new_without_filterbank(
         output_dim: usize,
         device: &Device,
@@ -133,6 +143,11 @@ impl MelSpectrogramConditioner {
     /// Returns `([B, T_mel, dim] embeddings, [B, T_mel] mask)`. Frames
     /// past the chunk's real `length` are zeroed by the post-projection
     /// mask so the prefix conditioner contributes no signal there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `cond.wav` isn't a 3-D `[B, 1, T]` tensor, or if
+    /// any tensor op in the per-row mel/FFT pipeline fails.
     pub fn forward(&self, cond: &WavCondition) -> Result<(Tensor, Tensor)> {
         let (b, _, _) = cond.wav.dims3()?;
         let wav_cpu = cond.wav.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
@@ -255,6 +270,10 @@ pub struct ClassConditioner {
 }
 
 impl ClassConditioner {
+    /// # Errors
+    ///
+    /// Returns an error if the embedding weight is missing from `vb` or
+    /// doesn't match `(num_classes + 1, output_dim)`.
     pub fn new(num_classes: usize, output_dim: usize, vb: VarBuilder) -> Result<Self> {
         let embed = embedding(num_classes + 1, output_dim, vb)?;
         Ok(Self { embed })
@@ -265,6 +284,11 @@ impl ClassConditioner {
     /// reach (e.g. the upstream `MuScriptor` checkpoints store
     /// `condition_provider.conditioners.instrument_group.embed.weight`
     /// as a non-`Parameter` module attribute).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `weight`'s element count doesn't match
+    /// `(num_classes + 1) * output_dim`.
     pub fn from_embedding_tensor(
         num_classes: usize,
         output_dim: usize,
@@ -277,6 +301,11 @@ impl ClassConditioner {
 
     /// `indices` is `[B, L]` of class IDs in `[-1, num_classes]` —
     /// `-1` is the CFG null class and shifts to row 0 internally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedding lookup fails, e.g. because a
+    /// shifted index falls outside `[0, num_classes]`.
     pub fn forward(&self, indices: &Tensor) -> Result<(Tensor, Tensor)> {
         let one = Tensor::ones_like(indices)?;
         let shifted = indices.add(&one)?;
@@ -307,6 +336,11 @@ impl ConditioningProvider {
     }
 
     /// Run all conditioners over a single chunk's attributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any matched conditioner's `forward` fails, or if
+    /// parsing a text attribute's class indices fails.
     pub fn forward(
         &self,
         attrs: &ConditioningAttributes,
@@ -330,6 +364,11 @@ impl ConditioningProvider {
 
     /// Force every condition to its null/unconditional value (for CFG
     /// at inference).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if zeroing a wav condition's `wav` or `length`
+    /// tensor fails.
     pub fn nullify(&self, attrs: &ConditioningAttributes) -> Result<ConditioningAttributes> {
         let mut out = attrs.clone();
         for (_, cond) in &mut out.wav {

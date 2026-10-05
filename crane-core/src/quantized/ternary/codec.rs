@@ -38,6 +38,10 @@ fn f16_le(bytes: &[u8]) -> f32 {
     half::f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]])).to_f32()
 }
 
+/// # Errors
+///
+/// Returns an error if `block`'s length does not match `encoding`'s expected
+/// block size.
 pub fn decode_block(encoding: TernaryEncoding, block: &[u8], dst: &mut [f32; 128]) -> Result<()> {
     if block.len() != encoding.block_bytes() {
         bail!(

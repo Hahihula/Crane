@@ -35,6 +35,11 @@ pub struct Siglip2MLP {
 }
 
 impl Siglip2MLP {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder` is missing the `fc1`/`fc2`
+    /// weights or they don't match the configured `hidden_size`/
+    /// `intermediate_size`.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let fc1 = linear(config.hidden_size, config.intermediate_size, vb.pp("fc1"))?;
         let fc2 = linear(config.hidden_size, config.intermediate_size, vb.pp("fc2"))?;
@@ -69,6 +74,10 @@ pub struct Siglip2Attention {
 }
 
 impl Siglip2Attention {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder` is missing the attention
+    /// projection weights or they don't match the configured `hidden_size`.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let embed_dim = config.hidden_size;
         let num_heads = config.num_attention_heads;
@@ -135,6 +144,11 @@ pub struct Siglip2EncoderLayer {
 }
 
 impl Siglip2EncoderLayer {
+    /// # Errors
+    ///
+    /// Returns an error if building the attention, MLP, or either layer norm
+    /// sub-module fails, typically from missing or mismatched weights in
+    /// `vb`.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let self_attn = Siglip2Attention::new(config, vb.pp("self_attn"))?;
 
@@ -179,6 +193,10 @@ pub struct Siglip2Encoder {
 }
 
 impl Siglip2Encoder {
+    /// # Errors
+    ///
+    /// Returns an error if constructing any of the `num_hidden_layers`
+    /// encoder layers fails.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
@@ -211,6 +229,11 @@ pub struct Siglip2VisionEmbeddings {
 }
 
 impl Siglip2VisionEmbeddings {
+    /// # Errors
+    ///
+    /// Returns an error if the patch embedding convolution or the position
+    /// embedding table cannot be built from `vb`, e.g. due to missing or
+    /// mismatched weights.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let conv2dconfig = Conv2dConfig {
             stride: config.patch_size,
@@ -326,6 +349,10 @@ pub struct Siglip2VisionTransformer {
 }
 
 impl Siglip2VisionTransformer {
+    /// # Errors
+    ///
+    /// Returns an error if building the embeddings, encoder, post layer
+    /// norm, or (when `vision_use_head` is set) the pooling head fails.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let embeddings = Siglip2VisionEmbeddings::new(config, vb.pp("embeddings"))?;
         let encoder = Siglip2Encoder::new(config, vb.pp("encoder"))?;
@@ -386,6 +413,10 @@ pub struct Siglip2MultiheadAttentionPoolingHead {
 }
 
 impl Siglip2MultiheadAttentionPoolingHead {
+    /// # Errors
+    ///
+    /// Returns an error if building the attention sub-module or output
+    /// projection fails.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let attn = Siglip2Attention::new(config, vb.pp("attn"))?;
         let output_proj = linear(
@@ -408,11 +439,20 @@ pub struct Siglip2VisionModel {
 }
 
 impl Siglip2VisionModel {
+    /// # Errors
+    ///
+    /// Returns an error if building the underlying vision transformer fails.
     pub fn new(config: &Siglip2Config, vb: VarBuilder) -> Result<Self> {
         let vision_model = Siglip2VisionTransformer::new(config, vb.pp("vision_model"))?;
         Ok(Self { vision_model })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `pixel_values`, `pixel_attention_mask`, or
+    /// `spatial_shapes` have shapes incompatible with the configured
+    /// patch/hidden sizes, e.g. during patch embedding, positional-embedding
+    /// resizing, or attention matmuls.
     pub fn forward(
         &self,
         pixel_values: &Tensor,
@@ -423,6 +463,11 @@ impl Siglip2VisionModel {
             .forward(pixel_values, Some(pixel_attention_mask), spatial_shapes)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `config.json` cannot be read, the safetensors
+    /// file(s) cannot be memory-mapped, or building the vision transformer
+    /// from them fails.
     pub fn from_pretrained(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let config_file = std::path::Path::new(model_path).join("config.json");
         let config_data = std::fs::read(config_file)?;

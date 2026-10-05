@@ -59,6 +59,12 @@ impl EmbeddingLayer {
     ///
     /// `hidden_size` is used only to build the dense fallback; the quantized
     /// gather reads the row length from the tensor's own shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if dequantizing the fallback dense table fails, or if
+    /// the probe tensor cannot be reclaimed from its `Arc` after a failed row
+    /// gather.
     pub fn from_qtensor(weight: QTensor, hidden_size: usize, dtype: DType) -> Result<Self> {
         let device = weight.device();
         let is_quantized = !matches!(
@@ -111,6 +117,11 @@ impl EmbeddingLayer {
     }
 
     /// Gather rows for `ids`, in the compute dtype.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying row gather or dtype cast fails,
+    /// e.g. on an unsupported `ids` shape or dtype.
     pub fn forward(&self, ids: &Tensor) -> Result<Tensor> {
         match self {
             Self::Dense(e) => e.forward(ids),
@@ -136,6 +147,11 @@ impl EmbeddingLayer {
     /// dequantizing matmul, and `QMatMul::Tensor` is a plain matmul that does
     /// no such casting — pairing them fails with "dtype mismatch in matmul,
     /// lhs: F32, rhs: BF16" on the first forward.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if constructing the `QMatMul` or `TernaryLinear`
+    /// wrapper around the shared weight fails.
     pub fn tied_output(&self) -> Result<LinearLayer> {
         match self {
             Self::Dense(e) => Ok(LinearLayer::Standard(candle_nn::Linear::new(
@@ -171,6 +187,11 @@ impl EmbeddingLayer {
     /// exponent range and can't overflow, so they stay native — BF16 in
     /// particular must stay BF16 for the CUDA `gpu_argmax` sampling fast
     /// path, which only accepts BF16 logits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`Self::tied_output`] fails, or if upcasting the
+    /// F16 projection weight to F32 fails.
     pub fn tied_output_upcast_f16(&self, dtype: DType) -> Result<LinearLayer> {
         Ok(match self.tied_output()? {
             LinearLayer::Standard(l) if dtype == DType::F16 => LinearLayer::Standard(

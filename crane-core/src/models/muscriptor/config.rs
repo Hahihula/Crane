@@ -76,6 +76,12 @@ impl VariantConfig {
     /// fixed at 1393 entries; medium/large allocate two extra
     /// "reserved / OOV" logits that are forced to -inf during
     /// decoding — see `LMModel::generate`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message if `dim` isn't evenly divisible by
+    /// `num_heads`, or if `card` isn't `1393` (small) or `1395`
+    /// (medium/large).
     pub fn from_raw(raw: RawConfig) -> Result<Self, String> {
         if raw.dim % raw.num_heads != 0 {
             return Err(format!(
@@ -101,6 +107,11 @@ impl VariantConfig {
     }
 
     /// Parse directly from a JSON byte slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message if `bytes` isn't valid `RawConfig` JSON, or
+    /// if [`Self::from_raw`] rejects the parsed values.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, String> {
         let raw: RawConfig =
             serde_json::from_slice(bytes).map_err(|e| format!("config.json: {e}"))?;

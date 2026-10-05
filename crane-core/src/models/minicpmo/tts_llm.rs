@@ -110,6 +110,11 @@ fn undo_llamacpp_rope_permute(w: Tensor, n_head: usize, head_dim: usize) -> Resu
 }
 
 impl MiniCpmTts {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s embedding, projector, head, or
+    /// transformer-layer weights are missing or don't match `config`'s
+    /// expected shapes.
     pub fn new(config: &TtsConfig, vb: VarBuilder, device: &Device, dtype: DType) -> Result<Self> {
         let emb_text = embedding(
             config.num_text_tokens,
@@ -344,6 +349,12 @@ impl MiniCpmTts {
     /// (same length, position-aligned).
     ///
     /// Returns `[1, seq_len, hidden_size]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `llm_tokens` and `llm_hidden_states` have
+    /// mismatched sequence lengths, or if the semantic projector's forward
+    /// pass fails.
     pub fn build_condition_embeds(
         &self,
         llm_tokens: &[u32],
@@ -371,6 +382,10 @@ impl MiniCpmTts {
     /// `emb_text` lookup for a single special token (audio-bos, text-eos),
     /// returned as `[1, 1, hidden_size]` ready to concatenate onto a
     /// condition-embeds sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedding lookup fails.
     pub fn embed_special_token(&self, token_id: u32) -> Result<Tensor> {
         let t = Tensor::new(&[token_id], &self.device)?;
         self.emb_text

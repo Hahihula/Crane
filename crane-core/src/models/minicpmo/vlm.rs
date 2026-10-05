@@ -73,6 +73,13 @@ pub struct MiniCpmOVlModel {
 }
 
 impl MiniCpmOVlModel {
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer, safetensors weights, or
+    /// `config.json`/`preprocessor_config.json` can't be found or loaded
+    /// from `model_path`, if building the vision, audio, or LLM towers
+    /// fails, if the tokenizer lacks its `<unk>` token, or if it has
+    /// neither an `<|im_end|>` nor `<|endoftext|>` token.
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let llm = MiniCpmOLlm::new(model_path, device, dtype)?;
 
@@ -155,6 +162,11 @@ impl MiniCpmOVlModel {
     /// `target_sizes`: per-image/-slice `(h, w)` patch-grid dims.
     ///
     /// Returns `[num_images, query_num, llm_hidden]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vision tower or resampler forward pass
+    /// fails, e.g. from a `target_sizes`/`pixel_values` mismatch.
     pub fn encode_images(
         &self,
         pixel_values: &Tensor,
@@ -201,6 +213,11 @@ impl MiniCpmOVlModel {
     /// Run the audio encoder + projector on one mono 16kHz PCM clip.
     ///
     /// Returns `[1, pooled_len, llm_hidden]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if mel-feature extraction or the audio encoder/
+    /// projector forward pass fails.
     pub fn encode_audio(&self, samples: &[f32]) -> Result<Tensor> {
         let features = self.mel_extractor.extract(samples)?;
         let encoder_out = self
@@ -219,6 +236,13 @@ impl MiniCpmOVlModel {
     /// (see [`Self::render_prompt`]).
     ///
     /// Returns logits `[1, 1, V]` (last position only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if image/audio encoding fails, if splicing the
+    /// modality embeddings into the input embeddings fails (e.g. a
+    /// placeholder-token count mismatch), or if the LLM's forward pass
+    /// fails.
     pub fn forward(
         &mut self,
         input_ids: &Tensor,
@@ -256,6 +280,9 @@ impl MiniCpmOVlModel {
             .map_err(anyhow::Error::from)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the LLM's embedding lookup or forward pass fails.
     pub fn decode_step(&mut self, token: u32, start_pos: usize) -> Result<Tensor> {
         let input = Tensor::from_vec(vec![token], (1usize, 1usize), &self.device)?;
         let hidden = self.llm.embed_only(&input)?;
@@ -289,6 +316,11 @@ impl MiniCpmOVlModel {
     /// turn. `audio` is mono 16kHz PCM. Returns `None` for `ProcessedImage`
     /// when `image` is `None` (and no audio placeholder when `audio` is
     /// `None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if image preprocessing, audio mel-feature
+    /// extraction, or tokenizing the rendered prompt fails.
     pub fn render_prompt(
         &self,
         image: Option<&image::DynamicImage>,
@@ -333,6 +365,11 @@ impl MiniCpmOVlModel {
     /// Answer `user_text` about `image`/`audio` (pass `None` for either/both
     /// to skip that modality). Resets the KV cache, so each call is an
     /// independent single turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if prompt rendering, the prefill/decode forward
+    /// passes, or final detokenization fails.
     pub fn generate(
         &mut self,
         image: Option<&image::DynamicImage>,
@@ -417,6 +454,12 @@ impl MiniCpmOVlModel {
     /// prefill rows) are exactly what's needed here.
     ///
     /// Returns `(text, response_token_ids, hidden_states [1, response_len, hidden])`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if prompt rendering (including the missing
+    /// `<|tts_bos|>` token case), the prefill/decode forward passes, reading
+    /// back the LLM's last hidden states, or final detokenization fails.
     pub fn generate_for_tts(
         &mut self,
         image: Option<&image::DynamicImage>,

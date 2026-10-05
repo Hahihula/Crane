@@ -20,6 +20,11 @@ use super::config::GdnDims;
 /// history the previous chunk left in `cache.conv_state`, so the first
 /// `kernel - 1` tokens of every chunk after the first see zeros instead of
 /// their real predecessors.
+///
+/// # Errors
+///
+/// Returns an error if `x` is not 3-dimensional, `cache.conv_state` is
+/// shorter than `dims.conv_kernel_size`, or an underlying tensor op fails.
 pub fn causal_conv1d(
     x: &Tensor,
     conv1d_weight: &Tensor,

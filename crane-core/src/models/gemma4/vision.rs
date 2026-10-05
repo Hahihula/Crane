@@ -598,6 +598,10 @@ pub struct Gemma4VisionModel {
 }
 
 impl Gemma4VisionModel {
+    /// # Errors
+    ///
+    /// Returns an error if a required tensor is missing or has a mismatched
+    /// shape under `vb`, or if building the rotary embeddings fails.
     pub fn new(config: &Gemma4VisionConfig, vb: VarBuilder) -> Result<Self> {
         let dtype = vb.dtype();
         let patch_embedder = VisionPatchEmbedder::new(config, vb.pp("patch_embedder"))?;
@@ -626,6 +630,12 @@ impl Gemma4VisionModel {
     /// * `pixel_values`: [B, `num_patches`, 3*`patch_size`^2] — flattened patch pixels
     /// * `pixel_position_ids`: [B, `num_patches`, 2] — (x, y) positions as i64
     /// * `padding_positions`: [B, `num_patches`] — bool mask (true = padding)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tensor operation in the patch embedding,
+    /// encoder layers, or pooling stage fails, e.g. due to mismatched shapes
+    /// between `pixel_values`, `pixel_position_ids`, and `padding_positions`.
     pub fn forward(
         &self,
         pixel_values: &Tensor,
@@ -674,6 +684,10 @@ pub struct Gemma4MultimodalEmbedder {
 }
 
 impl Gemma4MultimodalEmbedder {
+    /// # Errors
+    ///
+    /// Returns an error if the `embedding_projection` weight is missing or
+    /// has a mismatched shape under `vb`.
     pub fn new(
         vision_hidden_size: usize,
         text_hidden_size: usize,
@@ -691,6 +705,10 @@ impl Gemma4MultimodalEmbedder {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if normalizing or projecting `vision_features` fails,
+    /// e.g. due to a mismatched hidden-size dimension.
     pub fn forward(&self, vision_features: &Tensor) -> Result<Tensor> {
         // RMSNorm without learnable scale
         let normed = rms_normalize(vision_features, self.rms_norm_eps)?;
@@ -767,6 +785,11 @@ fn get_aspect_ratio_preserving_size(
 ///
 /// Takes a raw image tensor [C, H, W] with values in [0, 1] and returns
 /// patchified, padded tensors ready for the vision model.
+///
+/// # Errors
+///
+/// Returns an error if any tensor operation (resize, reshape, padding)
+/// fails, e.g. due to an unsupported shape of `image`.
 pub fn preprocess_image(
     image: &Tensor, // [3, H, W] float, values in [0, 1]
     config: &ImagePreprocessConfig,
@@ -863,6 +886,11 @@ pub fn preprocess_image(
 ///
 /// Uses bicubic interpolation for resizing (matching HF's processor),
 /// then patchifies and pads for the vision encoder.
+///
+/// # Errors
+///
+/// Returns an error if `path` cannot be opened or decoded as an image, or if
+/// any downstream tensor operation in [`preprocess_image`] fails.
 pub fn load_and_preprocess_image(
     path: &std::path::Path,
     config: &ImagePreprocessConfig,

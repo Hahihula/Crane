@@ -28,6 +28,10 @@ pub struct RelPositionalEncoding {
 }
 
 impl RelPositionalEncoding {
+    /// # Errors
+    ///
+    /// Returns an error if the precomputed position table can't be built as
+    /// a `[1, 2*max_len-1, d_model]` tensor on `device`.
     pub fn new(
         d_model: usize,
         max_len: usize,
@@ -70,6 +74,11 @@ impl RelPositionalEncoding {
     }
 
     /// `x`: `[1, T, d_model]`. Returns `(x*xscale, pos_emb [1, 2*T-1, d_model])`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `x`'s sequence length exceeds the precomputed
+    /// table's `max_len`.
     pub fn forward(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         let t = x.dim(1)?;
         let scaled = (x * self.xscale)?;
@@ -77,6 +86,9 @@ impl RelPositionalEncoding {
         Ok((scaled, pos_emb))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `size` exceeds the precomputed table's `max_len`.
     pub fn position_encoding(&self, size: usize) -> Result<Tensor> {
         let total = self.pe.dim(1)?;
         let center = total / 2;
@@ -95,6 +107,11 @@ pub struct LinearNoSubsampling {
 }
 
 impl LinearNoSubsampling {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s weights are missing or don't
+    /// match `idim`/`odim`, or if building the position-encoding table
+    /// fails.
     pub fn new(idim: usize, odim: usize, max_len: usize, vb: VarBuilder) -> Result<Self> {
         let linear = linear(idim, odim, vb.pp("out").pp(0))?;
         let norm = layer_norm(odim, 1e-5, vb.pp("out").pp(1))?;
@@ -107,6 +124,11 @@ impl LinearNoSubsampling {
     }
 
     /// `x`: `[1, T, idim]`. Returns `(x [1, T, odim], pos_emb)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the linear/norm projection fails, or if `x`'s
+    /// sequence length exceeds the position-encoding table's `max_len`.
     pub fn forward(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         let x = self.norm.forward(&self.linear.forward(x)?)?;
         self.pos_enc.forward(&x)
@@ -354,6 +376,11 @@ pub struct UpsampleConformerEncoderV2 {
 }
 
 impl UpsampleConformerEncoderV2 {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s embedding, lookahead,
+    /// upsample, or encoder-layer weights are missing or don't match the
+    /// given dimensions.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         input_size: usize,
@@ -411,6 +438,11 @@ impl UpsampleConformerEncoderV2 {
     }
 
     /// `xs`: `[1, T, input_size]`. Returns `[1, T*up_stride, output_size]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any embedding, lookahead, upsample, or
+    /// encoder-layer stage hits a shape mismatch against `xs`.
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (xs, pos_emb) = self.embed.forward(xs)?;
         let mut xs = self.pre_lookahead_layer.forward(&xs)?;

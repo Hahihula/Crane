@@ -405,6 +405,11 @@ pub fn native_enabled() -> bool {
 /// `native` means the default `q5k`, which keeps nearly all of the source
 /// precision at ~30% more memory than `IQ4_XS`. `q4k` is about the same size
 /// as the source but quantizes twice.
+///
+/// # Errors
+///
+/// Returns an error if `CRANE_IQ_REQUANT` is set to a value other than
+/// `native`, `q4k`, `q5k`, `q6k` or `q8_0`.
 pub fn requant_target() -> Result<GgmlDType> {
     let Ok(value) = std::env::var("CRANE_IQ_REQUANT") else {
         return Ok(GgmlDType::Q5K);

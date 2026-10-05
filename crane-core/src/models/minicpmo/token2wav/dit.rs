@@ -298,6 +298,11 @@ pub struct DiT {
 }
 
 impl DiT {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s timestep-embedder, projection,
+    /// block, or final-layer weights are missing or don't match the given
+    /// dimensions.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -332,6 +337,11 @@ impl DiT {
 
     /// `x`, `mu`, `cond`: `[b, 80, t]`. `spks`: `[b, 80]`. `t_step`: `[b]`.
     /// Returns `[b, 80, t]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inputs' shapes are inconsistent (e.g.
+    /// mismatched batch/time dims) or any block's forward pass fails.
     pub fn forward(
         &self,
         x: &Tensor,

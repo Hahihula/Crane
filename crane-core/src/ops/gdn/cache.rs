@@ -19,6 +19,10 @@ pub struct GdnLayerCache {
 
 impl GdnLayerCache {
     /// Allocate zero-initialized state for a single sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if allocating either state tensor on `device` fails.
     pub fn new(cfg: &dyn super::config::GdnConfig, dtype: DType, device: &Device) -> Result<Self> {
         let dims = GdnDims::new(cfg);
         // 3D shape `[1, conv_dim, kernel_size]` — the leading dim lets the
@@ -38,6 +42,10 @@ impl GdnLayerCache {
 
     /// Zero out the state for reuse (e.g. between unrelated requests sharing a
     /// pre-allocated layer). Avoids re-allocating the underlying tensors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if zeroing either state tensor fails.
     pub fn reset(&mut self) -> Result<()> {
         self.conv_state = self.conv_state.zeros_like()?;
         self.recurrent_state = self.recurrent_state.zeros_like()?;

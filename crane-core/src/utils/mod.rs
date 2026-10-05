@@ -13,6 +13,10 @@ use candle_core::{
     utils::{cuda_is_available as candle_cuda_is_available, metal_is_available},
 };
 
+/// # Errors
+///
+/// Returns an error if initializing the selected CUDA, Metal, or SYCL device
+/// fails.
 pub fn select_device(force_cpu: bool) -> Result<Device> {
     if force_cpu {
         Ok(Device::Cpu)

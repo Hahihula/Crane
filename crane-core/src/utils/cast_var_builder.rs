@@ -57,6 +57,11 @@ impl SimpleBackend for CpuCastSafetensors {
 ///
 /// Same contract as [`VarBuilder::from_mmaped_safetensors`]: files are
 /// memory-mapped and must not change while the result is alive.
+///
+/// # Errors
+///
+/// Returns an error if any of `paths` cannot be opened or memory-mapped as a
+/// safetensors file.
 pub unsafe fn from_mmaped_safetensors_cpu_cast<'a, P: AsRef<std::path::Path>>(
     paths: &[P],
     dtype: DType,

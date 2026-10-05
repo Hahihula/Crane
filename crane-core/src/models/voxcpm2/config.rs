@@ -190,6 +190,11 @@ fn default_max_length() -> usize {
 }
 
 /// Load `config.json` for a `VoxCPM2` checkpoint.
+///
+/// # Errors
+///
+/// Returns an error if `path` can't be read, or if its contents aren't
+/// valid JSON matching [`VoxCpm2Config`]'s schema.
 pub fn load_config(path: &str) -> candle_core::Result<VoxCpm2Config> {
     let data = std::fs::read(path)
         .map_err(|e| candle_core::Error::Msg(format!("read config {path}: {e}")))?;

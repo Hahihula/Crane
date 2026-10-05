@@ -203,6 +203,10 @@ pub struct VisionEmbeddings {
 }
 
 impl VisionEmbeddings {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s patch/position embedding
+    /// weights are missing or don't match `cfg`'s expected shapes.
     pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
@@ -229,6 +233,11 @@ impl VisionEmbeddings {
 
     /// GGUF equivalent of [`Self::new`] — `v.patch_embd.*`/`v.position_embd.weight`
     /// in llama.cpp's `clip.cpp` naming.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required tensor is missing or has an
+    /// unexpected shape.
     pub fn from_gguf<R: Read + Seek>(gg: &mut Gguf<R>, cfg: &VisionConfig) -> Result<Self> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
@@ -259,6 +268,11 @@ impl VisionEmbeddings {
     /// padding positions get position id 0 (matching Python's
     /// `torch.full(..., fill_value=0)` default before scatter), which is
     /// harmless since the padded positions are masked out of attention.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tgt_sizes`'s batch size or patch counts don't
+    /// match `pixel_values`'s shape.
     pub fn forward(&self, pixel_values: &Tensor, tgt_sizes: &[(usize, usize)]) -> Result<Tensor> {
         let patch_embeds = self.patch_embedding.forward(pixel_values)?; // [B, hidden, H/p, W/p]
         let (b, hidden, gh, gw) = patch_embeds.dims4()?;
@@ -367,6 +381,11 @@ pub struct VisionModel {
 }
 
 impl VisionModel {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s embedding, encoder-layer, or
+    /// post-layernorm weights are missing or don't match `cfg`'s expected
+    /// shapes.
     pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
         let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"))?;
         let vb_layers = vb.pp("encoder").pp("layers");
@@ -421,6 +440,11 @@ impl VisionModel {
     /// Returns `[B, max_nb_patches, hidden]` (still padded — the caller,
     /// [`super::resampler::Resampler`], masks padding via its own
     /// `key_padding_mask` built from the same `tgt_sizes`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tgt_sizes` don't match `pixel_values`'s shape,
+    /// or if any encoder layer hits a shape mismatch.
     pub fn forward(&self, pixel_values: &Tensor, tgt_sizes: &[(usize, usize)]) -> Result<Tensor> {
         let mut xs = self.embeddings.forward(pixel_values, tgt_sizes)?;
         let (b, max_nb_patches, _hidden) = xs.dims3()?;
