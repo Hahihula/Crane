@@ -8,6 +8,9 @@
 // against the file's own declared size before the cast, or are u64 values
 // that fit losslessly in usize on every supported (64-bit) target.
 #![allow(clippy::cast_possible_truncation)]
+// Quant block counts/scales narrowed to f32/f64 here are far below the
+// point where float precision loss would change a dequantized value.
+#![allow(clippy::cast_precision_loss)]
 
 pub mod extended_gguf;
 pub mod gguf_file;

@@ -23,7 +23,6 @@
 //! standard GQA math, no flash). `QMatMul` runs identically on CUDA and Metal.
 
 #![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
-#![allow(clippy::cast_precision_loss)] // head_dim->f64 sqrt is intentional (bounded)
 #![allow(clippy::too_many_arguments)] // ISQ loader has many params
 #![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
 #![allow(clippy::missing_panics_doc)] // expect() in tests / debug_asserts only
@@ -157,7 +156,6 @@ impl QuantizedAttention {
         let v = repeat_kv(update.v, self.n_kv_groups)?.contiguous()?;
         let q = q.contiguous()?;
 
-        #[allow(clippy::cast_precision_loss)]
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let attn_weights = (q.matmul(&k.transpose(D::Minus1, D::Minus2)?)? * scale)?;
         let attn_weights = match attention_mask {

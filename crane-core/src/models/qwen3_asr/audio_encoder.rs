@@ -58,17 +58,11 @@ fn build_sinusoidal_table(
         "d_model must be even and >= 4, got {d_model}"
     );
     let half_dim = d_model / 2;
-    // half_dim is at most a few hundred (d_model <= a few thousand in
-    // practice), well within f64's exact integer range.
-    #[allow(clippy::cast_precision_loss)]
     let log_timescale_incr = 10_000_f64.ln() / (half_dim as f64 - 1.0);
 
     let mut table = vec![0f32; max_positions * d_model];
     for pos in 0..max_positions {
         for i in 0..half_dim {
-            // pos/i are bounded by max_positions/half_dim, both tiny
-            // relative to f64's exact integer range.
-            #[allow(clippy::cast_precision_loss)]
             let scaled = pos as f64 * (-log_timescale_incr * i as f64).exp();
             // sin/cos are bounded to [-1, 1], safe to narrow to f32.
             #[allow(clippy::cast_possible_truncation)]
@@ -374,8 +368,6 @@ impl AudioEncoderAttention {
         };
         let qkv_proj = with_tracing::Linear::from_weights(qkv_w, qkv_b);
 
-        // head_dim is at most a few hundred in practice, exact in f64.
-        #[allow(clippy::cast_precision_loss)]
         let scale = 1f64 / (head_dim as f64).sqrt();
 
         Ok(Self {

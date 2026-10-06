@@ -59,7 +59,7 @@ pub fn l2_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
 /// Returns an error if `x`'s last dimension cannot be read, the dtype cast
 /// of `alpha` fails, or the fused `rms_norm` kernel rejects the input shapes.
 pub fn l2_norm_fused(x: &Tensor, alpha: &Tensor, eps: f64) -> Result<Tensor> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     let eps_mean = (eps / x.dim(D::Minus1)? as f64) as f32;
     let alpha = alpha.to_dtype(x.dtype())?;
     candle_nn::ops::rms_norm(&x.contiguous()?, &alpha, eps_mean)
@@ -72,7 +72,6 @@ pub fn l2_norm_fused(x: &Tensor, alpha: &Tensor, eps: f64) -> Result<Tensor> {
 /// Returns an error if allocating the tensor on `device` or casting it to
 /// `dtype` fails.
 pub fn l2_alpha(head_k_dim: usize, dtype: DType, device: &candle_core::Device) -> Result<Tensor> {
-    #[allow(clippy::cast_precision_loss)]
     let v = 1.0 / (head_k_dim as f64).sqrt();
     Tensor::full(v as f32, head_k_dim, device)?.to_dtype(dtype)
 }

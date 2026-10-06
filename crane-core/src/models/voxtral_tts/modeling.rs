@@ -483,7 +483,6 @@ impl AcousticTransformer {
         // Precompute sinusoidal inverse frequencies (half the embedding dim)
         let half_dim = ac.dim / 2;
         let log_theta = TIME_EMB_THETA.ln();
-        #[allow(clippy::cast_precision_loss)]
         let time_inv_freq: Vec<f32> = (0..half_dim)
             .map(|i| (-log_theta * i as f32 / half_dim as f32).exp())
             .collect();

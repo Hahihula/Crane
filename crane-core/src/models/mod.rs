@@ -3,6 +3,11 @@
 // and sample dimensions) are bounded by the model's own config or the
 // tensor's own shape, never by untrusted runtime input.
 #![allow(clippy::cast_possible_truncation)]
+// usize/i64 -> f32/f64 narrowing throughout model math (sequence lengths,
+// head dims, timesteps, ratios) loses precision far beyond any value these
+// models actually see; f32/f64 both represent every such value exactly in
+// practice.
+#![allow(clippy::cast_precision_loss)]
 
 #[cfg(feature = "onnx")]
 pub mod g2p;

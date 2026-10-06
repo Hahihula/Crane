@@ -25,7 +25,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // i64 timestep -> f32: bounded 0-999
 #![allow(clippy::format_in_format_args)] // "kugelaudio: ... {e}" inline format
 #![allow(clippy::too_many_lines)] // generate() is necessarily long
-#![allow(clippy::cast_precision_loss)] // tensor dim / ratio math
 #![allow(clippy::module_name_repetitions)] // KugelAudioModel etc.
 #![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
 #![allow(clippy::missing_panics_doc)] // expect() in tests / debug_asserts only

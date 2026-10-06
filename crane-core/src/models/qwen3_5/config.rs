@@ -255,9 +255,6 @@ impl TextConfig {
     /// actually receives rotary embeddings.
     #[must_use]
     pub fn rot_dim(&self) -> usize {
-        // head_dim is a small model dimension (e.g. <=512); the f64 round-trip
-        // through partial_rotary_factor cannot lose precision or sign here.
-        #[allow(clippy::cast_precision_loss)]
         let head_dim = self.head_dim as f64;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let rot_dim = (head_dim * self.partial_rotary_factor()) as usize;

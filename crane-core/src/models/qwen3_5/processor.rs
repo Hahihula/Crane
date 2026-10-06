@@ -85,9 +85,6 @@ fn smart_resize(h: u32, w: u32, factor: u32, min_pixels: usize, max_pixels: usiz
     let area = u64::from(h_bar) * u64::from(w_bar);
     if area > max_pixels as u64 {
         // max_pixels/min_pixels come from preprocessor_config.json and are
-        // always realistic pixel-count bounds (well under 2^52), so this is
-        // lossless in practice.
-        #[allow(clippy::cast_precision_loss)]
         let max_pixels_f = max_pixels as f64;
         let beta = (h_f * w_f / max_pixels_f).sqrt();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -96,7 +93,6 @@ fn smart_resize(h: u32, w: u32, factor: u32, min_pixels: usize, max_pixels: usiz
             w_bar = (w_f / beta / factor_f).floor() as u32 * factor;
         }
     } else if area < min_pixels as u64 {
-        #[allow(clippy::cast_precision_loss)]
         let min_pixels_f = min_pixels as f64;
         let beta = (min_pixels_f / (h_f * w_f)).sqrt();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

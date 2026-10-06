@@ -153,7 +153,6 @@ impl DecoderLayer {
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
         )?;
-        #[allow(clippy::cast_precision_loss)]
         let residual_scale = if cfg.use_mup {
             cfg.scale_depth / (cfg.num_hidden_layers as f64).sqrt()
         } else {

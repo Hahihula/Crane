@@ -178,10 +178,6 @@ impl Model {
         }
         self.device.synchronize()?;
         let decode_elapsed = decode_start.elapsed();
-        // `generated_tokens.len()` is bounded by `opts.max_new_tokens`, far
-        // below f64's 2^53 exact-integer range, so this cast is lossless in
-        // practice.
-        #[allow(clippy::cast_precision_loss)]
         let decode_tokens_per_sec = generated_tokens.len() as f64 / decode_elapsed.as_secs_f64();
         log::info!(
             "qwen3_asr forward: prefill {:.1}ms, decode {} tokens in {:.1}ms ({decode_tokens_per_sec:.1} tok/s)",

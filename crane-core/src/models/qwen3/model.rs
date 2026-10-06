@@ -474,9 +474,6 @@ impl ModelForCausalLM for Model {
         }
 
         if config.report_speed {
-            // generated_tokens is bounded by config.max_new_tokens, far below
-            // f64's 52-bit mantissa limit.
-            #[allow(clippy::cast_precision_loss)]
             let tokens_per_sec = generated_tokens as f64 / dt.as_secs_f64();
             println!("\n{generated_tokens} tokens generated ({tokens_per_sec:.2} token/s)\n");
         }

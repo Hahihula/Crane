@@ -312,9 +312,6 @@ impl Qwen3_5TextModel {
                 q_rows == 2 * num_heads * head_dim
             });
 
-        // rot_dim and head_dim are small model dimensions (well under 2^52),
-        // so this division cannot lose precision.
-        #[allow(clippy::cast_precision_loss)]
         let partial_rotary_factor = rot_dim as f64 / head_dim as f64;
 
         let text_cfg = TextConfig {
@@ -641,9 +638,6 @@ impl Qwen3_5TextModel {
                     .flatten_all()?
                     .to_dtype(DType::F32)?;
                 let v = last.to_vec1::<f32>()?;
-                // v is a single hidden-state vector (hidden_size elements, a small
-                // model dimension), nowhere near f32's 24-bit exact-integer range.
-                #[allow(clippy::cast_precision_loss)]
                 let n = v.len() as f32;
                 let mean = v.iter().sum::<f32>() / n;
                 let min = v.iter().copied().fold(f32::INFINITY, f32::min);
@@ -1136,9 +1130,6 @@ impl ModelForCausalLM for Model {
 
         let dt = start_gen.elapsed();
         if config.report_speed {
-            // generated_tokens is a small per-request token count; f64 has ample
-            // precision for it, this is purely a display metric.
-            #[allow(clippy::cast_precision_loss)]
             let tokens_per_sec = generated_tokens as f64 / dt.as_secs_f64();
             println!("\n{generated_tokens} tokens generated ({tokens_per_sec:.2} token/s)\n");
         }

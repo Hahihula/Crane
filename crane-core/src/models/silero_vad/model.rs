@@ -1341,7 +1341,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cast_precision_loss)]
     fn test_audio_buffer_output_basic() {
         let mut buf = AudioBuffer::new(16000);
         let data: Vec<f32> = (0..100).map(|i| i as f32).collect();
@@ -1352,7 +1351,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cast_precision_loss)]
     fn test_audio_buffer_output_cross_chunk() {
         let mut buf = AudioBuffer::new(16000);
         let a: Vec<f32> = (0..50).map(|i| i as f32).collect();
