@@ -290,6 +290,10 @@ pub struct CodePredictor {
 }
 
 impl CodePredictor {
+    /// # Errors
+    ///
+    /// Returns an error if required weight tensors are missing or have
+    /// mismatched shapes in `vb`.
     pub fn new(
         config: &CodePredictorConfig,
         talker_hidden_size: usize,
@@ -370,6 +374,11 @@ impl CodePredictor {
 
     /// Given the talker hidden state and the first codebook token, predict the
     /// remaining `num_code_groups - 1` codebook tokens using argmax (greedy).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `talker_hidden` has an unexpected tensor rank, or
+    /// a forward pass or sampling step fails.
     pub fn predict(
         &mut self,
         talker_hidden: &Tensor,
@@ -508,6 +517,10 @@ pub struct TalkerModel {
 }
 
 impl TalkerModel {
+    /// # Errors
+    ///
+    /// Returns an error if required weight tensors are missing or have
+    /// mismatched shapes in `vb`.
     pub fn new(config: &TalkerConfig, vb: VarBuilder) -> Result<Self> {
         let model_vb = vb.pp("model");
 
@@ -594,6 +607,11 @@ impl TalkerModel {
     /// `trailing_text_hidden` = `text_proj`(text[1:]) + `tts_eos` — fed step-by-step during generation
     ///
     /// Returns (`input_embeds`, `trailing_text_hidden`, `tts_pad_embed`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tensor construction, embedding lookup, or
+    /// shape operation fails while assembling the prefill embeddings.
     pub fn build_prefill_embeds(
         &self,
         text_token_ids: &[u32],
@@ -730,6 +748,11 @@ impl TalkerModel {
     ///
     /// `seq_offset`: the position offset for `RoPE`. During prefill this is 0;
     /// during autoregressive generation step N this is `prefill_len + N`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the layer forward passes fail, e.g. from an
+    /// incompatible `attention_mask` or `inputs_embeds` shape.
     pub fn forward_embeds(
         &mut self,
         inputs_embeds: &Tensor,
@@ -747,6 +770,11 @@ impl TalkerModel {
     }
 
     /// Generate one codec token (first codebook) from the last hidden state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `hidden_state` has a shape incompatible with the
+    /// codec head.
     pub fn predict_first_code(&self, hidden_state: &Tensor) -> Result<Tensor> {
         self.codec_head.forward(hidden_state)
     }
@@ -759,6 +787,11 @@ impl TalkerModel {
     /// The `codec_bos` is NOT included here — it starts the ICL prompt instead.
     ///
     /// Returns `(prefill_embeds, tts_pad_embed)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tensor construction, embedding lookup, or
+    /// shape operation fails while assembling the prefill embeddings.
     pub fn build_voice_clone_prefill(
         &self,
         spk_embed: &Tensor, // [enc_dim] speaker x-vector
@@ -860,6 +893,11 @@ impl TalkerModel {
     ///   If text ≤ codec → pad text with `tts_pad`, overlay all, trailing = `tts_pad`
     ///
     /// Returns `(icl_embed, trailing_text_hidden)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tensor construction, embedding lookup, or
+    /// shape operation fails while assembling the ICL prompt.
     pub fn build_icl_prompt(
         &self,
         target_text_ids: &[u32],   // raw target text tokens
@@ -1228,6 +1266,10 @@ impl EcapaBlock {
 }
 
 impl SpeakerEncoder {
+    /// # Errors
+    ///
+    /// Returns an error if required weight tensors are missing or have
+    /// mismatched shapes in `vb`.
     pub fn new(cfg: &SpeakerEncoderConfig, vb: VarBuilder) -> Result<Self> {
         let n = cfg.enc_channels.len();
         let mut blocks: Vec<EcapaBlock> = Vec::with_capacity(n - 1);
@@ -1286,6 +1328,11 @@ impl SpeakerEncoder {
     }
 
     /// Forward: input mel `[B, n_mels, T]` → speaker embedding `[B, enc_dim]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `mel` has a shape incompatible with the encoder
+    /// blocks, or an internal tensor operation fails.
     pub fn forward(&self, mel: &Tensor) -> Result<Tensor> {
         // blocks[0]: initial TDNN
         let mut x = self.blocks[0].forward(mel)?;
@@ -1353,6 +1400,10 @@ pub struct Qwen3TTSModel {
 }
 
 impl Qwen3TTSModel {
+    /// # Errors
+    ///
+    /// Returns an error if required talker weight tensors are missing or have
+    /// mismatched shapes in `vb`.
     pub fn new(config: &Qwen3TTSConfig, vb: VarBuilder) -> Result<Self> {
         let device = vb.device().clone();
         let dtype = vb.dtype();
@@ -1426,6 +1477,12 @@ impl Qwen3TTSModel {
     /// Generate speech codec tokens from text.
     ///
     /// Returns a Vec of (`num_code_groups`) tokens per time step.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if building the prefill embeddings fails or any
+    /// forward pass, sampling step, or tensor operation fails during
+    /// autoregressive generation.
     pub fn generate_speech_codes(
         &mut self,
         text_token_ids: &[u32],
@@ -1595,6 +1652,11 @@ impl Qwen3TTSModel {
     /// Performs the same KV-cache setup and prefill as [`generate_speech_codes`],
     /// but returns a [`StreamingState`] instead of running the loop to completion.
     /// The caller drives generation frame-by-frame via [`generate_one_frame`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if building the prefill embeddings fails or the
+    /// initial forward pass fails.
     pub fn prepare_streaming(
         &mut self,
         text_token_ids: &[u32],
@@ -1674,6 +1736,11 @@ impl Qwen3TTSModel {
     ///
     /// `all_codes` is the accumulation of previously generated frames, used
     /// for repetition penalty computation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a forward pass, sampling step, or tensor operation
+    /// fails while producing the frame.
     pub fn generate_one_frame(
         &mut self,
         state: &mut StreamingState,
@@ -1761,6 +1828,12 @@ impl Qwen3TTSModel {
     ///
     /// Returns `(new_codes, ref_code_len)` where `new_codes` are the generated frames
     /// and `ref_code_len` is the number of reference frames prepended for decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if building the voice-clone prefill or ICL prompt
+    /// fails, or any forward pass, sampling step, or tensor operation fails
+    /// during autoregressive generation.
     pub fn generate_voice_clone_codes(
         &mut self,
         text_token_ids: &[u32],

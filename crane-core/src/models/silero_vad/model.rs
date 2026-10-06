@@ -304,6 +304,12 @@ impl Vad {
     }
 
     /// Loads the VAD model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current config fails validation, if
+    /// downloading the default model from the Hugging Face Hub fails, or if
+    /// the ONNX model file can't be read or parsed.
     pub fn load(&mut self, model_file: impl AsRef<str>) -> Result<()> {
         self.verify()?;
         self.reset()?;
@@ -336,6 +342,11 @@ impl Vad {
     }
 
     /// Flushes any remaining audio and returns the segments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if running the VAD model on the buffered audio fails
+    /// (e.g. the model hasn't been loaded, or ONNX inference fails).
     pub fn flush(&mut self) -> Result<&[(usize, usize)]> {
         let buffer = take(&mut self.buffer);
         if !buffer.is_empty() {
@@ -376,6 +387,11 @@ impl Vad {
     }
 
     /// Segments the provided audio data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if running the VAD model on a completed chunk fails
+    /// (e.g. the model hasn't been loaded, or ONNX inference fails).
     pub fn segment_audio(&mut self, audio: &[f32]) -> Result<usize> {
         let mut count = 0;
         let chunk_size = self.chunk_size;
@@ -444,6 +460,11 @@ impl Vad {
     }
 
     /// Resets the VAD state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if allocating the zeroed state tensors on the
+    /// device fails.
     pub fn reset(&mut self) -> Result<()> {
         #[allow(clippy::cast_possible_wrap)] // 8000 or 16000, well within i64 range
         let sr = Tensor::new(self.sample_rate as i64, &self.device)?;

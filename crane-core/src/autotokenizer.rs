@@ -24,6 +24,13 @@ impl Default for FromPretrainedParameters {
 
 /// Downloads and cache the identified tokenizer if it exists on
 /// the Hugging Face Hub, and returns a local path to the file
+///
+/// # Errors
+///
+/// Returns an error if `identifier` or the revision contain characters
+/// outside the allowed alphanumeric/`-_./` set, if the Hugging Face client
+/// cannot be built, or if the file download fails (e.g. network error or
+/// the repository/file does not exist).
 pub fn from_pretrained<S: AsRef<str>>(
     identifier: S,
     params: Option<FromPretrainedParameters>,
@@ -129,6 +136,12 @@ pub struct AutoTokenizer {
 }
 
 impl AutoTokenizer {
+    /// # Errors
+    ///
+    /// Returns an error if `file` cannot be read, its contents are not valid
+    /// `AutoTokenizerConfig` JSON, or the sibling tokenizer files (consolidated
+    /// `tokenizer.json`, or the `vocab.json` + `merges.txt` pair) cannot be
+    /// loaded from the containing directory.
     pub fn from_file<P: AsRef<std::path::Path>>(
         file: P,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -158,6 +171,9 @@ impl AutoTokenizer {
         self.tokenizer.get_vocab(true).get(token_s).copied()
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tokenizer fails to encode `text`.
     pub fn encode(
         &self,
         text: &str,
@@ -169,6 +185,9 @@ impl AutoTokenizer {
         Ok(encoding.get_ids().to_vec())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tokenizer fails to decode `ids`.
     pub fn decode(
         &self,
         ids: &[u32],
@@ -180,6 +199,12 @@ impl AutoTokenizer {
     /// Build an `AutoTokenizer` from a `.gguf` file using its embedded
     /// tokenizer and `chat_template` metadata. Returns an error if the GGUF
     /// lacks `tokenizer.ggml.tokens` (older / third-party quantizers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` cannot be memory-mapped, the GGUF content
+    /// cannot be parsed, or the GGUF lacks the `tokenizer.ggml.tokens`
+    /// metadata needed to build the tokenizer.
     pub fn from_gguf<P: AsRef<std::path::Path>>(
         path: P,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -248,6 +273,12 @@ impl AutoTokenizer {
         Ok(Self { config, tokenizer })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `identifier` is a local GGUF/config path that
+    /// fails to load (see [`Self::from_gguf`] / [`Self::from_file`]), or if
+    /// it is a Hub identifier that fails to download or parse (see the
+    /// free function [`from_pretrained`]).
     pub fn from_pretrained(
         identifier: &str,
         params: Option<FromPretrainedParameters>,
@@ -368,6 +399,12 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 
 impl AutoTokenizer {
     /// Render the chat template for `messages` (no tools).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer has no `chat_template` configured,
+    /// or if rendering fails (e.g. malformed template or `raise_exception`
+    /// triggered by the template on invalid `messages`).
     pub fn apply_chat_template<S: serde::Serialize>(
         &self,
         ctx: S,
@@ -383,6 +420,12 @@ impl AutoTokenizer {
     /// Render the chat template for `messages`, exposing `tools` to the template
     /// (OpenAI-style function specs). Needed for agentic models like Ornith
     /// whose template emits a `# Tools` system block and `<tool_call>` format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer has no `chat_template` configured,
+    /// or if rendering fails (e.g. malformed template or `raise_exception`
+    /// triggered by the template on invalid `messages`/`tools`).
     pub fn apply_chat_template_with_tools<S: serde::Serialize, T: serde::Serialize>(
         &self,
         ctx: S,
@@ -401,6 +444,12 @@ impl AutoTokenizer {
     /// (reasoning ON) when the flag is undefined, whereas the template unsloth
     /// embeds in its GGUFs emits a pre-closed `<think></think>` (reasoning
     /// OFF). Pass `Some(bool)` to pin the behaviour instead of inheriting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer has no `chat_template` configured,
+    /// or if rendering fails (e.g. malformed template or `raise_exception`
+    /// triggered by the template on invalid `messages`/`tools`).
     pub fn apply_chat_template_with_options<S: serde::Serialize, T: serde::Serialize>(
         &self,
         ctx: S,
@@ -424,6 +473,13 @@ impl AutoTokenizer {
     ///
     /// Has no effect on templates that never mention `reasoning_effort`
     /// (Qwen 3.5 and earlier) — an unused context variable is inert.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer has no `chat_template` configured,
+    /// or if rendering fails — including the template calling
+    /// `raise_exception` on invalid `messages`/`tools`, or an unsupported
+    /// `reasoning_effort` value.
     pub fn apply_chat_template_full<S: serde::Serialize, T: serde::Serialize>(
         &self,
         ctx: S,

@@ -547,6 +547,14 @@ fn resolve(model_type: ModelType, model_path: &str) -> ModelType {
 /// `devices.expert` and `promotion` are Qwen3-specific `MoE` expert
 /// placement inputs (see [`super::backend::Qwen3Backend::new`]); ignored by
 /// every other backend, which uses `devices.main` for everything.
+///
+/// # Errors
+///
+/// Returns an error if `quant` is requested for a model other than
+/// `qwen3_5`, if `quant` is not a recognized quantization type, if the
+/// resolved model type is a VLM or TTS model (use the dedicated factory
+/// function instead), if `qwen4_exp` is requested with a non-GGUF format, or
+/// if the underlying backend fails to load the model from `model_path`.
 pub fn create_backend(
     model_type: ModelType,
     model_path: &str,

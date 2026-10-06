@@ -382,6 +382,10 @@ fn mask_api_key(key: &str) -> String {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if `log_level` is `Some` and is not a valid
+/// `tracing_subscriber` filter directive.
 pub fn init_logging(log_level: Option<&str>) -> Result<()> {
     let filter = match log_level {
         Some(level) => tracing_subscriber::EnvFilter::try_new(level)
@@ -401,6 +405,10 @@ pub fn init_logging(log_level: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error if logging initialization fails or if [`run`] fails
+/// (e.g. invalid arguments, or the model or server fails to start).
 pub async fn cli_main() -> Result<()> {
     // Must run before anything touches SYCL; a no-op off `--features sycl`.
     crane_core::utils::sycl_env::ensure_sycl_runtime_env();
@@ -1015,6 +1023,12 @@ fn derive_safe_max_seq_len(
     Some(derived)
 }
 
+/// # Errors
+///
+/// Returns an error if `args.model_path` doesn't point to a valid model file
+/// or directory for the requested format, if `--context` is malformed, if
+/// device initialization fails, if the model fails to load, or if the HTTP
+/// server fails to bind or serve.
 pub async fn run(mut args: Args) -> Result<()> {
     let model_path = std::path::Path::new(&args.model_path);
     if args.format.to_lowercase() == "gguf" || args.model_path.ends_with(".gguf") {

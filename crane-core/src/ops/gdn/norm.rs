@@ -57,6 +57,10 @@ pub struct RmsNormGated {
 }
 
 impl RmsNormGated {
+    /// # Errors
+    ///
+    /// Returns an error if the `weight` tensor of length `size` is missing
+    /// from `vb`.
     pub fn new(size: usize, eps: f64, activation: GateActivation, vb: VarBuilder) -> Result<Self> {
         let weight = vb.get(size, "weight")?;
         Ok(Self::from_weight(weight, eps, activation))
@@ -73,6 +77,11 @@ impl RmsNormGated {
     }
 
     /// Forward pass. `x` and `gate` must share shape `[..., size]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `x` and `gate` have incompatible shapes or
+    /// dtypes for the underlying `rms_norm`/activation/multiply ops.
     pub fn forward(&self, x: &Tensor, gate: &Tensor) -> Result<Tensor> {
         // Norm before gate (HF order): normalize, scale by weight, then * act(gate).
         let weight = self.weight.to_dtype(x.dtype())?;

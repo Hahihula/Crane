@@ -1424,6 +1424,10 @@ pub struct MimiEncoder {
 }
 
 impl MimiEncoder {
+    /// # Errors
+    ///
+    /// Returns an error if required weight tensors are missing or have
+    /// mismatched shapes in `vb`.
     pub fn new(cfg: &EncoderConfig, valid_n_q: usize, vb: VarBuilder) -> Result<Self> {
         // vb is already at the "encoder" prefix (caller does vb.pp("encoder"))
         let layers_vb = vb.pp("encoder").pp("layers");
@@ -1523,6 +1527,11 @@ impl MimiEncoder {
     }
 
     /// Encode audio [B, 1, N] → codes [B, T, `valid_n_q`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `audio` has a shape incompatible with the encoder,
+    /// or an internal tensor operation fails.
     pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
         // audio: [B, 1, N], CausalConvNet expects [B, C, T]
         // Ensure audio is F32 to match encoder weights (loaded in F32)
@@ -1675,6 +1684,11 @@ impl HfMimiEncoder {
 }
 
 impl NativeSpeechTokenizerDecoder {
+    /// # Errors
+    ///
+    /// Returns an error if `config.json` is missing or malformed, no
+    /// safetensors files are found, or required decoder weight tensors are
+    /// missing or have mismatched shapes.
     pub fn new(model_dir: &str, device: &Device, _dtype: DType) -> Result<Self> {
         // Always load speech tokenizer weights in F32 for numerical stability.
         // The decoder pipeline uses SnakeBeta (exp/sin/sqr), LayerNorm, and GELU
@@ -1792,6 +1806,11 @@ impl NativeSpeechTokenizerDecoder {
     }
 
     /// Encode audio `[B, 1, N]` → codes `[B, T, n_q]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no encoder was loaded, or `audio` has a shape
+    /// incompatible with the encoder.
     pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
         if let Some(enc) = &self.encoder_hf {
             return enc.encode(audio);
@@ -1813,6 +1832,10 @@ impl NativeSpeechTokenizerDecoder {
             .unwrap_or(false)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `codes` doesn't have `num_quantizers` code layers,
+    /// or a decoder tensor operation fails.
     pub fn forward(&self, codes: &Tensor) -> Result<Tensor> {
         let debug = Self::tts_debug();
         let (_, k, _) = codes.dims3()?;
@@ -1874,6 +1897,10 @@ impl NativeSpeechTokenizerDecoder {
         Ok(wav.clamp(-1.0, 1.0)?)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if decoding any chunk fails, e.g. due to a shape
+    /// mismatch or an unexpected code-layer count.
     pub fn chunked_decode(
         &self,
         codes: &Tensor,
@@ -1920,6 +1947,11 @@ impl NativeSpeechTokenizerDecoder {
     /// The context frames are decoded but their output is trimmed. With
     /// `context_frames >= 25` (above the codec receptive field) the output is
     /// numerically equivalent to full-sequence decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding `chunk_codes` fails, e.g. due to a shape
+    /// mismatch or an unexpected code-layer count.
     pub fn decode_chunk(&self, chunk_codes: &Tensor, context_frames: usize) -> Result<Tensor> {
         let wav = self.forward(chunk_codes)?;
         if context_frames == 0 {

@@ -609,6 +609,10 @@ pub struct MiniCpm5Model {
 }
 
 impl MiniCpm5Model {
+    /// # Errors
+    ///
+    /// Returns an error if a required tensor is missing or has a mismatched
+    /// shape under `vb`, or if building the rotary embeddings fails.
     pub fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
         let dtype = vb.dtype();
         let model_vb = vb.pp("model");
@@ -658,6 +662,12 @@ impl MiniCpm5Model {
     /// Construct from a GGUF file. Reads config from GGUF metadata and loads
     /// all weights as quantized tensors (`QMatMul` for linear layers, dequantized
     /// for embeddings and norms).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required metadata key is missing or has an
+    /// unexpected type (e.g. `attention.head_count`), or if a required
+    /// tensor is missing or cannot be loaded/dequantized from `reader`.
     pub fn from_gguf<R: Read + Seek>(
         ct: gguf_file::Content,
         reader: &mut R,
@@ -755,6 +765,10 @@ impl MiniCpm5Model {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if any tensor operation in the forward pass fails,
+    /// e.g. due to a shape mismatch in `input_ids`.
     pub fn forward(&mut self, input_ids: &Tensor, start_pos: usize) -> Result<Tensor> {
         // Disable per-tensor CUDA event tracking — Crane uses a single stream.
         #[cfg(feature = "cuda")]

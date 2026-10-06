@@ -39,10 +39,20 @@ pub struct Model {
 }
 
 impl Model {
+    /// # Errors
+    ///
+    /// Returns an error if loading the model at `model_path` fails; see
+    /// [`Self::new_with_format`].
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         Self::new_with_format(model_path, device, dtype, ModelFormat::Auto)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `tokenizer.json` cannot be found or parsed, the
+    /// weights (safetensors or GGUF) cannot be loaded or memory-mapped, the
+    /// model `config.json` cannot be read or deserialized, or building the
+    /// inner `Gemma4Model` fails.
     pub fn new_with_format(
         model_path: &str,
         device: &Device,
@@ -159,6 +169,9 @@ impl Model {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer fails to encode `inputs`.
     pub fn prepare_inputs(&self, inputs: &str) -> Result<Vec<u32>> {
         let input_ids = self
             .tokenizer
@@ -170,6 +183,10 @@ impl Model {
         Ok(input_ids)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if building the input tensor from `input_ids` or the
+    /// model's forward pass fails.
     pub fn forward_step(
         &mut self,
         input_ids: &[u32],

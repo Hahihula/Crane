@@ -5,7 +5,15 @@ use tokenizers::Tokenizer;
 use crate::{autotokenizer::AutoTokenizer, utils::token_output_stream::TokenOutputStream};
 
 pub trait TokenStreamer {
+    /// # Errors
+    ///
+    /// Returns an error if decoding `token_id` or emitting the resulting
+    /// text (e.g. sending it over a channel) fails.
     fn append(&mut self, token_id: u32) -> Result<()>;
+    /// # Errors
+    ///
+    /// Returns an error if signaling completion to the stream's consumer
+    /// fails.
     fn finalize(&mut self) -> Result<()>;
 }
 
@@ -61,6 +69,10 @@ impl AsyncTextStreamer {
 }
 
 pub trait TokenDecode {
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tokenizer fails to decode
+    /// `token_id`.
     fn decode_token(&self, token_id: u32) -> anyhow::Result<String>;
 }
 

@@ -17,12 +17,20 @@ pub struct VarBuilder {
 }
 
 impl VarBuilder {
+    /// # Errors
+    ///
+    /// Returns an error if `p` cannot be memory-mapped or does not contain a
+    /// valid GGUF file.
     pub fn from_gguf<P: AsRef<std::path::Path>>(p: P, device: &Device) -> Result<Self> {
         let mmap =
             crate::quantized::gguf_file::mmap_gguf_file(p).map_err(candle_core::Error::wrap)?;
         Self::from_gguf_buffer(mmap.as_ref(), device)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `buffer` is not a valid GGUF file or if any of
+    /// its tensors fails to decode (including i-quant tensors).
     pub fn from_gguf_buffer(buffer: &[u8], device: &Device) -> Result<Self> {
         // Go through `Gguf` so i-quant tensors are decoded (see
         // `crate::quantized::iquant`) instead of misread.
@@ -64,6 +72,10 @@ impl VarBuilder {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if no tensor named `name` (under the current path)
+    /// exists, or if its shape does not match `s`.
     pub fn get<S: Into<Shape>>(&self, s: S, name: &str) -> Result<Arc<QTensor>> {
         let path = self.path(name);
         match self.data.get(&path) {
@@ -83,6 +95,10 @@ impl VarBuilder {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if no tensor named `name` (under the current path)
+    /// exists.
     pub fn get_no_shape(&self, name: &str) -> Result<Arc<QTensor>> {
         let path = self.path(name);
         match self.data.get(&path) {

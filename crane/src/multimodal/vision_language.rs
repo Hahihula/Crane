@@ -12,11 +12,21 @@ pub struct MultimodalClient {
 
 impl MultimodalClient {
     /// Create a new multimodal client with the given configuration
+    ///
+    /// # Errors
+    ///
+    /// Never fails currently; returns `Result` for consistency with other clients.
     pub fn new(config: CommonConfig) -> CraneResult<Self> {
         Ok(Self { config })
     }
 
     /// Process an image with a text prompt
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured device is unavailable or crane was built
+    /// without the required backend feature, or because image-text processing is
+    /// not implemented yet.
     pub fn process_image_with_text<P: AsRef<Path>>(
         &self,
         image_file: P,
@@ -93,6 +103,10 @@ impl MultimodalClient {
     }
 
     /// Process image data with a text prompt (placeholder implementation)
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error: image-data processing is not implemented yet.
     pub fn process_image_data_with_text(
         &self,
         _image_data: &[u8],

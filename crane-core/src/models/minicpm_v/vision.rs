@@ -164,6 +164,10 @@ pub struct VisionEmbeddings {
 }
 
 impl VisionEmbeddings {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s patch/position embedding
+    /// weights are missing or don't match `cfg`'s expected shapes.
     pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
@@ -193,6 +197,11 @@ impl VisionEmbeddings {
     /// into `pixel_values`, in order; `sum(h*w) == total_patches`.
     ///
     /// Returns `[1, total_patches, hidden_size]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `target_sizes` don't sum to `pixel_values`'s patch
+    /// count, or if the convolution/reshape ops hit a shape mismatch.
     pub fn forward(
         &self,
         pixel_values: &Tensor,
@@ -244,6 +253,10 @@ pub struct EncoderLayer {
 }
 
 impl EncoderLayer {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s layer weights are missing or
+    /// don't match `cfg`'s expected shapes.
     pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             layer_norm1: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm1"))?,
@@ -294,6 +307,10 @@ pub struct WindowAttentionMerger {
 }
 
 impl WindowAttentionMerger {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s weights are missing or don't
+    /// match the shapes implied by `cfg` and `window_kernel_size`.
     pub fn new(
         cfg: &VisionConfig,
         window_kernel_size: (usize, usize),
@@ -361,6 +378,11 @@ impl WindowAttentionMerger {
     /// Returns `[total_patches/4, hidden]` and the halved `target_sizes` for
     /// the caller to use downstream (image dims are exactly `/2` in each
     /// spatial axis after a 2x2 merge).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a `target_sizes` entry isn't evenly divisible by
+    /// the window size, or if `image_boundaries` doesn't match `xs`'s length.
     pub fn forward(
         &self,
         xs: &Tensor,
@@ -437,6 +459,10 @@ pub struct VisionModel {
 }
 
 impl VisionModel {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s embedding, encoder-layer, or
+    /// merger weights are missing or don't match `cfg`'s expected shapes.
     pub fn new(
         cfg: &VisionConfig,
         insert_layer_id: usize,
@@ -476,6 +502,12 @@ impl VisionModel {
     /// element accounts for the 2x2 merge inside `vit_merger` (each axis
     /// halved), needed by the caller ([`super::merger::Merger`]) to know the
     /// new per-image chunk boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `target_sizes` don't match `pixel_values`'s patch
+    /// layout, or if any encoder layer or the mid-stack merger hits a shape
+    /// mismatch.
     pub fn forward(
         &self,
         pixel_values: &Tensor,

@@ -228,6 +228,11 @@ fn apply_partial_rope(
 }
 
 /// RMS normalization without learnable scale (Gemma4's `v_norm` uses `with_scale`=False).
+///
+/// # Errors
+///
+/// Returns an error if any of the underlying tensor operations
+/// (dtype conversion, reduction, or division) fail.
 pub fn rms_normalize(x: &Tensor, eps: f64) -> Result<Tensor> {
     let dtype = x.dtype();
     let x_f32 = x.to_dtype(DType::F32)?;
@@ -838,6 +843,11 @@ pub struct Gemma4Model {
 impl Gemma4Model {
     /// Construct from safetensors / `HuggingFace` checkpoint.
     /// `is_multimodal` controls whether tensors are under `model.language_model.` or `model.`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required tensor is missing or has a mismatched
+    /// shape under `vb`, or if building the rotary embeddings fails.
     pub fn new(config: &Gemma4TextConfig, vb: VarBuilder, is_multimodal: bool) -> Result<Self> {
         let dtype = vb.dtype();
         let model_vb = if is_multimodal {
@@ -945,6 +955,12 @@ impl Gemma4Model {
     }
 
     /// Construct from a GGUF file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a required metadata key is missing or has an
+    /// unexpected type (e.g. `feed_forward_length`), or if a required tensor
+    /// is missing or cannot be loaded/dequantized from `reader`.
     pub fn from_gguf<R: Read + Seek>(
         ct: gguf_file::Content,
         reader: &mut R,
@@ -1193,6 +1209,10 @@ impl Gemma4Model {
 
     // ── Forward ─────────────────────────────────────────────────────────
 
+    /// # Errors
+    ///
+    /// Returns an error if any tensor operation in the forward pass fails,
+    /// e.g. due to a shape mismatch in `input_ids`.
     pub fn forward(&mut self, input_ids: &Tensor, start_pos: usize) -> Result<Tensor> {
         let hidden_states = self.embed_tokens.forward(input_ids)?.to_dtype(self.dtype)?;
         let hidden_states = (hidden_states * self.embed_scale)?;
@@ -1201,6 +1221,11 @@ impl Gemma4Model {
 
     /// Forward pass with pre-computed embeddings (for VLM: vision features spliced into text embeddings).
     /// `input_ids` is still needed for PLE token embedding lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tensor operation in the forward pass fails,
+    /// e.g. due to a shape mismatch between `input_ids` and `hidden_states`.
     pub fn forward_embeds(
         &mut self,
         input_ids: &Tensor,
@@ -1211,6 +1236,11 @@ impl Gemma4Model {
     }
 
     /// Expose `embed_tokens` for VLM use (embed + scale).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedding lookup or dtype conversion fails,
+    /// e.g. due to an out-of-range token id in `input_ids`.
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {
         let hidden_states = self.embed_tokens.forward(input_ids)?.to_dtype(self.dtype)?;
         hidden_states * self.embed_scale

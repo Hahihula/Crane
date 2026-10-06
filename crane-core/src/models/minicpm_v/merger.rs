@@ -58,6 +58,10 @@ pub struct Merger {
 }
 
 impl Merger {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s weights are missing or have a
+    /// shape that doesn't match the merger's expected layer dimensions.
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
         let (merge_h, merge_w) = cfg.merge_kernel_size;
         let vision_hidden = cfg.vision_config.hidden_size;
@@ -99,6 +103,12 @@ impl Merger {
     /// Returns the flat, fully-merged image token sequence
     /// `[total_image_tokens, llm_hidden]`, concatenated across images in
     /// order — ready to splice into the LLM's input embeddings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `target_sizes` don't partition `xs` into the
+    /// expected patch counts, or if a grid dimension isn't evenly divisible
+    /// by the merge kernel size.
     pub fn forward(&self, xs: &Tensor, target_sizes: &[(usize, usize)]) -> Result<Tensor> {
         let embed_dim = xs.dim(1)?;
         let mut start = 0usize;

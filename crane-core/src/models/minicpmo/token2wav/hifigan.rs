@@ -461,6 +461,11 @@ pub struct HiFTGenerator {
 }
 
 impl HiFTGenerator {
+    /// # Errors
+    ///
+    /// Returns an error if `hift.safetensors` can't be found/mmapped under
+    /// `model_path`, or if its weights don't match the generator's expected
+    /// shapes.
     pub fn new(model_path: &str, device: &Device, dtype: DType) -> Result<Self> {
         let path = format!("{model_path}/assets/token2wav/hift.safetensors");
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], dtype, device) }?;

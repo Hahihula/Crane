@@ -36,6 +36,11 @@ impl UnifiedCfm {
     /// `mu`: `[B, 2*hidden_size]` (LM context). `cond`: `[B, in_channels, T']`
     /// (previous patch). Returns `[B, in_channels, patch_size]` — the
     /// sampled next patch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `mu` doesn't have 2 dimensions, or if the
+    /// flow-matching estimator's forward pass fails on `mu`/`cond`'s shapes.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &mut self,

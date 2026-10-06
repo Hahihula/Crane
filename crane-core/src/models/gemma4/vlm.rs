@@ -37,6 +37,12 @@ pub struct Gemma4VLModel {
 }
 
 impl Gemma4VLModel {
+    /// # Errors
+    ///
+    /// Returns an error if `tokenizer.json` is missing or fails to parse,
+    /// the safetensors weights cannot be found or memory-mapped, the model
+    /// `config.json` cannot be read or deserialized, or building the vision
+    /// tower, multimodal embedder, or text decoder fails.
     pub fn new(model_path: &str, device: &Device, dtype: &DType) -> Result<Self> {
         let tokenizer_path = std::path::Path::new(model_path).join("tokenizer.json");
         if !tokenizer_path.exists() {
@@ -84,6 +90,11 @@ impl Gemma4VLModel {
     }
 
     /// Run vision encoder on pixel values and project to text space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vision tower's forward pass or the
+    /// vision-to-text projection fails, e.g. due to mismatched tensor shapes.
     pub fn encode_image(
         &self,
         pixel_values: &Tensor,
@@ -102,6 +113,11 @@ impl Gemma4VLModel {
     /// * `input_ids` — token IDs including image placeholder tokens
     /// * `image_embeds` — projected vision features [B, `num_image_tokens`, `hidden_size`]
     /// * `start_pos` — KV cache position
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if masking image tokens, embedding `input_ids`,
+    /// splicing in `image_embeds`, or the text decoder's forward pass fails.
     pub fn forward(
         &mut self,
         input_ids: &Tensor,

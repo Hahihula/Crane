@@ -152,6 +152,11 @@ impl Config {
     /// fixed for released Qwen3-ASR checkpoints; those are restored from the
     /// published `HuggingFace` defaults. When defaults are applied, the returned
     /// string lists every substituted field and value for logging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data` is not valid JSON or does not match the
+    /// expected `Config` schema once defaults have been applied.
     pub fn from_json_slice(data: &[u8]) -> Result<(Self, Option<String>), serde_json::Error> {
         let value: serde_json::Value = serde_json::from_slice(data)?;
 

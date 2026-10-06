@@ -36,6 +36,12 @@ use super::vlm;
 ///
 /// Accepts either `text` (prompt string) or `input_ids` (pre-tokenized).
 /// Returns generated text + `meta_info`, or SSE stream if `stream: true`.
+///
+/// # Errors
+///
+/// Returns an error response if neither `text` nor `input_ids` is provided,
+/// if tokenization fails, if no text engine is loaded, if the engine rejects
+/// the request, or if generation itself fails.
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GenerateRequest>,
@@ -200,6 +206,12 @@ pub async fn server_info(State(state): State<Arc<AppState>>) -> impl IntoRespons
 ///
 /// Runs a tiny 1-token generation through the full pipeline.
 /// Returns 200 on success, 503 on failure/timeout.
+///
+/// # Errors
+///
+/// Returns an error response if no text engine is loaded, if the engine
+/// rejects the probe request, if generation fails, or if the probe does not
+/// complete within 30 seconds.
 pub async fn health_generate(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {

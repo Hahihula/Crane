@@ -9,12 +9,19 @@ pub struct Embedding {
 }
 
 impl Embedding {
+    /// # Errors
+    ///
+    /// Returns an error if the embedding weight can't be loaded from `vb`
+    /// (missing tensor or shape mismatch).
     pub fn new(d1: usize, d2: usize, vb: VarBuilder) -> Result<Self> {
         let inner = candle_nn::embedding(d1, d2, vb)?;
         let span = tracing::span!(tracing::Level::TRACE, "embedding");
         Ok(Self { inner, span })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `weights` doesn't have exactly 2 dimensions.
     pub fn from_weights(weights: Tensor) -> Result<Self> {
         let (_in_size, out_size) = weights.dims2()?;
         let inner = candle_nn::Embedding::new(weights, out_size);
@@ -57,18 +64,28 @@ impl Linear {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if the layer's weight (or bias, when `b` is true) can't
+/// be loaded from `vb`.
 pub fn linear_b(d1: usize, d2: usize, b: bool, vb: VarBuilder) -> Result<Linear> {
     let inner = candle_nn::linear_b(d1, d2, b, vb)?;
     let span = tracing::span!(tracing::Level::TRACE, "linear");
     Ok(Linear { inner, span })
 }
 
+/// # Errors
+///
+/// Returns an error if the layer's weight or bias can't be loaded from `vb`.
 pub fn linear(d1: usize, d2: usize, vb: VarBuilder) -> Result<Linear> {
     let inner = candle_nn::linear(d1, d2, vb)?;
     let span = tracing::span!(tracing::Level::TRACE, "linear");
     Ok(Linear { inner, span })
 }
 
+/// # Errors
+///
+/// Returns an error if the layer's weight can't be loaded from `vb`.
 pub fn linear_no_bias(d1: usize, d2: usize, vb: VarBuilder) -> Result<Linear> {
     let inner = candle_nn::linear_no_bias(d1, d2, vb)?;
     let span = tracing::span!(tracing::Level::TRACE, "linear");
@@ -96,6 +113,10 @@ impl Module for Conv2d {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if the convolution's weight or bias can't be loaded
+/// from `vs`.
 pub fn conv2d(
     in_channels: usize,
     out_channels: usize,
@@ -116,6 +137,10 @@ pub struct QMatMul {
 }
 
 impl QMatMul {
+    /// # Errors
+    ///
+    /// Returns an error if the quantized weight can't be loaded from `vb`,
+    /// or if it isn't a quantized dtype `QMatMul` supports.
     pub fn new(
         out_dim: usize,
         in_dim: usize,
@@ -127,6 +152,9 @@ impl QMatMul {
         Ok(Self { inner, span })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `ws` isn't a quantized dtype `QMatMul` supports.
     pub fn from_weights(ws: std::sync::Arc<candle_core::quantized::QTensor>) -> Result<Self> {
         let inner = candle_core::quantized::QMatMul::from_arc(ws)?;
         let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
@@ -168,6 +196,9 @@ impl Module for LayerNorm {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if the layer's weight or bias can't be loaded from `vb`.
 pub fn layer_norm<C: Into<candle_nn::LayerNormConfig>>(
     size: usize,
     c: C,
@@ -185,12 +216,18 @@ pub struct RmsNorm {
 }
 
 impl RmsNorm {
+    /// # Errors
+    ///
+    /// Returns an error if the weight tensor can't be loaded from `vb`.
     pub fn new(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
         let span = tracing::span!(tracing::Level::TRACE, "rms-norm");
         let inner = candle_nn::rms_norm(size, eps, vb)?;
         Ok(Self { inner, span })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `x`'s last dimension doesn't match the norm's size.
     pub fn forward_diff(&self, x: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
         self.inner.forward_diff(x)

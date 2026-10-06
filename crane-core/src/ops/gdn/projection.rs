@@ -72,6 +72,10 @@ pub enum GdnInputProjection {
 }
 
 impl GdnInputProjection {
+    /// # Errors
+    ///
+    /// Returns an error if a required projection weight is missing from
+    /// `vb` for the given `kind`.
     pub fn load(
         vb: VarBuilder,
         dims: &super::config::GdnDims,
@@ -122,6 +126,12 @@ impl GdnInputProjection {
 
     /// Project `x: [B, S, H]` through all four projections and slice into the
     /// per-tensor Q, K, V, Z, B, A views needed by the recurrence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a projection's matmul fails, a `Fused` group is
+    /// missing one of the four parts, or the output cannot be reshaped to
+    /// the expected per-head shapes.
     pub fn forward(
         &self,
         x: &Tensor,
@@ -260,6 +270,11 @@ impl GdnProjection {
 
     /// Reassemble the Q|K|V channels into a single `[B, S, conv_dim]` tensor —
     /// the input the causal `Conv1D` expects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reshaping `q`/`k`/`v` or concatenating them
+    /// fails.
     pub fn conv_input(
         &self,
         dims: &super::config::GdnDims,

@@ -70,6 +70,9 @@ impl VoxCpm2Tokenizer {
         Self { inner, split_map }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer file at `path` can't be loaded.
     pub fn from_file(path: &str) -> Result<Self> {
         let inner = Tokenizer::from_file(path)
             .map_err(anyhow::Error::msg)
@@ -113,6 +116,10 @@ impl VoxCpm2Tokenizer {
     /// per-character token ids (`add_special_tokens=false`, matching how
     /// `voxcpm2.py` calls the wrapped tokenizer — it appends control tokens
     /// like `audio_start_token` itself afterward).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tokenizer fails to encode `text`.
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         let encoding = self.inner.encode(text, false).map_err(anyhow::Error::msg)?;
         let ids = encoding.get_ids();
@@ -126,6 +133,9 @@ impl VoxCpm2Tokenizer {
         Ok(out)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tokenizer fails to decode `ids`.
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         self.inner
             .decode(ids, skip_special_tokens)

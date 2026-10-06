@@ -202,6 +202,9 @@ impl Qwen3_5TextModel {
         Self::from_gguf_impl(ct, reader, device, None)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if required GGUF metadata or tensors are missing or malformed.
     pub fn from_gguf_extended<R: std::io::Read + std::io::Seek>(
         ct: candle_core::quantized::gguf_file::Content,
         reader: &mut R,

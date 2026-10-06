@@ -38,6 +38,11 @@ impl QuantizedLinear {
     /// F32 internally and requires F32 input; we round-trip the input dtype
     /// so BF16/F16 activation pipelines keep their dtype downstream
     /// (residual adds, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dtype cast, quantized matmul, or bias add
+    /// fails.
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let input_dtype = xs.dtype();
         // SYCL's quantized matmul takes an F16 activation directly and returns
@@ -232,6 +237,11 @@ impl LinearLayer {
 
 /// Parse a quantization level name as accepted by `--quant` / `CRANE_ISQ`
 /// (e.g. `q4_0`, `q8_0`, `q4k` / `q4_k`, case-insensitive).
+///
+/// # Errors
+///
+/// Returns an error if `name` does not match one of the supported
+/// quantization level spellings.
 pub fn parse_ggml_dtype(name: &str) -> Result<GgmlDType> {
     let normalized = name.trim().to_lowercase().replace("_k", "k");
     let dt = match normalized.as_str() {
@@ -259,6 +269,11 @@ pub fn parse_ggml_dtype(name: &str) -> Result<GgmlDType> {
 /// back to `Q8_0` (block size 32) so oddly-shaped projections still shrink
 /// instead of erroring out. A bias, if present, is carried over unquantized
 /// (see [`QuantizedLinear`]) — e.g. Qwen2's biased Q/K/V projections.
+///
+/// # Errors
+///
+/// Returns an error if the weight's input dimension cannot be read or the
+/// quantization of the weight tensor fails.
 pub fn quantize_linear(linear: Linear, dtype: GgmlDType) -> Result<LinearLayer> {
     let bias = linear.bias().cloned();
     let weight = linear.weight();
@@ -286,6 +301,11 @@ pub fn quantize_linear(linear: Linear, dtype: GgmlDType) -> Result<LinearLayer> 
 /// [`LinearLayer::Standard`]; with `Some(dtype)` the bf16/f16 weight is
 /// quantized immediately and dropped, keeping peak memory near the quantized
 /// size when loading from mmaped safetensors.
+///
+/// # Errors
+///
+/// Returns an error if the weight is missing from `vb` or, when `quant` is
+/// set, if quantizing it fails.
 pub fn linear_layer(
     in_dim: usize,
     out_dim: usize,
@@ -309,6 +329,11 @@ pub fn linear_layer(
 /// `KugelAudio` decoder's `new_with_quant` path: per-tensor GPU-side staging
 /// wasn't being reclaimed between layers otherwise on Metal with an 18GB
 /// unified-memory budget.
+///
+/// # Errors
+///
+/// Returns an error if `weight`/`bias` are missing from `vb_cpu`, or if the
+/// device transfer or quantization onto `target_device` fails.
 pub fn quantize_linear_onto(
     in_dim: usize,
     out_dim: usize,

@@ -12,11 +12,21 @@ pub struct VisionClient {
 
 impl VisionClient {
     /// Create a new vision client with the given configuration
+    ///
+    /// # Errors
+    ///
+    /// Never fails currently; returns `Result` for consistency with other clients.
     pub fn new(config: CommonConfig) -> CraneResult<Self> {
         Ok(Self { config })
     }
 
     /// Analyze an image file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured device is unavailable or crane was built
+    /// without the required backend feature, or because vision analysis is not
+    /// implemented yet.
     pub fn analyze_image<P: AsRef<Path>>(&self, image_file: P) -> CraneResult<String> {
         let _device = match &self.config.device {
             DeviceConfig::Cpu => crane_core::models::Device::Cpu,
@@ -85,6 +95,10 @@ impl VisionClient {
     }
 
     /// Analyze image data (placeholder implementation)
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error: image-data analysis is not implemented yet.
     pub fn analyze_image_data(&self, _image_data: &[u8]) -> CraneResult<String> {
         Err(CraneError::Other(
             "Image data analysis not implemented yet".to_string(),

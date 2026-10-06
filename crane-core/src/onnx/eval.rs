@@ -237,6 +237,10 @@ fn same_upper_conv_pads(
     Ok(begin)
 }
 
+/// # Errors
+///
+/// Returns an error if the tensor's ONNX element type is unrecognized or
+/// unsupported by Candle.
 pub fn get_tensor(t: &onnx::TensorProto, name: &str) -> Result<Tensor> {
     let dims: Vec<usize> = t.dims.iter().map(|&x| x as usize).collect();
     match DataType::try_from(t.data_type) {
@@ -284,6 +288,11 @@ pub fn get_tensor(t: &onnx::TensorProto, name: &str) -> Result<Tensor> {
 // graph so as to make multiple evaluations more efficient.
 // An example upside of this would be to remove intermediary values when they are not needed
 // anymore.
+/// # Errors
+///
+/// Returns an error if the model has no graph, an initializer or node
+/// references an unsupported tensor type or operator, or shape/type
+/// mismatches occur while evaluating the graph.
 pub fn simple_eval(
     model: &onnx::ModelProto,
     mut inputs: HashMap<String, Value>,

@@ -37,6 +37,8 @@ impl<'a> AsrStream<'a> {
 
     /// Returns the next transcript, or `None` when the stream is complete.
     ///
+    /// # Errors
+    ///
     /// Returns `Err` if the underlying model encounters a transcription error.
     pub fn next_chunk(&mut self) -> Result<Option<Transcript>> {
         self.inner.next().transpose()
@@ -63,6 +65,10 @@ pub trait Asr {
     ///
     /// `audio` is f32 PCM at [`input_sample_rate`](Asr::input_sample_rate) (mono).
     /// Always returns a [`Transcript`] with `is_final: true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying model fails to transcribe the audio.
     fn transcribe(&mut self, audio: &[f32], opts: &TranscribeOptions) -> Result<Transcript>;
 
     /// Transcribe audio incrementally as it becomes available.
@@ -70,6 +76,10 @@ pub trait Asr {
     /// The default implementation calls [`transcribe`](Asr::transcribe) once
     /// and wraps the result in a single-item stream; models with true
     /// streaming support override this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying model fails to transcribe the audio.
     fn transcribe_stream(
         &mut self,
         audio: &[f32],

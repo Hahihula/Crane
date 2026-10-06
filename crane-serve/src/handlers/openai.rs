@@ -31,6 +31,12 @@ use super::vlm;
 // ─────────────────────────────────────────────────────────────
 
 /// `POST /v1/chat/completions` — streaming and non-streaming.
+///
+/// # Errors
+///
+/// Returns an error response if the chat template fails to render the
+/// messages, if tokenization fails, if no text engine is loaded, or if the
+/// engine rejects the request (e.g. its queue is shutting down).
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
@@ -176,6 +182,12 @@ pub async fn chat_completions(
 // ─────────────────────────────────────────────────────────────
 
 /// `POST /v1/completions` — text completion (no chat template).
+///
+/// # Errors
+///
+/// Returns an error response if tokenization fails, if no text engine is
+/// loaded, or if the engine rejects the request (e.g. its queue is shutting
+/// down).
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CompletionRequest>,
@@ -267,6 +279,11 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 }
 
 /// `GET /v1/models/:model_id` — retrieve a specific model.
+///
+/// # Errors
+///
+/// Returns a 404 error response if `model_id` does not match the loaded
+/// model.
 pub async fn retrieve_model(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
@@ -300,6 +317,12 @@ fn make_model_info(state: &AppState) -> ModelInfo {
 // ─────────────────────────────────────────────────────────────
 
 /// `POST /v1/tokenize` or `POST /tokenize`
+///
+/// # Errors
+///
+/// Returns an error response if neither `text` nor `messages` is provided,
+/// if the chat template fails to render `messages`, or if tokenization
+/// fails.
 pub async fn tokenize(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TokenizeRequest>,
@@ -334,6 +357,10 @@ pub async fn tokenize(
 }
 
 /// `POST /v1/detokenize` or `POST /detokenize`
+///
+/// # Errors
+///
+/// Returns an error response if decoding `req.tokens` fails.
 pub async fn detokenize(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DetokenizeRequest>,

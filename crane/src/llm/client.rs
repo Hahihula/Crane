@@ -35,6 +35,12 @@ pub struct LlmClient {
 
 impl LlmClient {
     /// Create a new LLM client with the given configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured device is unavailable or crane was built
+    /// without the required backend feature, if the tokenizer or model fails to
+    /// load, or if `config.model_type` is unsupported.
     pub fn new(config: CommonConfig) -> CraneResult<Self> {
         let device = match &config.device {
             DeviceConfig::Cpu => crane_core::models::Device::Cpu,
@@ -170,6 +176,11 @@ impl LlmClient {
     }
 
     /// Generate text using the model
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying model fails to generate text (see
+    /// [`generate_chat`](LlmClient::generate_chat)).
     pub fn generate(&mut self, prompt: &str, config: &GenerationConfig) -> CraneResult<String> {
         let messages = [crane_core::chat::Message {
             role: crane_core::chat::Role::User,
@@ -179,6 +190,11 @@ impl LlmClient {
     }
 
     /// Generate text with streaming support
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying model fails to generate text (see
+    /// [`generate_chat_streaming`](LlmClient::generate_chat_streaming)).
     pub fn generate_streaming<F>(
         &mut self,
         prompt: &str,
@@ -197,6 +213,10 @@ impl LlmClient {
 }
 
 impl LlmClient {
+    /// # Errors
+    ///
+    /// Returns an error if applying the chat template, preparing inputs,
+    /// generation, or decoding the output fails.
     pub fn generate_chat(
         &mut self,
         messages: &[crane_core::chat::Message],
@@ -336,6 +356,10 @@ impl LlmClient {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if applying the chat template or preparing inputs fails,
+    /// if generation fails, or if the generation thread panics.
     pub fn generate_chat_streaming<F>(
         &mut self,
         messages: &[crane_core::chat::Message],

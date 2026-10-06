@@ -16,6 +16,11 @@ pub struct MoonshineASR {
 }
 
 impl MoonshineASR {
+    /// # Errors
+    ///
+    /// Returns an error if `model_name` doesn't contain `"tiny"` or
+    /// `"base"`, since the layer/head/dim configuration is looked up from
+    /// that name.
     pub fn new(
         models_dir: &str,
         model_name: &str,
@@ -57,6 +62,11 @@ impl MoonshineASR {
         Ok(model)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the encoder/decoder ONNX models fail to load or
+    /// run, or if their outputs are missing the expected
+    /// `last_hidden_state`/`logits` tensors.
     pub fn generate(&self, audio: &[f32], max_len: Option<usize>) -> Result<Vec<i64>> {
         let max_len = max_len.unwrap_or_else(|| {
             ((audio.len() as f64 / 16_000.0) * (self.token_rate as f64)).ceil() as usize

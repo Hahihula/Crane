@@ -19,6 +19,10 @@ pub struct VoxCpmLocEnc {
 }
 
 impl VoxCpmLocEnc {
+    /// # Errors
+    ///
+    /// Returns an error if the special token, input projection, or inner
+    /// encoder's weights can't be loaded from `vb`.
     pub fn new(
         cfg: &MiniCpm4Config,
         input_dim: usize,
@@ -42,6 +46,11 @@ impl VoxCpmLocEnc {
     /// first, since this network is called fresh every time (never
     /// incrementally) — a stale cache from a previous call would silently
     /// corrupt the non-causal attention here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `x` doesn't have 4 dimensions, or if the inner
+    /// encoder's forward pass fails on its reshaped input.
     pub fn forward(&mut self, x: &Tensor) -> Result<Tensor> {
         self.encoder.clear_kv_cache();
 

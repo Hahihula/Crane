@@ -27,6 +27,11 @@ pub struct VoxCpm2Tts {
 }
 
 impl VoxCpm2Tts {
+    /// # Errors
+    ///
+    /// Returns an error if `voice_dir` is given and its cache directory can't be
+    /// created, its entries can't be listed, a voice filename isn't valid UTF-8,
+    /// or encoding/caching a built-in voice's reference audio fails.
     pub fn new(
         model: VoxCpm2Model,
         model_path: &Path,

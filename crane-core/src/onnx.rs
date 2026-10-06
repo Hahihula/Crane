@@ -46,6 +46,11 @@ pub use optimizer::{OptimizationReport, SessionOptions};
 pub use session::Session;
 
 /// Decodes an ONNX protobuf model from disk.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or its contents are not a
+/// valid ONNX `ModelProto` protobuf message.
 pub fn read_file<P: AsRef<Path>>(path: P) -> CandleResult<proto::ModelProto> {
     let bytes = std::fs::read(path)?;
     proto::ModelProto::decode(bytes.as_slice()).map_err(candle_core::Error::wrap)
@@ -85,6 +90,12 @@ pub struct OnnxProbeReport {
 /// symbolic or unknown dimensions use `dynamic_dim`. This validates graph
 /// loading and operator support, but cannot prove application-level numerical
 /// correctness for arbitrary real inputs.
+///
+/// # Errors
+///
+/// Returns an error if `dynamic_dim` is zero, the model file does not exist
+/// or fails to decode, the graph is missing or references unsupported
+/// operators/tensor types, or the CPU forward pass through Candle fails.
 pub fn probe_onnx_model(path: impl AsRef<Path>, dynamic_dim: usize) -> Result<OnnxProbeReport> {
     if dynamic_dim == 0 {
         bail!("--dynamic-dim must be at least 1");

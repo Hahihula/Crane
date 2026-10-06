@@ -223,6 +223,11 @@ pub struct AudioEncoder {
 }
 
 impl AudioEncoder {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s convolution, position
+    /// embedding, or encoder-layer weights are missing or don't match
+    /// `cfg`'s expected shapes.
     pub fn new(cfg: &AudioConfig, vb: VarBuilder) -> Result<Self> {
         let conv1_cfg = Conv1dConfig {
             padding: 1,
@@ -328,6 +333,11 @@ impl AudioEncoder {
     /// module doc for what padded/masked multi-clip batching would need).
     ///
     /// Returns `[B, encoder_frames, d_model]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the convolutions or encoder layers hit a shape
+    /// mismatch against `input_features`.
     pub fn forward(&self, input_features: &Tensor) -> Result<Tensor> {
         let xs = self.conv1.forward(input_features)?;
         let xs = candle_nn::Activation::Gelu.forward(&xs)?;

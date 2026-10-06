@@ -46,6 +46,11 @@ impl LongRoPE {
     /// architectural constant — conflating the two would be a real
     /// divergence from upstream for any config where they differ (they
     /// happen to be equal, 32768, for this checkpoint).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if building the rotary-embedding frequency/position
+    /// tensors on `device` fails.
     pub fn new(cfg: &MiniCpm4Config, table_len: usize, device: &Device) -> Result<Self> {
         let dim = cfg.head_dim();
         let half = dim / 2;
@@ -93,6 +98,11 @@ impl LongRoPE {
     }
 
     /// cos/sin for positions `[start, start+seq_len)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `start + seq_len` exceeds the precomputed
+    /// table's length (`table_len` passed to [`LongRoPE::new`]).
     pub fn forward(&self, start: usize, seq_len: usize) -> Result<(Tensor, Tensor)> {
         let cos = self.cos_table.narrow(0, start, seq_len)?;
         let sin = self.sin_table.narrow(0, start, seq_len)?;
@@ -192,6 +202,11 @@ pub struct MiniCpm4Model {
 impl MiniCpm4Model {
     /// `rope_table_len`: rows to precompute for [`LongRoPE`] (e.g. the
     /// checkpoint's `max_length`) — ignored when `cfg.no_rope`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any embedding, decoder layer, or norm weight
+    /// can't be loaded from `vb`, or if building the rotary table fails.
     pub fn new(cfg: &MiniCpm4Config, rope_table_len: usize, vb: VarBuilder) -> Result<Self> {
         let embed_tokens = if cfg.vocab_size > 0 {
             Some(embedding(
@@ -228,6 +243,11 @@ impl MiniCpm4Model {
     /// Full-sequence forward. `inputs_embeds`: `[B, S, H]`. `is_causal`
     /// controls the mask built internally (`None` mask = full bidirectional
     /// attention, matching `feat_encoder`/`feat_decoder`'s non-causal use).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `inputs_embeds` doesn't have 3 dimensions, or if
+    /// building the causal mask or running any decoder layer fails.
     pub fn forward(&mut self, inputs_embeds: &Tensor, is_causal: bool) -> Result<Tensor> {
         let (_b, seq_len, _h) = inputs_embeds.dims3()?;
         let cos_sin = match &self.rotary {
@@ -275,6 +295,11 @@ impl MiniCpm4Model {
     /// [`GqaAttention`] internal cache) the KV-cache write slot — the caller
     /// is responsible for calling this only in strictly increasing position
     /// order (matching `GqaAttention`'s append-only cache).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if running any decoder layer on `inputs_embeds` at
+    /// `position_id` fails (e.g. the rotary table doesn't cover that position).
     pub fn forward_step(&mut self, inputs_embeds: &Tensor, position_id: usize) -> Result<Tensor> {
         let hidden = inputs_embeds.unsqueeze(1)?; // [B, 1, H]
         let cos_sin = match &self.rotary {

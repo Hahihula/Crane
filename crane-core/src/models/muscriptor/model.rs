@@ -186,6 +186,12 @@ impl LMModel {
     /// norms always stay in the surrounding compute dtype (matching the
     /// Qwen 3.5 ISQ convention — quantizing those would only add memory,
     /// not save it, since lookups need the dequantized values anyway).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if building the embedding, transformer, output norm,
+    /// or LM head linear fails, typically from missing or mismatched weights
+    /// in `vb`.
     pub fn new(vb: VarBuilder, config: &VariantConfig, quant: Option<GgmlDType>) -> Result<Self> {
         let device = vb.device().clone();
         let emb = ScaledEmbedding::new(config.card + 1, config.dim, vb.pp("emb"))?;
@@ -215,6 +221,12 @@ impl LMModel {
     /// ~500-frame mel prefix through every layer on every single decode
     /// step. Returns `[B, S, card]` logits. The caller's `state` is
     /// mutated to carry the new prefix forward.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tensor op in the embed/prepend/transformer/
+    /// projection pipeline fails, e.g. from a shape mismatch between
+    /// `sequence` and a condition tensor.
     pub fn forward(
         &self,
         sequence: &Tensor,
@@ -271,6 +283,12 @@ impl LMModel {
     /// the last id returned. Total length is at most `max_gen_len` — pass
     /// a prompt no longer than that or the prefill has nothing left to
     /// generate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any condition tensor's batch dim isn't 1, if
+    /// `prompt.len() >= max_gen_len`, or if any tensor op during prefill or
+    /// decoding fails.
     pub fn generate(
         &self,
         condition_tensors: &ConditionTensors,
@@ -392,6 +410,10 @@ impl Model {
     /// Load `model.safetensors` + `config.json` from `model_dir`.
     /// `dtype` is the compute dtype for the transformer only — see
     /// [`Self::new_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::new_with_options`].
     pub fn new(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
         Self::new_with_options(model_dir, device, dtype, None)
     }
@@ -410,6 +432,14 @@ impl Model {
     /// anyway. `LMModel::forward` casts the conditioner's F32 output to the
     /// transformer's dtype right before splicing it in, so this costs
     /// nothing at the seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `config.json` or `model.safetensors` can't be
+    /// read or parsed, if the checkpoint has more than one codebook
+    /// (`n_q > 1`, unsupported), if a required conditioner tensor (mel
+    /// filterbank or class-embedding weights) is missing, or if building the
+    /// conditioners or [`LMModel`] fails.
     pub fn new_with_options(
         model_dir: &str,
         device: &Device,
@@ -578,10 +608,19 @@ impl Model {
         self.tokenizer.forbidden_token_ids(instruments)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if an entry in `names` matches more than one known
+    /// instrument (ambiguous prefix) or matches none, in which case the
+    /// message suggests close matches.
     pub fn resolve_instrument_names(names: &[&str]) -> Result<Vec<String>, String> {
         resolve_instrument_names(names)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error listing the valid instrument names if any entry in
+    /// `names` isn't a recognized MT3 instrument name.
     pub fn instrument_group_from_names(names: &[&str]) -> Result<String, String> {
         instrument_group_from_names(names)
     }
@@ -635,6 +674,9 @@ impl TranscriptionModel {
         Self { model }
     }
 
+    /// # Errors
+    ///
+    /// See [`Model::new`].
     pub fn load(model_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
         let m = Model::new(model_dir, device, dtype)?;
         Ok(Self::new(m))
@@ -642,6 +684,10 @@ impl TranscriptionModel {
 
     /// `quant` in-situ quantizes the transformer's linear projections —
     /// see [`Model::new_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Model::new_with_options`].
     pub fn load_with_options(
         model_dir: &str,
         device: &Device,
@@ -679,6 +725,12 @@ impl TranscriptionModel {
     /// `prelude_forcing=True` default), so a note straddling a boundary
     /// stays attributed to the same instrument instead of the model
     /// re-guessing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `config.cfg_coef != 1.0`, if any requested
+    /// instrument name is unrecognized, or if building conditioning tensors,
+    /// initializing transformer state, or generation fails for any chunk.
     pub fn transcribe_to_midi(
         &self,
         samples: &[f32],

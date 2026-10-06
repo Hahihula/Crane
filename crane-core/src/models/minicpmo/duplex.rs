@@ -275,6 +275,10 @@ pub struct DuplexGgufPaths<'a> {
 }
 
 impl DuplexSession {
+    /// # Errors
+    ///
+    /// Returns an error if any tower's safetensors weights, or the
+    /// checkpoint's config/tokenizer, can't be loaded from `model_path`.
     pub fn new(model_path: &str, device: &Device, dtype: DType, cfg: DuplexConfig) -> Result<Self> {
         Self::new_with_gguf(model_path, &DuplexGgufPaths::default(), device, dtype, cfg)
     }

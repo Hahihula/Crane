@@ -338,6 +338,11 @@ pub struct AudioVaeDecoder {
 }
 
 impl AudioVaeDecoder {
+    /// # Errors
+    ///
+    /// Returns an error if any decoder weight (convs, snake activations, or
+    /// sample-rate-conditioning embeddings) is missing from `vb` or has an
+    /// unexpected shape.
     pub fn new(
         latent_dim: usize,
         decoder_dim: usize,
@@ -416,6 +421,11 @@ impl AudioVaeDecoder {
     /// `z`: `[B, latent_dim, T]`. Returns `[B, 1, T']` waveform in `[-1, 1]`
     /// (final `Tanh`). Always decodes at `out_sample_rate` (48kHz) — matches
     /// `AudioVAE.decode(z, sr_cond=None)`'s default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `z`'s shape is incompatible with the decoder's
+    /// channel/kernel dimensions at any layer.
     pub fn decode(&self, z: &Tensor) -> Result<Tensor> {
         let sr_idx = self.sr_bucket_idx(self.out_sample_rate);
 
@@ -511,6 +521,11 @@ pub struct AudioVaeEncoder {
 }
 
 impl AudioVaeEncoder {
+    /// # Errors
+    ///
+    /// Returns an error if any encoder weight (convs, snake activations, or
+    /// the final `fc_mu` projection) is missing from `vb` or has an
+    /// unexpected shape.
     pub fn new(
         encoder_dim: usize,
         latent_dim: usize,
@@ -551,6 +566,11 @@ impl AudioVaeEncoder {
     /// rate. Right-zero-pads `T` to a multiple of `hop_length` (matching
     /// `AudioVAE.preprocess`), then returns `mu`: `[B, latent_dim, T']`
     /// where `T' = T_padded / hop_length`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `audio`'s shape is incompatible with the
+    /// encoder's channel/kernel dimensions at any layer.
     pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
         let t = audio.dim(2)?;
         let right_pad = t.div_ceil(self.hop_length) * self.hop_length - t;

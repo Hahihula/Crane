@@ -214,6 +214,10 @@ pub struct Resampler {
 }
 
 impl Resampler {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s weights are missing or don't
+    /// match the shapes implied by `num_queries`/`embed_dim`/`kv_dim`.
     pub fn new(
         num_queries: usize,
         embed_dim: usize,
@@ -323,6 +327,11 @@ impl Resampler {
     /// `tgt_sizes`: true `(h, w)` patch-grid dims per batch item.
     ///
     /// Returns `[batch, num_queries, embed_dim]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tgt_sizes` don't match `x`'s batch size or patch
+    /// layout, or if the cross-attention forward pass hits a shape mismatch.
     pub fn forward(&self, x: &Tensor, tgt_sizes: &[(usize, usize)]) -> Result<Tensor> {
         let (batch, max_patches, _kv_dim) = x.dims3()?;
         let device = x.device();

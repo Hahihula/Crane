@@ -27,6 +27,12 @@ pub enum ResizeMode {
 ///
 /// # Returns
 /// Tensor of shape `[1, 3, target_h, target_w]` with values ∈ [0.0, 1.0]
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or decoded, if `mode` is
+/// [`ResizeMode::Bicubic`] (not yet implemented), or if an underlying tensor
+/// op fails.
 pub fn load_and_resize_image_to_tensor(
     path: impl AsRef<std::path::Path>,
     target_h: usize,
@@ -71,6 +77,12 @@ pub fn load_and_resize_image_to_tensor(
     Ok(tensor)
 }
 
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or decoded, if
+/// [`smart_resize`] rejects the aspect ratio, if `mode` is
+/// [`ResizeMode::Bicubic`] (not yet implemented), or if an underlying tensor
+/// op fails.
 pub fn load_image_and_smart_resize(
     path: &Path,
     device: &Device,
@@ -128,6 +140,10 @@ pub fn load_image_and_smart_resize(
     Ok((tensor.to_dtype(dtype)?, grid_thw))
 }
 
+/// # Errors
+///
+/// Returns an error if the resized aspect ratio exceeds a 200:1 ratio in
+/// either direction.
 pub fn smart_resize(
     h: usize,
     w: usize,

@@ -49,6 +49,10 @@ impl ExtendedGgufInfo {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if `bytes` is not a well-formed GGUF file or contains a
+/// tensor type that neither Candle nor Crane's extended probe recognizes.
 pub fn read_content(bytes: &[u8]) -> Result<(gguf_file::Content, ExtendedGgufInfo)> {
     let (patches, info) = probe(&mut Cursor::new(bytes))?;
     if patches.is_empty() {

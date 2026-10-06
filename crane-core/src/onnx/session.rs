@@ -21,10 +21,18 @@ pub struct Session {
 }
 
 impl Session {
+    /// # Errors
+    ///
+    /// Returns an error if the model has no graph, an initializer tensor
+    /// fails to decode, or graph optimization fails.
     pub fn new(model: proto::ModelProto) -> Result<Self> {
         Self::with_options(model, SessionOptions::default())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the model has no graph, an initializer tensor
+    /// fails to decode, or graph optimization fails.
     pub fn with_options(mut model: proto::ModelProto, options: SessionOptions) -> Result<Self> {
         let graph = model
             .graph
@@ -68,6 +76,10 @@ impl Session {
         &self.optimization_report
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if a graph node references an unsupported operator
+    /// or if shape/type mismatches occur while evaluating the graph.
     pub fn run(&self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
         let mut values = inputs;
         values.extend(

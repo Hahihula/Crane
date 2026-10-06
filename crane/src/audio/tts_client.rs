@@ -12,11 +12,21 @@ pub struct TtsClient {
 
 impl TtsClient {
     /// Create a new TTS client with the given configuration
+    ///
+    /// # Errors
+    ///
+    /// Never fails currently; returns `Result` for consistency with other clients.
     pub fn new(config: CommonConfig) -> CraneResult<Self> {
         Ok(Self { config })
     }
 
     /// Convert text to speech and save to file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured device is unavailable or crane was built
+    /// without the required backend feature, or because text-to-speech synthesis is
+    /// not implemented yet.
     pub fn text_to_speech<P: AsRef<Path>>(&self, text: &str, output_file: P) -> CraneResult<()> {
         // For now, we'll use the SparkTTS model as an example
         // In a real implementation, we would use the appropriate TTS model
@@ -82,6 +92,10 @@ impl TtsClient {
     }
 
     /// Convert text to speech and return audio data (placeholder implementation)
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error: audio-data output is not implemented yet.
     pub fn text_to_speech_data(&self, _text: &str) -> CraneResult<Vec<u8>> {
         Err(CraneError::Other(
             "Audio data output not implemented yet".to_string(),

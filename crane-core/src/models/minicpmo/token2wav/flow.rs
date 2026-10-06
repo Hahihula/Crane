@@ -49,6 +49,11 @@ pub struct Flow {
 }
 
 impl Flow {
+    /// # Errors
+    ///
+    /// Returns an error if `flow.safetensors` can't be found/mmapped under
+    /// `model_path`, or if its weights don't match the embedding, encoder,
+    /// or DiT estimator's expected shapes.
     pub fn new(model_path: &str, device: &Device, dtype: DType) -> Result<Self> {
         let path = format!("{model_path}/assets/token2wav/flow.safetensors");
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], dtype, device) }?;

@@ -28,6 +28,11 @@ pub struct PaddleOcrV6 {
 }
 
 impl PaddleOcrV6 {
+    /// # Errors
+    ///
+    /// Returns an error if the detector/recognizer ONNX files are missing
+    /// from `path`, if either fails to load or has no usable graph
+    /// input/output, or if preparing either `Session`'s initializers fails.
     pub fn from_dir(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let det_path = path.join(DETECTOR_FILE);
@@ -69,6 +74,10 @@ impl PaddleOcrV6 {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if running the detector session fails or it doesn't
+    /// produce the expected output tensor.
     pub fn detect(&self, image: &Tensor) -> Result<Tensor> {
         forward(
             &self.detector,
@@ -78,6 +87,10 @@ impl PaddleOcrV6 {
         )
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if running the recognizer session fails or it
+    /// doesn't produce the expected output tensor.
     pub fn recognize(&self, image: &Tensor) -> Result<Tensor> {
         forward(
             &self.recognizer,

@@ -32,6 +32,10 @@ pub struct PaddleOcrV6Pipeline {
 }
 
 impl PaddleOcrV6Pipeline {
+    /// # Errors
+    ///
+    /// Returns an error if [`PaddleOcrV6::from_dir`] fails to load the
+    /// detector/recognizer models, or if the dictionary file can't be read.
     pub fn from_dir(path: impl AsRef<Path>) -> Result<Self> {
         let requested = path.as_ref();
         let directory = if requested.as_os_str().is_empty() || requested == Path::new("checkpoints")
@@ -51,6 +55,11 @@ impl PaddleOcrV6Pipeline {
         Ok(Self { model, dictionary })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `path` can't be opened as an image, if the
+    /// detector produces an unexpected output shape, or if detection or
+    /// recognition inference fails.
     pub fn recognize(&self, path: impl AsRef<Path>) -> Result<OcrDocument> {
         let started = Instant::now();
         let image = image::open(path.as_ref())

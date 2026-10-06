@@ -50,6 +50,10 @@ pub struct OcrResult {
 }
 
 pub trait PaddleOCRVLGenerateStream {
+    /// # Errors
+    ///
+    /// Returns an error if a forward pass or tensor op fails while decoding
+    /// tokens.
     fn generate_stream<F>(
         &mut self,
         input_ids: &Tensor,
@@ -120,6 +124,11 @@ impl PaddleOCRVLGenerateStream for PaddleOCRVLModel {
 }
 
 impl PaddleOcrVL {
+    /// # Errors
+    ///
+    /// Returns an error if CUDA initialization fails, if downloading or
+    /// parsing `config.json`/`tokenizer.json`/the model weights from the Hub
+    /// fails, or if building the underlying model from those weights fails.
     pub fn from_pretrained(
         model_id: &str,
         revision: Option<&str>,
@@ -196,6 +205,11 @@ impl PaddleOcrVL {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if CUDA initialization fails, if `config.json`,
+    /// `tokenizer.json`, or the model weights under `path` can't be read or
+    /// parsed, or if building the underlying model from those weights fails.
     pub fn from_local(path: impl AsRef<Path>, cpu: bool, bf16: bool) -> Result<Self> {
         let device = if cpu {
             Device::Cpu
@@ -241,6 +255,11 @@ impl PaddleOcrVL {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the image can't be loaded/resized, if tokenizing
+    /// the prompt or decoding generated tokens fails, or if generation
+    /// itself fails.
     pub fn recognize(
         &mut self,
         image_path: impl AsRef<Path>,
@@ -306,6 +325,10 @@ impl PaddleOcrVL {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the image can't be loaded/resized, if tokenizing
+    /// the prompt fails, or if streamed generation fails.
     pub fn recognize_stream<F>(
         &mut self,
         image_path: impl AsRef<Path>,
@@ -373,10 +396,18 @@ impl PaddleOcrVL {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if `path` can't be read as an image or the smart-resize
+/// step fails.
 pub fn load_image(path: &Path, device: &Device, dtype: DType) -> Result<(Tensor, Tensor)> {
     image_utils::load_image_and_smart_resize(path, device, dtype, image_utils::ResizeMode::Bilinear)
 }
 
+/// # Errors
+///
+/// Returns an error if tokenizing any of the fixed prompt fragments fails,
+/// or if building the final token tensor fails.
 pub fn build_input_tokens(
     tokenizer: &Tokenizer,
     task: OcrTask,

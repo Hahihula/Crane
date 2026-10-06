@@ -23,6 +23,10 @@ pub struct AudioProjector {
 }
 
 impl AudioProjector {
+    /// # Errors
+    ///
+    /// Returns an error if the `VarBuilder`'s `linear1`/`linear2` weights
+    /// are missing or don't match `in_dim`/`out_dim`.
     pub fn new(in_dim: usize, out_dim: usize, pool_step: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             linear1: linear(in_dim, out_dim, vb.pp("linear1"))?,
@@ -67,6 +71,11 @@ impl AudioProjector {
     /// T_pooled, llm_hidden]`, `T_pooled = (T - pool_step) / pool_step + 1`
     /// (`nn.AvgPool1d`'s default — no padding, floor division, trailing
     /// remainder frames dropped).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the linear projections or the pooling reshape hit
+    /// a shape mismatch against `audio_states`.
     pub fn forward(&self, audio_states: &Tensor) -> Result<Tensor> {
         let hidden = self.linear1.forward(audio_states)?;
         let hidden = hidden.relu()?;
