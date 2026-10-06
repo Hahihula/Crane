@@ -48,7 +48,6 @@
 //! than assuming `q4_0` is safe on a tight-memory machine.
 
 #![allow(clippy::doc_markdown)] // KugelAudio / VibeVoice are external names
-#![allow(clippy::cast_precision_loss)] // u128 nanos / SAMPLE_RATE: bounded
 #![allow(clippy::cast_possible_truncation)] // u128->u64 for nanos; PID u32->u64
 #![allow(clippy::too_many_lines)] // main() does device setup, load, generate, save
 
