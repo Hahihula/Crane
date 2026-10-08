@@ -4171,26 +4171,61 @@ mod tests {
         #[cfg(all(feature = "rocm", not(feature = "cuda")))]
         let device = Device::new_rocm(0).expect("rocm device");
 
-        let identity = vec![1.0f32, 0.0, 0.0, 1.0];
-        let scaled = |c: f32| vec![c, 0.0, 0.0, c];
-        let expert_data = vec![
-            (identity.clone(), scaled(1.0), identity.clone()),
-            (identity.clone(), scaled(3.0), identity.clone()),
-            (identity.clone(), scaled(2.0), identity.clone()),
-            (identity.clone(), scaled(5.0), identity.clone()),
-        ];
-        let gate_data = vec![
-            2.0, 0.0, //
-            -2.0, 0.0, //
-            1.5, 0.0, //
-            -1.5, 0.0,
-        ];
-        let moe = make_packed_sparse_moe(2, 2, 4, 2, false, gate_data, &expert_data);
+        // `indexed_moe_forward`'s GPU kernel only supports `Q2K`-`Q6K`/
+        // `Q8_0` (see `supports_fused_moe`), and `Q8_0` quantizes in
+        // 32-element blocks, so hidden/intermediate must be a multiple of
+        // 32 for `QTensor::quantize` below to produce a usable tensor at
+        // all — unlike the 2-wide dims the other identity-matrix tests in
+        // this file get away with under the lossless `GgmlDType::F32`.
+        const N: usize = 32;
 
-        let x = Tensor::new(&[1.0f32, 0.5, -0.5, 2.0], &Device::Cpu)
-            .expect("tensor")
-            .reshape((2, 2))
-            .expect("reshape");
+        let identity = |n: usize| -> Vec<f32> {
+            let mut v = vec![0.0f32; n * n];
+            for i in 0..n {
+                v[i * n + i] = 1.0;
+            }
+            v
+        };
+        let scaled = |n: usize, c: f32| -> Vec<f32> {
+            let mut v = vec![0.0f32; n * n];
+            for i in 0..n {
+                v[i * n + i] = c;
+            }
+            v
+        };
+        let expert_data = vec![
+            (identity(N), scaled(N, 1.0), identity(N)),
+            (identity(N), scaled(N, 3.0), identity(N)),
+            (identity(N), scaled(N, 2.0), identity(N)),
+            (identity(N), scaled(N, 5.0), identity(N)),
+        ];
+
+        // Only column 0 of each expert's router row is nonzero, so routing
+        // depends solely on each token's first hidden element, the same
+        // two-hot selection the original 2-wide version of this test used.
+        let gate_row = |w: f32| -> Vec<f32> {
+            let mut v = vec![0.0f32; N];
+            v[0] = w;
+            v
+        };
+        let gate_data: Vec<f32> = [2.0f32, -2.0, 1.5, -1.5]
+            .into_iter()
+            .flat_map(gate_row)
+            .collect();
+        let moe = make_packed_sparse_moe(N, N, 4, 2, false, gate_data, &expert_data);
+
+        // Token 0's first element (1.0) and token 1's first element (-0.5)
+        // reproduce the original test's routing decisions (experts 0+2,
+        // then 1+3); the rest of each token's values exercise the
+        // identity/scale matmuls across every dimension, not just the
+        // routed one.
+        let token = |first: f32, seed: f32| -> Vec<f32> {
+            let mut v: Vec<f32> = (0..N).map(|j| ((j as f32 + seed) * 0.037).sin()).collect();
+            v[0] = first;
+            v
+        };
+        let x_data: Vec<f32> = [token(1.0, 0.0), token(-0.5, 7.0)].concat();
+        let x = Tensor::from_vec(x_data, (2, N), &Device::Cpu).expect("tensor");
 
         let expected = moe
             .forward(&x)
@@ -4204,18 +4239,39 @@ mod tests {
         let logits = moe.gate.forward(&xs_f32).expect("gate forward");
         let (topk_ids, topk_weights) =
             crate::ops::fused_ops::topk_moe::topk_moe_routing(&logits, 2, false).expect("routing");
-        let gate_up_exps = moe.packed_gate_up_exps.as_ref().expect("packed gate_up");
-        let down_exps = moe.packed_down_exps.as_ref().expect("packed down");
+
+        // `make_packed_sparse_moe` quantizes with `GgmlDType::F32` so the
+        // CPU-only tests elsewhere in this file get a lossless reference,
+        // but F32 has no GPU `indexed_moe_forward` kernel at all — real
+        // callers never reach `gpu_offload_forward` with it, since
+        // `supports_fused_moe` already excludes it. Re-quantize to `Q8_0`
+        // (near-lossless, and in the supported list) so this test actually
+        // exercises the real GPU dispatch path instead of panicking before
+        // it starts.
+        let gate_up_f32 = moe.packed_gate_up_exps.as_ref().expect("packed gate_up");
+        let down_f32 = moe.packed_down_exps.as_ref().expect("packed down");
+        let gate_up_q8 = QTensor::quantize(
+            &gate_up_f32
+                .dequantize(&Device::Cpu)
+                .expect("dequantize gate_up"),
+            GgmlDType::Q8_0,
+        )
+        .expect("quantize gate_up q8_0");
+        let down_q8 = QTensor::quantize(
+            &down_f32.dequantize(&Device::Cpu).expect("dequantize down"),
+            GgmlDType::Q8_0,
+        )
+        .expect("quantize down q8_0");
 
         let got = SparseMoeBlock::gpu_offload_forward(
             &xs_f32,
             &topk_ids,
             &topk_weights,
-            gate_up_exps,
-            down_exps,
+            &gate_up_q8,
+            &down_q8,
             &device,
             DType::F32,
-            &[2, 2],
+            &[2, N],
         )
         .expect("gpu_offload_forward")
         .flatten_all()
@@ -4223,8 +4279,11 @@ mod tests {
         .to_vec1::<f32>()
         .unwrap();
 
+        // Q8_0 introduces real quantization error, unlike the lossless F32
+        // comparisons elsewhere in this file, so this needs a wider
+        // tolerance, matching `test_cpu_indexed_moe_forward_q8_0_tolerance`'s.
         for (e, g) in expected.iter().zip(got.iter()) {
-            assert!((e - g).abs() < 1e-4, "expected {expected:?}, got {got:?}");
+            assert!((e - g).abs() < 0.1, "expected {expected:?}, got {got:?}");
         }
     }
 
