@@ -22,15 +22,20 @@
 use candle_core::quantized::gguf_file;
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::rotary_emb::rope;
-use candle_nn::{Activation, Embedding, Linear, RmsNorm, VarBuilder, linear_no_bias};
+use candle_nn::{Activation, RmsNorm, VarBuilder, linear_no_bias};
 use serde::Deserialize;
 use std::io::{Read, Seek};
 
 // Reuse the polymorphic linear layer and the shared GGUF loader.
+use crate::models::modules::embedding::EmbeddingLayer;
 use crate::models::modules::ffn::SwiGluFfn;
 pub use crate::ops::linear::LinearLayer;
 pub use crate::quantized::gguf_file::Gguf;
+// `Device::is_rocm` is inherent on the ROCm candle fork; this extension only
+// supplies it (as a constant `false`) for builds without that fork.
 use crate::quantized::gguf_metadata::GgufMetadata;
+#[cfg(not(feature = "rocm"))]
+use crate::utils::DeviceExt;
 
 // Note: Gemma 4 norms use standard `x * weight` (no `+1` shift unlike Gemma 3).
 // Weights are stored in final form. Use candle_nn::rms_norm / gg.rms_norm directly.
@@ -819,8 +824,8 @@ impl DecoderLayer {
 // ── Full Model ──────────────────────────────────────────────────────────
 
 pub struct Gemma4Model {
-    embed_tokens: Embedding,
-    embed_tokens_per_layer: Embedding,
+    embed_tokens: EmbeddingLayer,
+    embed_tokens_per_layer: EmbeddingLayer,
     per_layer_model_projection: LinearLayer,
     per_layer_projection_norm: RmsNorm,
     layers: Vec<DecoderLayer>,
@@ -856,22 +861,22 @@ impl Gemma4Model {
             vb.pp("model")
         };
 
-        let embed_tokens = candle_nn::embedding(
+        let embed_tokens = EmbeddingLayer::Dense(candle_nn::embedding(
             config.vocab_size,
             config.hidden_size,
             model_vb.pp("embed_tokens"),
-        )?;
+        )?);
 
         let ple_vocab = config
             .vocab_size_per_layer_input
             .unwrap_or(config.vocab_size);
         let ple_dim = config.hidden_size_per_layer_input.unwrap_or(256);
         let ple_total_dim = config.num_hidden_layers * ple_dim;
-        let embed_tokens_per_layer = candle_nn::embedding(
+        let embed_tokens_per_layer = EmbeddingLayer::Dense(candle_nn::embedding(
             ple_vocab,
             ple_total_dim,
             model_vb.pp("embed_tokens_per_layer"),
-        )?;
+        )?);
 
         // Model-level PLE projection
         let per_layer_model_projection = LinearLayer::Standard(linear_no_bias(
@@ -913,7 +918,7 @@ impl Gemma4Model {
             candle_nn::rms_norm(config.hidden_size, config.rms_norm_eps, model_vb.pp("norm"))?;
 
         let lm_head = if config.tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            embed_tokens.tied_output()?
         } else {
             LinearLayer::Standard(linear_no_bias(
                 config.hidden_size,
@@ -966,7 +971,7 @@ impl Gemma4Model {
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
-        let dtype = if device.is_cuda() {
+        let dtype = if device.is_cuda() || device.is_rocm() {
             DType::BF16
         } else {
             DType::F32
@@ -1080,15 +1085,18 @@ impl Gemma4Model {
             eos_token_id: None,
         };
 
-        let embed_tokens = gg.embedding("token_embd.weight", hidden_size)?;
-        let actual_vocab_size = embed_tokens.embeddings().dim(0)?;
+        let embed_tokens = gg.quantized_embedding("token_embd.weight", hidden_size)?;
+        let actual_vocab_size = embed_tokens.vocab_size();
 
         let ple_total_dim = num_hidden_layers * ple_dim;
-        let embed_tokens_per_layer = gg.embedding("per_layer_token_embd.weight", ple_total_dim)?;
-        let ple_vocab = embed_tokens_per_layer.embeddings().dim(0)?;
+        let embed_tokens_per_layer =
+            gg.quantized_embedding("per_layer_token_embd.weight", ple_total_dim)?;
+        let ple_vocab = embed_tokens_per_layer.vocab_size();
 
-        // Model-level PLE projection
-        let per_layer_model_projection = gg.linear("per_layer_model_proj.weight")?;
+        // Model-level PLE projection. Stored as a raw BF16 tensor (not
+        // block-quantized), so `linear_compact` dequantizes it directly
+        // instead of routing it through `QMatMul`'s quantized-storage path.
+        let per_layer_model_projection = gg.linear_compact("per_layer_model_proj.weight")?;
         let per_layer_projection_norm = gg.rms_norm("per_layer_proj_norm.weight", rms_norm_eps)?;
 
         let config = Gemma4TextConfig {
@@ -1117,7 +1125,7 @@ impl Gemma4Model {
         let norm = gg.rms_norm("output_norm.weight", rms_norm_eps)?;
 
         let lm_head = if tie_word_embeddings {
-            LinearLayer::Standard(Linear::new(embed_tokens.embeddings().clone(), None))
+            embed_tokens.tied_output()?
         } else {
             gg.linear("output.weight")?
         };
