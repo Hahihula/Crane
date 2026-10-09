@@ -736,12 +736,17 @@ impl DecoderLayer {
             config.rms_norm_eps,
         )?;
 
-        // Layer scalar: GGUF stores it as a tensor
+        // Layer scalar: GGUF stores it as a tensor. Dequantize onto the
+        // model's device and compute dtype, not Device::Cpu/F32. It's
+        // broadcast-multiplied against GPU hidden states in `forward`.
+        let device = gg.device().clone();
+        let dtype = gg.dtype();
         let layer_scalar = match gg.tensor(&format!("{prefix}.layer_output_scale.weight")) {
             Ok(qt) => qt
-                .dequantize(&Device::Cpu)
-                .unwrap_or_else(|_| Tensor::ones(1, DType::F32, &Device::Cpu).unwrap()),
-            Err(_) => Tensor::ones(1, DType::F32, &Device::Cpu).unwrap(),
+                .dequantize(&device)
+                .and_then(|t| t.to_dtype(dtype))
+                .unwrap_or_else(|_| Tensor::ones(1, dtype, &device).unwrap()),
+            Err(_) => Tensor::ones(1, dtype, &device).unwrap(),
         };
 
         // PLE components
