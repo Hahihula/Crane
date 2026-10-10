@@ -21,3 +21,4 @@ output/
 data/voices/.voxcpm2-cache/
 voxcpm2-stream.wav
 logs/
+AGENTS.md
