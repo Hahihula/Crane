@@ -118,35 +118,14 @@ impl Model {
         })
     }
 
-    /// Load a GGUF quantized model file.
+    /// Load a GGUF quantized model file. The tokenizer is read from the GGUF
+    /// itself (`tokenizer.ggml.tokens` / `tokenizer.ggml.merges` /
+    /// `token_type`); a sibling `tokenizer.json` is only consulted if the
+    /// GGUF lacks the embedded metadata (older / third-party quantizers).
     fn from_gguf(model_path: &str, device: &Device) -> Result<Model> {
-        let gguf_path = std::path::Path::new(model_path);
+        use crate::utils::tokenizer_utils::resolve_gguf_tokenizer;
 
-        let tokenizer_path = {
-            let same_dir = gguf_path
-                .parent()
-                .unwrap_or(gguf_path)
-                .join("tokenizer.json");
-            if same_dir.exists() {
-                same_dir
-            } else {
-                let parent = gguf_path
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .unwrap_or(gguf_path)
-                    .join("tokenizer.json");
-                if parent.exists() {
-                    parent
-                } else {
-                    anyhow::bail!(
-                        "Cannot find tokenizer.json near {}. \
-                         Place tokenizer.json in the same directory as the GGUF file.",
-                        gguf_path.display()
-                    );
-                }
-            }
-        };
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(E::msg)?;
+        let gguf_path = std::path::Path::new(model_path);
 
         let mmap = crate::quantized::gguf_file::mmap_gguf_file(gguf_path)?;
         let mut cursor = std::io::Cursor::new(mmap.as_ref());
@@ -157,6 +136,8 @@ impl Model {
             ct.tensor_infos.len(),
             ct.metadata.len(),
         );
+
+        let tokenizer = resolve_gguf_tokenizer(&ct, gguf_path)?;
 
         let inner = Gemma4Model::from_gguf(ct, &mut cursor, device)?;
         let dtype = inner.model_dtype();
