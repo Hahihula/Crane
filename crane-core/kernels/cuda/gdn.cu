@@ -151,3 +151,48 @@ extern "C" __global__ void gdn_recurrence_f32(
 {
     gdn_run<0>(q, k, v, g, beta, state_in, state_out, y, BH, S, K, V, V_TILE);
 }
+
+// Batched inverse of a unit lower-triangular matrix: T_inv = (I + L)^-1,
+// L strictly lower triangular. One block per batch element; the whole
+// [cs,cs] matrix is staged in shared memory, built row-by-row, and written
+// out once — no host round-trip between rows (replaces a 63-step
+// host-orchestrated Candle loop that paid a full-tensor copy per step, used
+// by the chunked gated-delta-rule prefill path in `ops/gdn/chunked.rs`).
+//
+// One thread per output COLUMN (not per warp/row): column t's dot product
+// sum_{j<i} L[i,j]*T_inv[j,t] is independent of every other column, so no
+// cross-thread reduction is needed — just a per-thread serial accumulate
+// over up to `cs-1` terms, which is cheap at cs~64. The diagonal of (I+L) is
+// always 1, so no division step is needed either.
+extern "C" __global__ void gdn_chunk_tri_inverse_f32(
+    const float* __restrict__ kb,   // [B_all, cs, cs], strictly lower triangular
+    float* __restrict__ t_inv,      // [B_all, cs, cs], output
+    int cs)
+{
+    extern __shared__ float sh[];
+    float* kb_sh = sh;              // [cs*cs]
+    float* tinv_sh = sh + cs * cs;  // [cs*cs]
+
+    const int b = blockIdx.x;
+    const int t = threadIdx.x;      // output column this thread owns
+    const float* kb_b = kb + (size_t)b * cs * cs;
+    float* t_inv_b = t_inv + (size_t)b * cs * cs;
+
+    for (int idx = t; idx < cs * cs; idx += blockDim.x) {
+        kb_sh[idx] = kb_b[idx];
+    }
+    __syncthreads();
+
+    for (int i = 0; i < cs; ++i) {
+        float acc = (t == i) ? 1.0f : 0.0f;
+        for (int j = 0; j < i; ++j) {
+            acc -= kb_sh[i * cs + j] * tinv_sh[j * cs + t];
+        }
+        tinv_sh[i * cs + t] = acc;
+        __syncthreads();
+    }
+
+    for (int idx = t; idx < cs * cs; idx += blockDim.x) {
+        t_inv_b[idx] = tinv_sh[idx];
+    }
+}
