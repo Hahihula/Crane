@@ -160,7 +160,7 @@ impl Model {
         let config_data = std::fs::read(config_file)?;
         let config: Config = serde_json::from_slice(&config_data)?;
 
-        let inner = MiniCpm5Model::new(&config, vb)?;
+        let inner = MiniCpm5Model::new(&config, &vb)?;
         let eos_token_ids = read_eos_token_ids(model_path);
 
         Ok(Self {

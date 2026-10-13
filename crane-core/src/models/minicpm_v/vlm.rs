@@ -131,10 +131,10 @@ impl MinicpmV46VLModel {
             &cfg.vision_config,
             cfg.insert_layer_id,
             cfg.window_kernel_size,
-            vb.pp("model").pp("vision_tower"),
+            &vb.pp("model").pp("vision_tower"),
         )
         .context("build vision tower")?;
-        let merger = Merger::new(&cfg, vb.pp("model").pp("merger")).context("build merger")?;
+        let merger = Merger::new(&cfg, &vb.pp("model").pp("merger")).context("build merger")?;
 
         eprintln!("[minicpm_v] loading text model (Qwen 3.5 hybrid decoder, reused unmodified)");
         let qwen35_cfg = Qwen35Config {
