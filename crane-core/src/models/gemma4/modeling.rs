@@ -370,7 +370,7 @@ impl Attention {
         })
     }
 
-    fn update_kv_cache(&mut self, k: Tensor, v: Tensor) -> Result<(Tensor, Tensor)> {
+    fn update_kv_cache(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         let k = k.contiguous()?;
         let v = v.contiguous()?;
         let new_seq_len = k.dim(2)?;
@@ -493,7 +493,7 @@ impl Attention {
         let (k, v) = if self.is_shared {
             (k, v)
         } else {
-            self.update_kv_cache(k, v)?
+            self.update_kv_cache(&k, &v)?
         };
 
         // ── SDPA ──
