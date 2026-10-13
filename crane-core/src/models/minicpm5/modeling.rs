@@ -241,7 +241,7 @@ impl Attention {
     /// Uses `slice_set` for O(1) in-place writes when the buffer has room.
     /// Falls back to cat + reallocate when the buffer is full.
     /// Returns (`k_full`, `v_full`) views covering all valid cached data.
-    fn update_kv_cache(&mut self, k: Tensor, v: Tensor) -> Result<(Tensor, Tensor)> {
+    fn update_kv_cache(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         // slice_set requires contiguous tensors; K/V after transpose(1,2) are strided.
         let k = k.contiguous()?;
         let v = v.contiguous()?;
@@ -337,14 +337,14 @@ impl Attention {
         let q = rope(&q.contiguous()?, cos, sin)?;
         let k = rope(&k.contiguous()?, cos, sin)?;
 
-        let (k, v) = self.update_kv_cache(k, v)?;
+        let (k, v) = self.update_kv_cache(&k, &v)?;
 
-        self.compute_attention(q, k, v, attention_mask, b_sz, seq_len)
+        self.compute_attention(&q, k, v, attention_mask, b_sz, seq_len)
     }
 
     fn compute_attention(
         &self,
-        q: Tensor,
+        q: &Tensor,
         k: Tensor,
         v: Tensor,
         attention_mask: Option<&Tensor>,
