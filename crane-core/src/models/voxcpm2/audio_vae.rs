@@ -76,7 +76,7 @@ impl CausalConv1d {
         groups: usize,
         padding: usize,
         output_padding: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let weight_v = vb.get((out_ch, in_ch / groups, kernel), "weight_v")?;
         let weight_g = vb.get((out_ch, 1, 1), "weight_g")?;
@@ -146,7 +146,7 @@ impl CausalConvTranspose1d {
         stride: usize,
         padding: usize,
         output_padding: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         // weight_norm's default dim=0 normalizes over `in_channels` for
         // ConvTranspose1d (weight shape `[in_ch, out_ch/groups, kernel]`,
@@ -187,7 +187,7 @@ struct Snake1d {
 }
 
 impl Snake1d {
-    fn load(channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(channels: usize, vb: &VarBuilder) -> Result<Self> {
         let alpha = vb.get((1, channels, 1), "alpha")?;
         let alpha_recip = (&alpha + 1e-9)?.recip()?;
         Ok(Self { alpha, alpha_recip })
@@ -216,16 +216,16 @@ struct CausalResidualUnit {
 }
 
 impl CausalResidualUnit {
-    fn load(dim: usize, dilation: usize, groups: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(dim: usize, dilation: usize, groups: usize, vb: &VarBuilder) -> Result<Self> {
         // `self.block = nn.Sequential(...)` in Python — an extra "block"
         // path segment wraps the four sub-layers.
         let vb = vb.pp("block");
         let pad = (7 - 1) * dilation / 2;
         Ok(Self {
-            snake1: Snake1d::load(dim, vb.pp(0))?,
-            conv1: CausalConv1d::load(dim, dim, 7, 1, dilation, groups, pad, 0, vb.pp(1))?,
-            snake2: Snake1d::load(dim, vb.pp(2))?,
-            conv2: CausalConv1d::load(dim, dim, 1, 1, 1, 1, 0, 0, vb.pp(3))?,
+            snake1: Snake1d::load(dim, &vb.pp(0))?,
+            conv1: CausalConv1d::load(dim, dim, 7, 1, dilation, groups, pad, 0, &vb.pp(1))?,
+            snake2: Snake1d::load(dim, &vb.pp(2))?,
+            conv2: CausalConv1d::load(dim, dim, 1, 1, 1, 1, 0, 0, &vb.pp(3))?,
         })
     }
 
@@ -253,7 +253,7 @@ impl CausalDecoderBlock {
         output_dim: usize,
         stride: usize,
         depthwise: bool,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         // `self.block = nn.Sequential(...)` in Python — same extra "block"
         // path segment as `CausalResidualUnit`.
@@ -261,7 +261,7 @@ impl CausalDecoderBlock {
         let groups = if depthwise { output_dim } else { 1 };
         let padding = stride.div_ceil(2);
         let output_padding = stride % 2;
-        let snake = Snake1d::load(input_dim, vb.pp(0))?;
+        let snake = Snake1d::load(input_dim, &vb.pp(0))?;
         let upsample = CausalConvTranspose1d::load(
             input_dim,
             output_dim,
@@ -269,12 +269,12 @@ impl CausalDecoderBlock {
             stride,
             padding,
             output_padding,
-            vb.pp(1),
+            &vb.pp(1),
         )?;
         let res_units = [
-            CausalResidualUnit::load(output_dim, 1, groups, vb.pp(2))?,
-            CausalResidualUnit::load(output_dim, 3, groups, vb.pp(3))?,
-            CausalResidualUnit::load(output_dim, 9, groups, vb.pp(4))?,
+            CausalResidualUnit::load(output_dim, 1, groups, &vb.pp(2))?,
+            CausalResidualUnit::load(output_dim, 3, groups, &vb.pp(3))?,
+            CausalResidualUnit::load(output_dim, 9, groups, &vb.pp(4))?,
         ];
         Ok(Self {
             snake,
@@ -303,7 +303,7 @@ struct SampleRateConditionLayer {
 }
 
 impl SampleRateConditionLayer {
-    fn load(input_dim: usize, sr_bin_buckets: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(input_dim: usize, sr_bin_buckets: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             scale_embed: embedding(sr_bin_buckets, input_dim, vb.pp("scale_embed"))?,
             bias_embed: embedding(sr_bin_buckets, input_dim, vb.pp("bias_embed"))?,
@@ -349,7 +349,7 @@ impl AudioVaeDecoder {
         decoder_rates: &[usize],
         sr_bin_boundaries: Vec<i64>,
         out_sample_rate: i64,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let depthwise = true; // this checkpoint's AudioVAEConfig default
         let vb_model = vb.pp("model");
@@ -365,10 +365,10 @@ impl AudioVaeDecoder {
             latent_dim,
             3,
             0,
-            vb_model.pp(0),
+            &vb_model.pp(0),
         )?;
         let init_pw =
-            CausalConv1d::load(latent_dim, decoder_dim, 1, 1, 1, 1, 0, 0, vb_model.pp(1))?;
+            CausalConv1d::load(latent_dim, decoder_dim, 1, 1, 1, 1, 0, 0, &vb_model.pp(1))?;
 
         let sr_bin_buckets = sr_bin_boundaries.len() + 1;
         let mut blocks = Vec::with_capacity(decoder_rates.len());
@@ -382,19 +382,19 @@ impl AudioVaeDecoder {
                 output_dim,
                 stride,
                 depthwise,
-                vb_model.pp(2 + i),
+                &vb_model.pp(2 + i),
             )?);
             sr_cond.push(SampleRateConditionLayer::load(
                 ch,
                 sr_bin_buckets,
-                vb.pp("sr_cond_model").pp(2 + i),
+                &vb.pp("sr_cond_model").pp(2 + i),
             )?);
             ch = output_dim;
         }
 
         let final_idx = 2 + decoder_rates.len();
-        let final_snake = Snake1d::load(ch, vb_model.pp(final_idx))?;
-        let final_conv = CausalConv1d::load(ch, 1, 7, 1, 1, 1, 3, 0, vb_model.pp(final_idx + 1))?;
+        let final_snake = Snake1d::load(ch, &vb_model.pp(final_idx))?;
+        let final_conv = CausalConv1d::load(ch, 1, 7, 1, 1, 1, 3, 0, &vb_model.pp(final_idx + 1))?;
 
         Ok(Self {
             init_dw,
@@ -464,18 +464,18 @@ impl CausalEncoderBlock {
         output_dim: usize,
         stride: usize,
         depthwise: bool,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let vb = vb.pp("block");
         let groups = if depthwise { input_dim } else { 1 };
         let padding = stride.div_ceil(2);
         let output_padding = stride % 2;
         let res_units = [
-            CausalResidualUnit::load(input_dim, 1, groups, vb.pp(0))?,
-            CausalResidualUnit::load(input_dim, 3, groups, vb.pp(1))?,
-            CausalResidualUnit::load(input_dim, 9, groups, vb.pp(2))?,
+            CausalResidualUnit::load(input_dim, 1, groups, &vb.pp(0))?,
+            CausalResidualUnit::load(input_dim, 3, groups, &vb.pp(1))?,
+            CausalResidualUnit::load(input_dim, 9, groups, &vb.pp(2))?,
         ];
-        let snake = Snake1d::load(input_dim, vb.pp(3))?;
+        let snake = Snake1d::load(input_dim, &vb.pp(3))?;
         let downsample = CausalConv1d::load(
             input_dim,
             output_dim,
@@ -485,7 +485,7 @@ impl CausalEncoderBlock {
             1,
             padding,
             output_padding,
-            vb.pp(4),
+            &vb.pp(4),
         )?;
         Ok(Self {
             res_units,
@@ -530,12 +530,12 @@ impl AudioVaeEncoder {
         encoder_dim: usize,
         latent_dim: usize,
         encoder_rates: &[usize],
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let depthwise = true; // this checkpoint's AudioVAEConfig default, same as the decoder
         let vb_block = vb.pp("block");
 
-        let init_conv = CausalConv1d::load(1, encoder_dim, 7, 1, 1, 1, 3, 0, vb_block.pp(0))?;
+        let init_conv = CausalConv1d::load(1, encoder_dim, 7, 1, 1, 1, 3, 0, &vb_block.pp(0))?;
 
         let mut blocks = Vec::with_capacity(encoder_rates.len());
         let mut ch = encoder_dim;
@@ -547,12 +547,12 @@ impl AudioVaeEncoder {
                 output_dim,
                 stride,
                 depthwise,
-                vb_block.pp(1 + i),
+                &vb_block.pp(1 + i),
             )?);
             ch = output_dim;
         }
 
-        let fc_mu = CausalConv1d::load(ch, latent_dim, 3, 1, 1, 1, 1, 0, vb.pp("fc_mu"))?;
+        let fc_mu = CausalConv1d::load(ch, latent_dim, 3, 1, 1, 1, 1, 0, &vb.pp("fc_mu"))?;
 
         Ok(Self {
             init_conv,
@@ -686,7 +686,7 @@ mod shape_smoke_test {
             &[8, 6, 5, 2, 2, 2],
             vec![20_000, 30_000, 40_000],
             48_000,
-            vb.pp("decoder"),
+            &vb.pp("decoder"),
         )
         .expect("build decoder");
 
@@ -719,7 +719,7 @@ mod shape_smoke_test {
             unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
 
         let encoder =
-            AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
+            AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], &vb.pp("encoder")).expect("build encoder");
 
         // hop_length = 2*5*8*8 = 640. A few multiples of that is enough to
         // exercise every stride and the right-zero-pad path.
@@ -750,14 +750,14 @@ mod shape_smoke_test {
             unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device) }.unwrap();
 
         let encoder =
-            AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).expect("build encoder");
+            AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], &vb.pp("encoder")).expect("build encoder");
         let decoder = AudioVaeDecoder::new(
             64,
             2048,
             &[8, 6, 5, 2, 2, 2],
             vec![20_000, 30_000, 40_000],
             48_000,
-            vb.pp("decoder"),
+            &vb.pp("decoder"),
         )
         .expect("build decoder");
 
@@ -809,7 +809,7 @@ mod hf_diff {
             )
         }
         .unwrap();
-        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], vb.pp("encoder")).unwrap();
+        let encoder = AudioVaeEncoder::new(128, 64, &[2, 5, 8, 8], &vb.pp("encoder")).unwrap();
 
         let meta: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(format!("{diff_dir}/meta.json")).unwrap(),

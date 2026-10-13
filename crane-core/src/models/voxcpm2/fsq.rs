@@ -24,7 +24,7 @@ impl ScalarQuantizationLayer {
         out_dim: usize,
         latent_dim: usize,
         scale: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
             in_proj: linear(in_dim, latent_dim, vb.pp("in_proj"))?,
