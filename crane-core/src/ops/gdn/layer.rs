@@ -265,7 +265,7 @@ impl GatedDeltaNet {
             if let Some((y, state)) = fused {
                 cache.recurrent_state = state;
                 return timed(Span::GdnFinish, || {
-                    self.finish_forward(y, projected.z, batch_size, seq_len)
+                    self.finish_forward(&y, &projected.z, batch_size, seq_len)
                 });
             }
         }
@@ -292,14 +292,14 @@ impl GatedDeltaNet {
 
         // 7. Gated RMSNorm + output projection.
         timed(Span::GdnFinish, || {
-            self.finish_forward(y, projected.z, batch_size, seq_len)
+            self.finish_forward(&y, &projected.z, batch_size, seq_len)
         })
     }
 
     fn finish_forward(
         &self,
-        y: Tensor,
-        z: Tensor,
+        y: &Tensor,
+        z: &Tensor,
         batch_size: usize,
         seq_len: usize,
     ) -> Result<Tensor> {
