@@ -254,7 +254,7 @@ impl ResizeMlp {
         input_size: usize,
         intermediate_size: usize,
         output_size: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
             fc1: linear(input_size, intermediate_size, vb.pp("linear_fc1"))?,
@@ -297,7 +297,7 @@ impl CodePredictor {
     pub fn new(
         config: &CodePredictorConfig,
         talker_hidden_size: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let n = config.num_code_groups - 1;
 
@@ -521,7 +521,7 @@ impl TalkerModel {
     ///
     /// Returns an error if required weight tensors are missing or have
     /// mismatched shapes in `vb`.
-    pub fn new(config: &TalkerConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(config: &TalkerConfig, vb: &VarBuilder) -> Result<Self> {
         let model_vb = vb.pp("model");
 
         let codec_embedding = candle_nn::embedding(
@@ -538,7 +538,7 @@ impl TalkerModel {
             config.text_hidden_size,
             config.text_hidden_size,
             config.hidden_size,
-            vb.pp("text_projection"),
+            &vb.pp("text_projection"),
         )?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -570,7 +570,7 @@ impl TalkerModel {
         let code_predictor = CodePredictor::new(
             &config.code_predictor_config,
             config.hidden_size,
-            vb.pp("code_predictor"),
+            &vb.pp("code_predictor"),
         )?;
 
         let rotary_emb = RotaryEmbedding::new(
@@ -1059,7 +1059,7 @@ impl TdnnBlock {
         out_c: usize,
         kernel: usize,
         dilation: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
             conv: ReflectConv1d::new(in_c, out_c, kernel, dilation, vb.pp("conv"))?,
@@ -1084,7 +1084,7 @@ impl Res2NetBlock {
         scale: usize,
         kernel: usize,
         dilation: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let ch = in_c / scale;
         let och = out_c / scale;
@@ -1095,7 +1095,7 @@ impl Res2NetBlock {
                 och,
                 kernel,
                 dilation,
-                vb.pp("blocks").pp(i),
+                &vb.pp("blocks").pp(i),
             )?);
         }
         Ok(Self { blocks, scale })
@@ -1133,7 +1133,7 @@ struct SeBlock {
 }
 
 impl SeBlock {
-    fn new(in_c: usize, se_c: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_c: usize, se_c: usize, out_c: usize, vb: &VarBuilder) -> Result<Self> {
         let cfg = Conv1dConfig::default();
         Ok(Self {
             conv1: candle_nn::conv1d(in_c, se_c, 1, cfg, vb.pp("conv1"))?,
@@ -1165,20 +1165,20 @@ impl SeRes2NetBlock {
         se_c: usize,
         kernel: usize,
         dilation: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
-            tdnn1: TdnnBlock::new(in_c, out_c, 1, 1, vb.pp("tdnn1"))?,
+            tdnn1: TdnnBlock::new(in_c, out_c, 1, 1, &vb.pp("tdnn1"))?,
             res2net: Res2NetBlock::new(
                 out_c,
                 out_c,
                 scale,
                 kernel,
                 dilation,
-                vb.pp("res2net_block"),
+                &vb.pp("res2net_block"),
             )?,
-            tdnn2: TdnnBlock::new(out_c, out_c, 1, 1, vb.pp("tdnn2"))?,
-            se: SeBlock::new(out_c, se_c, out_c, vb.pp("se_block"))?,
+            tdnn2: TdnnBlock::new(out_c, out_c, 1, 1, &vb.pp("tdnn2"))?,
+            se: SeBlock::new(out_c, se_c, out_c, &vb.pp("se_block"))?,
         })
     }
 
@@ -1198,9 +1198,9 @@ struct AttentiveStatisticsPooling {
 }
 
 impl AttentiveStatisticsPooling {
-    fn new(channels: usize, attn_channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, attn_channels: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            tdnn: TdnnBlock::new(channels * 3, attn_channels, 1, 1, vb.pp("tdnn"))?,
+            tdnn: TdnnBlock::new(channels * 3, attn_channels, 1, 1, &vb.pp("tdnn"))?,
             conv: candle_nn::conv1d(
                 attn_channels,
                 channels,
@@ -1270,7 +1270,7 @@ impl SpeakerEncoder {
     ///
     /// Returns an error if required weight tensors are missing or have
     /// mismatched shapes in `vb`.
-    pub fn new(cfg: &SpeakerEncoderConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &SpeakerEncoderConfig, vb: &VarBuilder) -> Result<Self> {
         let n = cfg.enc_channels.len();
         let mut blocks: Vec<EcapaBlock> = Vec::with_capacity(n - 1);
 
@@ -1280,7 +1280,7 @@ impl SpeakerEncoder {
             cfg.enc_channels[0],
             cfg.enc_kernel_sizes[0],
             cfg.enc_dilations[0],
-            vb.pp("blocks").pp(0),
+            &vb.pp("blocks").pp(0),
         )?));
 
         // Blocks 1..n-2: SE-Res2Net
@@ -1292,7 +1292,7 @@ impl SpeakerEncoder {
                 cfg.enc_se_channels,
                 cfg.enc_kernel_sizes[i],
                 cfg.enc_dilations[i],
-                vb.pp("blocks").pp(i),
+                &vb.pp("blocks").pp(i),
             )?));
         }
 
@@ -1303,13 +1303,13 @@ impl SpeakerEncoder {
             cfg.enc_channels[n - 1],
             cfg.enc_kernel_sizes[n - 1],
             cfg.enc_dilations[n - 1],
-            vb.pp("mfa"),
+            &vb.pp("mfa"),
         )?;
 
         let asp = AttentiveStatisticsPooling::new(
             cfg.enc_channels[n - 1],
             cfg.enc_attention_channels,
-            vb.pp("asp"),
+            &vb.pp("asp"),
         )?;
         let fc = candle_nn::conv1d(
             cfg.enc_channels[n - 1] * 2,
@@ -1404,16 +1404,16 @@ impl Qwen3TTSModel {
     ///
     /// Returns an error if required talker weight tensors are missing or have
     /// mismatched shapes in `vb`.
-    pub fn new(config: &Qwen3TTSConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(config: &Qwen3TTSConfig, vb: &VarBuilder) -> Result<Self> {
         let device = vb.device().clone();
         let dtype = vb.dtype();
-        let talker = TalkerModel::new(&config.talker_config, vb.pp("talker"))?;
+        let talker = TalkerModel::new(&config.talker_config, &vb.pp("talker"))?;
         let speaker_encoder = if config.tts_model_type.as_deref() == Some("base") {
             // Speaker encoder must run in F32 for accurate x-vector extraction.
             // BF16 loses too much precision in the ECAPA-TDNN and produces
             // wrong speaker embeddings (voice not cloned). Matches vendor.
             let se_vb = vb.pp("speaker_encoder").set_dtype(DType::F32);
-            match SpeakerEncoder::new(&config.speaker_encoder_config, se_vb) {
+            match SpeakerEncoder::new(&config.speaker_encoder_config, &se_vb) {
                 Ok(enc) => Some(enc),
                 Err(e) => {
                     eprintln!("Warning: failed to load speaker_encoder weights: {e}");
