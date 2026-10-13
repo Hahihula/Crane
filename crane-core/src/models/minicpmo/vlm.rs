@@ -94,7 +94,7 @@ impl MiniCpmOVlModel {
             .with_context(|| format!("mmap safetensors at {model_path}"))?;
 
         let vision =
-            VisionModel::new(&config.vision_config, vb.pp("vpm")).context("build vision tower")?;
+            VisionModel::new(&config.vision_config, &vb.pp("vpm")).context("build vision tower")?;
         let vision_dim = config.vision_config.hidden_size;
         let embed_dim = config.llm.hidden_size;
         let resampler = Resampler::new(
@@ -102,18 +102,18 @@ impl MiniCpmOVlModel {
             embed_dim,
             embed_dim / 128,
             vision_dim,
-            vb.pp("resampler"),
+            &vb.pp("resampler"),
         )
         .context("build resampler")?;
 
-        let audio_encoder =
-            AudioEncoder::new(&config.audio_config, vb.pp("apm")).context("build audio encoder")?;
+        let audio_encoder = AudioEncoder::new(&config.audio_config, &vb.pp("apm"))
+            .context("build audio encoder")?;
         let audio_output_dim = config.audio_config.encoder_ffn_dim / 4;
         let audio_projector = AudioProjector::new(
             audio_output_dim,
             embed_dim,
             config.audio_pool_step,
-            vb.pp("audio_projection_layer"),
+            &vb.pp("audio_projection_layer"),
         )
         .context("build audio projector")?;
         let mel_extractor =

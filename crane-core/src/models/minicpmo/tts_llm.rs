@@ -38,7 +38,7 @@ struct SemanticProjector {
 }
 
 impl SemanticProjector {
-    fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_dim: usize, out_dim: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             linear1: linear(in_dim, out_dim, vb.pp("linear1"))?,
             linear2: linear(out_dim, out_dim, vb.pp("linear2"))?,
@@ -115,7 +115,7 @@ impl MiniCpmTts {
     /// Returns an error if the `VarBuilder`'s embedding, projector, head, or
     /// transformer-layer weights are missing or don't match `config`'s
     /// expected shapes.
-    pub fn new(config: &TtsConfig, vb: VarBuilder, device: &Device, dtype: DType) -> Result<Self> {
+    pub fn new(config: &TtsConfig, vb: &VarBuilder, device: &Device, dtype: DType) -> Result<Self> {
         let emb_text = embedding(
             config.num_text_tokens,
             config.hidden_size,
@@ -129,7 +129,7 @@ impl MiniCpmTts {
         let projector_semantic = SemanticProjector::new(
             config.llm_dim,
             config.hidden_size,
-            vb.pp("projector_semantic"),
+            &vb.pp("projector_semantic"),
         )?;
 
         let head_vb = vb.pp("head_code").pp(0).pp("parametrizations").pp("weight");
@@ -594,7 +594,7 @@ mod hf_diff {
             .expect("varbuilder");
 
         let mut tts =
-            MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts");
+            MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), &device, dtype).expect("load tts");
 
         let meta: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(format!("{diff_dir}/tts_meta.json")).unwrap(),
@@ -756,7 +756,7 @@ mod gguf_cross_check {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device) }
             .expect("varbuilder");
         let mut st_tts =
-            MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts");
+            MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), &device, dtype).expect("load tts");
 
         // ── GGUF path (new) ──
         let mmap = crate::quantized::gguf_file::mmap_gguf_file(&gguf_path)

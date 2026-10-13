@@ -381,12 +381,12 @@ impl DuplexSession {
                 (encoder, projector)
             },
             None => {
-                let encoder = AudioEncoder::new(&config.audio_config, vb.pp("apm"))?;
+                let encoder = AudioEncoder::new(&config.audio_config, &vb.pp("apm"))?;
                 let projector = AudioProjector::new(
                     audio_output_dim,
                     embed_dim,
                     config.audio_pool_step,
-                    vb.pp("audio_projection_layer"),
+                    &vb.pp("audio_projection_layer"),
                 )?;
                 (encoder, projector)
             },
@@ -405,7 +405,7 @@ impl DuplexSession {
                     crate::quantized::gguf_file::Gguf::new(ct, &mut cursor, device.clone(), dtype);
                 MiniCpmTts::from_gguf(&mut gg, &config.tts_config, device, dtype)?
             },
-            None => MiniCpmTts::new(&config.tts_config, vb.pp("tts"), device, dtype)?,
+            None => MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), device, dtype)?,
         };
         let token2wav = Token2Wav::new(model_path, device, dtype)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;

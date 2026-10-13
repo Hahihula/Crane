@@ -34,7 +34,7 @@ struct CrossAttention {
 }
 
 impl CrossAttention {
-    fn new(embed_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(embed_dim: usize, num_heads: usize, vb: &VarBuilder) -> Result<Self> {
         let in_proj_weight = vb.get((3 * embed_dim, embed_dim), "in_proj_weight")?;
         let in_proj_bias = vb.get(3 * embed_dim, "in_proj_bias")?;
         let out_proj = candle_nn::linear(embed_dim, embed_dim, vb.pp("out_proj"))?;
@@ -223,7 +223,7 @@ impl Resampler {
         embed_dim: usize,
         num_heads: usize,
         kv_dim: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let query = vb.get((num_queries, embed_dim), "query")?;
         let kv_proj = if kv_dim != embed_dim {
@@ -235,7 +235,7 @@ impl Resampler {
         } else {
             None
         };
-        let attn = CrossAttention::new(embed_dim, num_heads, vb.pp("attn"))?;
+        let attn = CrossAttention::new(embed_dim, num_heads, &vb.pp("attn"))?;
         let ln_q = layer_norm(embed_dim, 1e-6, vb.pp("ln_q"))?;
         let ln_kv = layer_norm(embed_dim, 1e-6, vb.pp("ln_kv"))?;
         let ln_post = layer_norm(embed_dim, 1e-6, vb.pp("ln_post"))?;

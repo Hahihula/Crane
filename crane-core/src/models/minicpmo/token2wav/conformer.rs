@@ -112,7 +112,7 @@ impl LinearNoSubsampling {
     /// Returns an error if the `VarBuilder`'s weights are missing or don't
     /// match `idim`/`odim`, or if building the position-encoding table
     /// fails.
-    pub fn new(idim: usize, odim: usize, max_len: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(idim: usize, odim: usize, max_len: usize, vb: &VarBuilder) -> Result<Self> {
         let linear = linear(idim, odim, vb.pp("out").pp(0))?;
         let norm = layer_norm(odim, 1e-5, vb.pp("out").pp(1))?;
         let pos_enc = RelPositionalEncoding::new(odim, max_len, vb.device(), vb.dtype())?;
@@ -150,7 +150,7 @@ struct RelPositionMultiHeadedAttention {
 }
 
 impl RelPositionMultiHeadedAttention {
-    fn new(num_heads: usize, dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(num_heads: usize, dim: usize, vb: &VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
             linear_q: linear(dim, dim, vb.pp("linear_q"))?,
@@ -238,7 +238,7 @@ struct PositionwiseFeedForward {
 }
 
 impl PositionwiseFeedForward {
-    fn new(dim: usize, hidden: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, hidden: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             w1: linear(dim, hidden, vb.pp("w_1"))?,
             w2: linear(hidden, dim, vb.pp("w_2"))?,
@@ -261,10 +261,10 @@ struct ConformerEncoderLayer {
 }
 
 impl ConformerEncoderLayer {
-    fn new(dim: usize, num_heads: usize, ffn_hidden: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, ffn_hidden: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            self_attn: RelPositionMultiHeadedAttention::new(num_heads, dim, vb.pp("self_attn"))?,
-            feed_forward: PositionwiseFeedForward::new(dim, ffn_hidden, vb.pp("feed_forward"))?,
+            self_attn: RelPositionMultiHeadedAttention::new(num_heads, dim, &vb.pp("self_attn"))?,
+            feed_forward: PositionwiseFeedForward::new(dim, ffn_hidden, &vb.pp("feed_forward"))?,
             norm_mha: layer_norm(dim, 1e-12, vb.pp("norm_mha"))?,
             norm_ff: layer_norm(dim, 1e-12, vb.pp("norm_ff"))?,
         })
@@ -292,7 +292,7 @@ struct PreLookaheadLayer {
 }
 
 impl PreLookaheadLayer {
-    fn new(channels: usize, pre_lookahead_len: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, pre_lookahead_len: usize, vb: &VarBuilder) -> Result<Self> {
         let conv1_cfg = candle_nn::Conv1dConfig {
             padding: 0,
             stride: 1,
@@ -339,7 +339,7 @@ struct Upsample1D {
 }
 
 impl Upsample1D {
-    fn new(channels: usize, stride: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, stride: usize, vb: &VarBuilder) -> Result<Self> {
         let conv_cfg = candle_nn::Conv1dConfig {
             padding: 0,
             stride: 1,
@@ -392,11 +392,14 @@ impl UpsampleConformerEncoderV2 {
         attention_heads: usize,
         linear_units: usize,
         max_len: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
-        let embed = LinearNoSubsampling::new(input_size, output_size, max_len, vb.pp("embed"))?;
-        let pre_lookahead_layer =
-            PreLookaheadLayer::new(output_size, pre_lookahead_len, vb.pp("pre_lookahead_layer"))?;
+        let embed = LinearNoSubsampling::new(input_size, output_size, max_len, &vb.pp("embed"))?;
+        let pre_lookahead_layer = PreLookaheadLayer::new(
+            output_size,
+            pre_lookahead_len,
+            &vb.pp("pre_lookahead_layer"),
+        )?;
         let vb_enc = vb.pp("encoders");
         let mut encoders = Vec::with_capacity(num_blocks);
         for i in 0..num_blocks {
@@ -404,15 +407,15 @@ impl UpsampleConformerEncoderV2 {
                 output_size,
                 attention_heads,
                 linear_units,
-                vb_enc.pp(i),
+                &vb_enc.pp(i),
             )?);
         }
-        let up_layer = Upsample1D::new(output_size, up_stride, vb.pp("up_layer"))?;
+        let up_layer = Upsample1D::new(output_size, up_stride, &vb.pp("up_layer"))?;
         let up_embed = LinearNoSubsampling::new(
             input_size,
             output_size,
             max_len * up_stride,
-            vb.pp("up_embed"),
+            &vb.pp("up_embed"),
         )?;
         let vb_up = vb.pp("up_encoders");
         let mut up_encoders = Vec::with_capacity(num_up_blocks);
@@ -421,7 +424,7 @@ impl UpsampleConformerEncoderV2 {
                 output_size,
                 attention_heads,
                 linear_units,
-                vb_up.pp(i),
+                &vb_up.pp(i),
             )?);
         }
         let after_norm = layer_norm(output_size, 1e-5, vb.pp("after_norm"))?;
