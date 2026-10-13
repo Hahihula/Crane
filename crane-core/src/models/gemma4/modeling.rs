@@ -270,7 +270,7 @@ impl Attention {
         config: &Gemma4TextConfig,
         layer_type: LayerType,
         is_shared: bool,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let head_dim = match layer_type {
             LayerType::SlidingAttention => config.head_dim,
@@ -639,9 +639,9 @@ impl DecoderLayer {
         layer_type: LayerType,
         is_shared: bool,
         intermediate_size: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
-        let self_attn = Attention::new(config, layer_type, is_shared, vb.pp("self_attn"))?;
+        let self_attn = Attention::new(config, layer_type, is_shared, &vb.pp("self_attn"))?;
         let mlp = Mlp::new(config, intermediate_size, vb.pp("mlp"))?;
 
         let input_layernorm = candle_nn::rms_norm(
@@ -858,7 +858,7 @@ impl Gemma4Model {
     ///
     /// Returns an error if a required tensor is missing or has a mismatched
     /// shape under `vb`, or if building the rotary embeddings fails.
-    pub fn new(config: &Gemma4TextConfig, vb: VarBuilder, is_multimodal: bool) -> Result<Self> {
+    pub fn new(config: &Gemma4TextConfig, vb: &VarBuilder, is_multimodal: bool) -> Result<Self> {
         let dtype = vb.dtype();
         let model_vb = if is_multimodal {
             vb.pp("model").pp("language_model")
@@ -915,7 +915,7 @@ impl Gemma4Model {
                 lt,
                 is_shared,
                 intermediate_size,
-                layers_vb.pp(i),
+                &layers_vb.pp(i),
             )?);
         }
 
