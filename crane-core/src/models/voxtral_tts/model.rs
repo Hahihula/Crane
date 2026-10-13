@@ -533,7 +533,6 @@ impl Model {
         anyhow::ensure!(!all_codes.is_empty(), "no speech frames generated");
 
         let n_frames = all_codes.len();
-        #[allow(clippy::cast_precision_loss)]
         // codes are small integers (semantic <= 8191, acoustic <= 20)
         let flat: Vec<f32> = all_codes
             .iter()
@@ -679,7 +678,6 @@ impl SpeechStream<'_> {
     ///
     /// Returns `Ok(true)` if generation is complete (`END_AUDIO_CODE` or
     /// `max_frames` reached), `Ok(false)` if more frames can be generated.
-    #[allow(clippy::cast_precision_loss)]
     fn generate_one_frame(&mut self) -> anyhow::Result<bool> {
         if self.frame_idx >= self.max_frames {
             return Ok(true);
@@ -764,7 +762,6 @@ impl SpeechStream<'_> {
         let chunk_end = self.all_codes.len();
         let n_chunk_frames = chunk_end - chunk_start;
 
-        #[allow(clippy::cast_precision_loss)]
         let flat: Vec<f32> = self.all_codes[chunk_start..chunk_end]
             .iter()
             .flat_map(|f| f.iter().copied().map(|c| c as f32))

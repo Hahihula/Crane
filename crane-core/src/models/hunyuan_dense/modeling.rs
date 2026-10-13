@@ -441,7 +441,6 @@ impl Attention {
             // ── GQA-grouped SDPA for decode (seq_len=1) ──
             // Keep 4D tensors throughout; candle matmul handles
             // non-contiguous K internally with a single flatten pass.
-            #[allow(clippy::cast_precision_loss)] // head_dim is small (<=512 in practice)
             let scale = 1.0 / (self.head_dim as f64).sqrt();
 
             // Q: [B, H, 1, D] → [B, kv_heads, n_rep, D], pre-scaled
@@ -491,7 +490,6 @@ impl Attention {
         };
 
         // Scaled dot-product attention
-        #[allow(clippy::cast_precision_loss)] // head_dim is small (<=512 in practice)
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let attn_weights = (q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? * scale)?;
         let attn_weights = match attention_mask {
@@ -737,7 +735,6 @@ impl HunYuanDenseV1 {
         let theta = if let Some(ref scaling) = config.rope_scaling {
             if let Some(alpha) = scaling.alpha {
                 if alpha > 0.0 {
-                    #[allow(clippy::cast_precision_loss)]
                     let ratio = dim as f64 / (dim as f64 - 2.0);
                     config.rope_theta() * alpha.powf(ratio)
                 } else {

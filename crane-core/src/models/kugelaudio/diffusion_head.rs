@@ -12,7 +12,6 @@
 //! `adaLN_modulation.1.*` (not `.0.*`), and `t_embedder.mlp.{0,2}.*`.
 
 #![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
-#![allow(clippy::cast_precision_loss)] // exp() / pos encoding math
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // f64->usize for ffn_dim
 #![allow(clippy::module_name_repetitions)] // HeadLayer/FinalLayer/etc. are common names
 #![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors

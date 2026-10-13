@@ -14,7 +14,6 @@
 //! values would need porting.
 
 #![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
-#![allow(clippy::cast_precision_loss)] // tensor dim math: usize->f64 is intentional
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,

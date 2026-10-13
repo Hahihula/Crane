@@ -267,9 +267,6 @@ impl GqaAttention {
 
         // 6. Scaled dot-product attention
         let n_rep = self.n_kv_groups;
-        // head_dim is bounded by model config (typically 2-256), well within
-        // f64's exact integer range.
-        #[allow(clippy::cast_precision_loss)]
         let scale = 1.0 / (self.cfg.head_dim as f64).sqrt();
         // 1/sqrt(head_dim) is always small and positive; f64->f32 here only
         // drops precision flash_attn's own f32 accumulator would discard anyway.

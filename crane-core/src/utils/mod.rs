@@ -1,3 +1,11 @@
+// Casts narrowed in this module (image/audio pixel and sample dimensions,
+// profiling nanosecond counters) are bounded by realistic media sizes or by
+// u64's own huge range, never by untrusted runtime input.
+#![allow(clippy::cast_possible_truncation)]
+// Profiling nanosecond counters narrowed to f64 here stay far below f64's
+// exact-integer range (2^53 ns, ~104 days).
+#![allow(clippy::cast_precision_loss)]
+
 pub mod cast_var_builder;
 pub mod image_utils;
 pub mod prof;

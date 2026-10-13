@@ -77,11 +77,7 @@ impl MemoryConfig {
             if let Some(digits) = upper.strip_suffix(suffix)
                 && let Ok(n) = digits.trim().parse::<f64>()
             {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    clippy::cast_precision_loss
-                )]
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 return (n * (1u64 << shift) as f64) as u64;
             }
         }
@@ -91,11 +87,7 @@ impl MemoryConfig {
             if (0.0..=1.0).contains(&frac) {
                 let total = query_gpu_memory(device).map_or(0, |(_, t)| t);
                 if total > 0 {
-                    #[allow(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss,
-                        clippy::cast_precision_loss
-                    )]
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     return (frac * total as f64) as u64;
                 }
             }

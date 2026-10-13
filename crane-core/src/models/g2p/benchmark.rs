@@ -122,9 +122,6 @@ pub fn benchmark_g2p(
 
         let levenshtein = levenshtein_codepoints(predicted_ipa, expected_ipa);
         let reference_len = expected_ipa.chars().count();
-        // IPA word lengths and edit distances are tiny (well under 2^53), so
-        // the usize -> f64 conversion below is exact.
-        #[allow(clippy::cast_precision_loss)]
         let cer = levenshtein as f64 / reference_len.max(1) as f64;
 
         total_errors += levenshtein;
@@ -139,8 +136,6 @@ pub fn benchmark_g2p(
         });
     }
 
-    // Corpus-wide totals stay well under 2^53, so this conversion is exact.
-    #[allow(clippy::cast_precision_loss)]
     let cer = total_errors as f64 / total_reference_len.max(1) as f64;
 
     G2pBenchmarkResult {
@@ -226,9 +221,6 @@ mod tests {
         // "rɛd" vs "riːd": r-matches, ɛ vs i (sub), missing ː (del), d matches = 2 edits.
         let expected_distance = levenshtein_codepoints("rɛd", "riːd");
         assert_eq!(result.per_word[0].levenshtein, expected_distance);
-        // expected_distance is a tiny Levenshtein distance (well under 2^53),
-        // so this conversion is exact.
-        #[allow(clippy::cast_precision_loss)]
         let expected_cer = expected_distance as f64 / 4.0;
         assert!((result.per_word[0].cer - expected_cer).abs() < f64::EPSILON);
     }

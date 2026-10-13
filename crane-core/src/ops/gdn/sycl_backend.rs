@@ -343,7 +343,6 @@ mod tests {
             let x = Tensor::randn(0f32, 1.0, (bh, rows, kd), &dev)?;
             x.broadcast_div(&x.sqr()?.sum_keepdim(2)?.sqrt()?)
         };
-        #[allow(clippy::cast_precision_loss)]
         let q = (unit(s)? / (kd as f64).sqrt())?;
         Ok([
             q,
@@ -425,7 +424,6 @@ mod tests {
                             #[allow(clippy::cast_possible_truncation)]
                             v.iter().map(|&e| (f64::from(e) * inv) as f32).collect()
                         };
-                        #[allow(clippy::cast_precision_loss)]
                         let qn = unit(&x[kh * kd..][..kd], 1.0 / (kd as f64).sqrt());
                         let kn = unit(&x[dims.key_dim + kh * kd..][..kd], 1.0);
                         q3[(row * s + t) * kd..][..kd].copy_from_slice(&qn);

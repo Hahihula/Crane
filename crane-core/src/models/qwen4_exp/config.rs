@@ -197,7 +197,6 @@ impl TextConfig {
         let head_dim = usize_of("attention.key_length")?;
         let rot_dim = usize_of("rope.dimension_count")?;
         let sections = md.usizes(&key("rope.dimension_sections"))?;
-        #[allow(clippy::cast_precision_loss)]
         let rope_parameters = RopeParameters {
             rope_theta: f64::from(md.f32(&key("rope.freq_base"))?),
             mrope_section: sections.into_iter().filter(|&s| s > 0).collect(),
@@ -351,11 +350,7 @@ impl TextConfig {
     /// Partial-rotary width shared by attention and the indexer.
     #[must_use]
     pub fn rot_dim(&self) -> usize {
-        #[allow(
-            clippy::cast_precision_loss,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss
-        )]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let rot = (self.head_dim as f64 * self.rope_parameters.partial_rotary_factor) as usize;
         rot
     }

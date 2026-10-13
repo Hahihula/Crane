@@ -251,7 +251,6 @@ fn dequantize_iq4_xs(blocks: &[u8], out: &mut [f32]) {
             let lo = (scales_l[ib / 2] >> (4 * (ib % 2))) & 0xf;
             let hi = ((scales_h >> (2 * ib)) & 3) as u8;
             let ls = i32::from(lo | (hi << 4));
-            #[allow(clippy::cast_precision_loss)]
             let dl = d * (ls - 32) as f32;
             let q = &qs[16 * ib..16 * (ib + 1)];
             let y = &mut y[32 * ib..32 * (ib + 1)];
@@ -330,7 +329,6 @@ fn dequantize_iq3_xxs(blocks: &[u8], out: &mut [f32]) {
                     .try_into()
                     .expect("4-byte slice"),
             );
-            #[allow(clippy::cast_precision_loss)]
             let db = d * (0.5 + (aux >> 28) as f32) * 0.5;
             for l in 0..4 {
                 let sign = ksigns(aux >> (7 * l));

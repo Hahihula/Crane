@@ -131,7 +131,6 @@ impl GatedResidual {
     ///
     /// Returns an error if a projection or tensor op fails.
     pub fn mix(&self, streams: &Tensor) -> Result<(Tensor, Option<Injection>)> {
-        #[allow(clippy::cast_precision_loss)]
         let inv_hc = 1.0 / self.hc_count as f64;
         let normed = self.norm.forward(streams)?;
         let low = hc_ops::scaled_silu(&self.down.forward(&normed)?, inv_hc)?;

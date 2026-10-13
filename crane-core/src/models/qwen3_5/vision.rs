@@ -158,9 +158,6 @@ impl VisionAttention {
                 let k = k_chunk.unsqueeze(0)?;
                 let v = v_chunk.unsqueeze(0)?;
 
-                // head_dim is hidden_size / num_heads, a small ViT model dimension
-                // (well under 2^23), so this cast is exact.
-                #[allow(clippy::cast_precision_loss)]
                 let scale = (self.head_dim as f64).sqrt();
                 let attn_weights = (q.matmul(&k.transpose(2, 3)?)? / scale)?;
 
@@ -289,14 +286,10 @@ impl VisionRotaryEmbedding {
     const THETA: f32 = 10000.;
 
     fn new(dim: usize, device: &Device) -> Result<Self> {
-        // dim is head_dim/2, a small ViT model dimension (well under 2^23),
-        // so this cast is exact.
-        #[allow(clippy::cast_precision_loss)]
         let dim_f32 = dim as f32;
         let inv_freq = (0..dim)
             .step_by(2)
             .map(|i| {
-                #[allow(clippy::cast_precision_loss)] // i < dim, same bound as above
                 let i_f32 = i as f32;
                 1f32 / Self::THETA.powf(i_f32 / dim_f32)
             })
@@ -308,9 +301,6 @@ impl VisionRotaryEmbedding {
     }
 
     fn make_embeds(&self, seqlen: usize) -> Result<Tensor> {
-        // seqlen is a vision-grid position count (max image/video height or
-        // width in patches), always far below 2^23, so this cast is exact.
-        #[allow(clippy::cast_precision_loss)]
         let seqlen_f32 = seqlen as f32;
         let seq = Tensor::arange(0f32, seqlen_f32, self.inv_freq.device())?.unsqueeze(D::Minus1)?;
         seq.broadcast_matmul(&self.inv_freq)
@@ -368,11 +358,7 @@ impl Qwen3_5VisionModel {
 
         // num_position_embeddings is a small ViT grid size (e.g. 32*32), so this
         // round-trip through f64 to take an integer sqrt is exact and non-negative.
-        #[allow(
-            clippy::cast_precision_loss,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss
-        )]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_grid_per_side = (cfg.num_position_embeddings as f64).sqrt().round() as usize;
         if num_grid_per_side * num_grid_per_side != cfg.num_position_embeddings {
             candle_core::bail!(
@@ -395,9 +381,6 @@ impl Qwen3_5VisionModel {
         })
     }
 
-    // num_grid_per_side and steps are small ViT grid dimensions (well under
-    // 2^23), so these f32 round-trips are exact.
-    #[allow(clippy::cast_precision_loss)]
     fn linspace_points(&self, steps: usize) -> Vec<f32> {
         if steps == 1 {
             return vec![0.0];
@@ -446,15 +429,11 @@ impl Qwen3_5VisionModel {
                 .iter()
                 .map(|v| (v.ceil() as usize).min(self.num_grid_per_side - 1))
                 .collect();
-            // h_floor/w_floor are grid indices bounded by num_grid_per_side, a
-            // small ViT dimension well under 2^23, so this cast back is exact.
-            #[allow(clippy::cast_precision_loss)]
             let dh: Vec<f32> = h_vals
                 .iter()
                 .zip(&h_floor)
                 .map(|(v, f)| v - *f as f32)
                 .collect();
-            #[allow(clippy::cast_precision_loss)]
             let dw: Vec<f32> = w_vals
                 .iter()
                 .zip(&w_floor)
