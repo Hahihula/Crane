@@ -77,7 +77,7 @@ impl GdnInputProjection {
     /// Returns an error if a required projection weight is missing from
     /// `vb` for the given `kind`.
     pub fn load(
-        vb: VarBuilder,
+        vb: &VarBuilder,
         dims: &super::config::GdnDims,
         kind: GdnInputProjectionKind,
         quant: Option<GgmlDType>,

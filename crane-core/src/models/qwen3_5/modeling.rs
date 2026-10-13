@@ -871,7 +871,7 @@ impl DecoderLayer {
             ),
             LayerType::LinearAttention => {
                 let dims = GdnDims::new(cfg);
-                let gdn = GatedDeltaNet::load(vb, cfg, GdnInputProjectionKind::Split, quant)?;
+                let gdn = GatedDeltaNet::load(&vb, cfg, GdnInputProjectionKind::Split, quant)?;
                 (LayerImpl::LinearAttention(gdn), Some(dims))
             },
         };
