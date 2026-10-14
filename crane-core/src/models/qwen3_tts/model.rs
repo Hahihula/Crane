@@ -174,7 +174,7 @@ impl Model {
         // Safetensors
         let filenames = utils::get_safetensors_files(model_path)?;
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, *dtype, device) }?;
-        let inner = Qwen3TTSModel::new(&config, vb)?;
+        let inner = Qwen3TTSModel::new(&config, &vb)?;
 
         // Speech tokenizer decoder (native Candle preferred, ONNX fallback)
         let speech_dir = model_dir.join("speech_tokenizer");

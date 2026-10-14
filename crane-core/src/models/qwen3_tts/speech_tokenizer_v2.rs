@@ -332,7 +332,7 @@ struct TokenizerAttention {
 }
 
 impl TokenizerAttention {
-    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: &VarBuilder) -> Result<Self> {
         let head_dim = cfg.head_dim;
         let make = |in_d, out_d, name: &str| -> Result<Linear> {
             if cfg.attention_bias {
@@ -435,7 +435,7 @@ struct LayerScale {
 }
 
 impl LayerScale {
-    fn new(channels: usize, init: f64, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, init: f64, vb: &VarBuilder) -> Result<Self> {
         let scale = match vb.get(channels, "scale") {
             Ok(v) => v,
             Err(_) => {
@@ -463,9 +463,9 @@ struct TokenizerTransformerLayer {
 }
 
 impl TokenizerTransformerLayer {
-    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            self_attn: TokenizerAttention::new(cfg, vb.pp("self_attn"))?,
+            self_attn: TokenizerAttention::new(cfg, &vb.pp("self_attn"))?,
             mlp: SwiGluFfn::new(
                 cfg.hidden_size,
                 cfg.intermediate_size,
@@ -485,12 +485,12 @@ impl TokenizerTransformerLayer {
             self_attn_layer_scale: LayerScale::new(
                 cfg.hidden_size,
                 cfg.layer_scale_initial_scale,
-                vb.pp("self_attn_layer_scale"),
+                &vb.pp("self_attn_layer_scale"),
             )?,
             mlp_layer_scale: LayerScale::new(
                 cfg.hidden_size,
                 cfg.layer_scale_initial_scale,
-                vb.pp("mlp_layer_scale"),
+                &vb.pp("mlp_layer_scale"),
             )?,
         })
     }
@@ -517,10 +517,10 @@ struct TokenizerTransformer {
 }
 
 impl TokenizerTransformer {
-    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: &VarBuilder) -> Result<Self> {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
-            layers.push(TokenizerTransformerLayer::new(cfg, vb.pp("layers").pp(i))?);
+            layers.push(TokenizerTransformerLayer::new(cfg, &vb.pp("layers").pp(i))?);
         }
         Ok(Self {
             input_proj: linear(cfg.latent_dim, cfg.hidden_size, vb.pp("input_proj"))?,
@@ -555,7 +555,7 @@ impl CausalConvNet {
         stride: usize,
         dilation: usize,
         groups: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let cfg = Conv1dConfig {
             stride,
@@ -580,7 +580,7 @@ impl CausalConvNet {
         stride: usize,
         dilation: usize,
         groups: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let cfg = Conv1dConfig {
             stride,
@@ -623,7 +623,7 @@ impl CausalTransConvNet {
         out_channels: usize,
         kernel_size: usize,
         stride: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let conv = conv_transpose1d(
             in_channels,
@@ -659,7 +659,7 @@ struct SnakeBeta {
 }
 
 impl SnakeBeta {
-    fn new(channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             alpha: vb.get(channels, "alpha")?,
             beta: vb.get(channels, "beta")?,
@@ -689,12 +689,12 @@ struct DecoderResidualUnit {
 }
 
 impl DecoderResidualUnit {
-    fn new(dim: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, dilation: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            act1: SnakeBeta::new(dim, vb.pp("act1"))?,
-            conv1: CausalConvNet::new(dim, dim, 7, 1, dilation, 1, vb.pp("conv1"))?,
-            act2: SnakeBeta::new(dim, vb.pp("act2"))?,
-            conv2: CausalConvNet::new(dim, dim, 1, 1, 1, 1, vb.pp("conv2"))?,
+            act1: SnakeBeta::new(dim, &vb.pp("act1"))?,
+            conv1: CausalConvNet::new(dim, dim, 7, 1, dilation, 1, &vb.pp("conv1"))?,
+            act2: SnakeBeta::new(dim, &vb.pp("act2"))?,
+            conv2: CausalConvNet::new(dim, dim, 1, 1, 1, 1, &vb.pp("conv2"))?,
         })
     }
 
@@ -718,17 +718,17 @@ struct DecoderBlock {
 }
 
 impl DecoderBlock {
-    fn new(cfg: &DecoderConfig, layer_idx: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &DecoderConfig, layer_idx: usize, vb: &VarBuilder) -> Result<Self> {
         let in_dim = cfg.decoder_dim / (1usize << layer_idx);
         let out_dim = cfg.decoder_dim / (1usize << (layer_idx + 1));
         let up = cfg.upsample_rates[layer_idx];
         let block = vb.pp("block");
         Ok(Self {
-            first_act: SnakeBeta::new(in_dim, block.pp(0))?,
-            upsample: CausalTransConvNet::new(in_dim, out_dim, 2 * up, up, block.pp(1))?,
-            res1: DecoderResidualUnit::new(out_dim, 1, block.pp(2))?,
-            res2: DecoderResidualUnit::new(out_dim, 3, block.pp(3))?,
-            res3: DecoderResidualUnit::new(out_dim, 9, block.pp(4))?,
+            first_act: SnakeBeta::new(in_dim, &block.pp(0))?,
+            upsample: CausalTransConvNet::new(in_dim, out_dim, 2 * up, up, &block.pp(1))?,
+            res1: DecoderResidualUnit::new(out_dim, 1, &block.pp(2))?,
+            res2: DecoderResidualUnit::new(out_dim, 3, &block.pp(3))?,
+            res3: DecoderResidualUnit::new(out_dim, 9, &block.pp(4))?,
         })
     }
 
@@ -751,9 +751,9 @@ struct ConvNeXtBlock {
 }
 
 impl ConvNeXtBlock {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            dwconv: CausalConvNet::new(dim, dim, 7, 1, 1, dim, vb.pp("dwconv"))?,
+            dwconv: CausalConvNet::new(dim, dim, 7, 1, 1, dim, &vb.pp("dwconv"))?,
             norm: layer_norm(dim, 1e-6, vb.pp("norm"))?,
             pwconv1: linear(dim, 4 * dim, vb.pp("pwconv1"))?,
             pwconv2: linear(4 * dim, dim, vb.pp("pwconv2"))?,
@@ -783,7 +783,7 @@ struct EuclideanCodebook {
 }
 
 impl EuclideanCodebook {
-    fn new(dim: usize, codebook_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, codebook_size: usize, vb: &VarBuilder) -> Result<Self> {
         let embedding_sum = vb.get((codebook_size, dim), "embedding_sum")?;
         let cluster_usage = match vb.get(codebook_size, "cluster_usage") {
             Ok(v) => v,
@@ -819,9 +819,9 @@ struct VectorQuantization {
 }
 
 impl VectorQuantization {
-    fn new(dim: usize, codebook_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, codebook_size: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            codebook: EuclideanCodebook::new(dim, codebook_size, vb.pp("_codebook"))?,
+            codebook: EuclideanCodebook::new(dim, codebook_size, &vb.pp("_codebook"))?,
         })
     }
 
@@ -843,14 +843,14 @@ impl ResidualVectorQuantization {
         num_quantizers: usize,
         dim: usize,
         codebook_size: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let mut layers = Vec::with_capacity(num_quantizers);
         for i in 0..num_quantizers {
             layers.push(VectorQuantization::new(
                 dim,
                 codebook_size,
-                vb.pp("layers").pp(i),
+                &vb.pp("layers").pp(i),
             )?);
         }
         Ok(Self { layers, dim })
@@ -894,7 +894,7 @@ struct PointwiseProjNoBias {
 }
 
 impl PointwiseProjNoBias {
-    fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_dim: usize, out_dim: usize, vb: &VarBuilder) -> Result<Self> {
         let w = match vb.get((out_dim, in_dim, 1), "weight") {
             Ok(w) => w.squeeze(2)?,
             Err(_) => vb.get((out_dim, in_dim), "weight")?,
@@ -921,14 +921,14 @@ impl ResidualVectorQuantizer {
         dimension: usize,
         bins: usize,
         output_dimension: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
-            vq: ResidualVectorQuantization::new(n_q, dimension, bins, vb.pp("vq"))?,
+            vq: ResidualVectorQuantization::new(n_q, dimension, bins, &vb.pp("vq"))?,
             output_proj: PointwiseProjNoBias::new(
                 dimension,
                 output_dimension,
-                vb.pp("output_proj"),
+                &vb.pp("output_proj"),
             )?,
         })
     }
@@ -946,7 +946,7 @@ struct SplitResidualVectorQuantizer {
 }
 
 impl SplitResidualVectorQuantizer {
-    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: &VarBuilder) -> Result<Self> {
         let n_q_semantic = 1usize;
         let dimension = cfg.codebook_dim / 2;
         Ok(Self {
@@ -956,14 +956,14 @@ impl SplitResidualVectorQuantizer {
                 dimension,
                 cfg.codebook_size,
                 cfg.codebook_dim,
-                vb.pp("rvq_first"),
+                &vb.pp("rvq_first"),
             )?,
             rvq_rest: ResidualVectorQuantizer::new(
                 cfg.num_quantizers - n_q_semantic,
                 dimension,
                 cfg.codebook_size,
                 cfg.codebook_dim,
-                vb.pp("rvq_rest"),
+                &vb.pp("rvq_rest"),
             )?,
         })
     }
@@ -1020,7 +1020,7 @@ struct EncoderResidualUnit {
 }
 
 impl EncoderResidualUnit {
-    fn new(channels: usize, kernel_size: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, kernel_size: usize, dilation: usize, vb: &VarBuilder) -> Result<Self> {
         let mut block = Vec::new();
         block.push(CausalConvNet::new(
             channels,
@@ -1029,7 +1029,7 @@ impl EncoderResidualUnit {
             1,
             dilation,
             1,
-            vb.pp("block").pp(1),
+            &vb.pp("block").pp(1),
         )?);
         block.push(CausalConvNet::new(
             channels / 2,
@@ -1038,7 +1038,7 @@ impl EncoderResidualUnit {
             1,
             1,
             1,
-            vb.pp("block").pp(3),
+            &vb.pp("block").pp(3),
         )?);
         Ok(Self { block })
     }
@@ -1077,7 +1077,7 @@ impl EncoderBlock {
                 in_channels,
                 residual_kernel,
                 dilation,
-                layers_vb.pp(res_layer_idx),
+                &layers_vb.pp(res_layer_idx),
             )?);
         }
         let downsample = CausalConvNet::new(
@@ -1087,7 +1087,7 @@ impl EncoderBlock {
             stride,
             1,
             1,
-            layers_vb.pp(down_layer_idx),
+            &layers_vb.pp(down_layer_idx),
         )?;
         Ok(Self {
             residuals,
@@ -1125,7 +1125,7 @@ struct EncoderTransformerLayer {
 }
 
 impl EncoderTransformerLayer {
-    fn new(cfg: &EncoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &EncoderConfig, vb: &VarBuilder) -> Result<Self> {
         let d = cfg.hidden_size;
         let h = cfg.num_attention_heads;
         let hd = cfg.head_dim;
@@ -1250,7 +1250,7 @@ struct EncEuclideanCodebook {
 }
 
 impl EncEuclideanCodebook {
-    fn new(dim: usize, codebook_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, codebook_size: usize, vb: &VarBuilder) -> Result<Self> {
         let embedding_sum = vb.get((codebook_size, dim), "embed_sum")?;
         let cluster_usage = match vb.get(codebook_size, "cluster_usage") {
             Ok(v) => v,
@@ -1317,9 +1317,9 @@ struct EncVectorQuantization {
 }
 
 impl EncVectorQuantization {
-    fn new(dim: usize, codebook_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, codebook_size: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            codebook: EncEuclideanCodebook::new(dim, codebook_size, vb.pp("codebook"))?,
+            codebook: EncEuclideanCodebook::new(dim, codebook_size, &vb.pp("codebook"))?,
         })
     }
 
@@ -1343,7 +1343,7 @@ struct EncoderSplitRVQ {
 }
 
 impl EncoderSplitRVQ {
-    fn new(cfg: &EncoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &EncoderConfig, vb: &VarBuilder) -> Result<Self> {
         let n_q_semantic = cfg.num_semantic_quantizers;
         let n_q_acoustic = cfg.num_quantizers - n_q_semantic;
         let dim = cfg.vector_quantization_hidden_dimension;
@@ -1353,16 +1353,16 @@ impl EncoderSplitRVQ {
         let aco_vb = vb.pp("acoustic_residual_vector_quantizer");
 
         let semantic_input_proj =
-            PointwiseProjNoBias::new(cfg.hidden_size, dim, sem_vb.pp("input_proj"))?;
+            PointwiseProjNoBias::new(cfg.hidden_size, dim, &sem_vb.pp("input_proj"))?;
         let acoustic_input_proj =
-            PointwiseProjNoBias::new(cfg.hidden_size, dim, aco_vb.pp("input_proj"))?;
+            PointwiseProjNoBias::new(cfg.hidden_size, dim, &aco_vb.pp("input_proj"))?;
 
         let mut semantic_layers = Vec::new();
         for i in 0..n_q_semantic {
             semantic_layers.push(EncVectorQuantization::new(
                 dim,
                 codebook_size,
-                sem_vb.pp("layers").pp(i),
+                &sem_vb.pp("layers").pp(i),
             )?);
         }
         let mut acoustic_layers = Vec::new();
@@ -1370,7 +1370,7 @@ impl EncoderSplitRVQ {
             acoustic_layers.push(EncVectorQuantization::new(
                 dim,
                 codebook_size,
-                aco_vb.pp("layers").pp(i),
+                &aco_vb.pp("layers").pp(i),
             )?);
         }
 
@@ -1428,7 +1428,7 @@ impl MimiEncoder {
     ///
     /// Returns an error if required weight tensors are missing or have
     /// mismatched shapes in `vb`.
-    pub fn new(cfg: &EncoderConfig, valid_n_q: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &EncoderConfig, valid_n_q: usize, vb: &VarBuilder) -> Result<Self> {
         // vb is already at the "encoder" prefix (caller does vb.pp("encoder"))
         let layers_vb = vb.pp("encoder").pp("layers");
 
@@ -1440,7 +1440,7 @@ impl MimiEncoder {
             1,
             1,
             1,
-            layers_vb.pp(0),
+            &layers_vb.pp(0),
         )?;
 
         // Encoder blocks. The actual layer indices in the safetensors are non-sequential.
@@ -1480,7 +1480,7 @@ impl MimiEncoder {
             1,
             1,
             1,
-            layers_vb.pp(14),
+            &layers_vb.pp(14),
         )?;
 
         // Downsample: ConvDownsample1d(compress=2) → kernel_size=2*compress=4, stride=compress=2
@@ -1492,7 +1492,7 @@ impl MimiEncoder {
             2,
             1,
             1,
-            vb.pp("downsample"),
+            &vb.pp("downsample"),
         )?;
 
         // Encoder transformer
@@ -1500,7 +1500,7 @@ impl MimiEncoder {
         for i in 0..cfg.num_hidden_layers {
             transformer_layers.push(EncoderTransformerLayer::new(
                 cfg,
-                vb.pp("encoder_transformer").pp("layers").pp(i),
+                &vb.pp("encoder_transformer").pp("layers").pp(i),
             )?);
         }
         let rotary = RotaryEmbedding::new(
@@ -1511,7 +1511,7 @@ impl MimiEncoder {
         )?;
 
         // Quantizer
-        let quantizer = EncoderSplitRVQ::new(cfg, vb.pp("quantizer"))?;
+        let quantizer = EncoderSplitRVQ::new(cfg, &vb.pp("quantizer"))?;
 
         Ok(Self {
             encoder_layers,
@@ -1703,7 +1703,7 @@ impl NativeSpeechTokenizerDecoder {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, device) }?;
         let decoder_vb = vb.pp("decoder");
 
-        let quantizer = SplitResidualVectorQuantizer::new(&dcfg, decoder_vb.pp("quantizer"))?;
+        let quantizer = SplitResidualVectorQuantizer::new(&dcfg, &decoder_vb.pp("quantizer"))?;
         let pre_conv = CausalConvNet::new(
             dcfg.codebook_dim,
             dcfg.latent_dim,
@@ -1711,9 +1711,9 @@ impl NativeSpeechTokenizerDecoder {
             1,
             1,
             1,
-            decoder_vb.pp("pre_conv"),
+            &decoder_vb.pp("pre_conv"),
         )?;
-        let pre_transformer = TokenizerTransformer::new(&dcfg, decoder_vb.pp("pre_transformer"))?;
+        let pre_transformer = TokenizerTransformer::new(&dcfg, &decoder_vb.pp("pre_transformer"))?;
 
         let mut upsample = Vec::with_capacity(dcfg.upsampling_ratios.len());
         for (i, &factor) in dcfg.upsampling_ratios.iter().enumerate() {
@@ -1722,9 +1722,10 @@ impl NativeSpeechTokenizerDecoder {
                 dcfg.latent_dim,
                 factor,
                 factor,
-                decoder_vb.pp("upsample").pp(i).pp(0),
+                &decoder_vb.pp("upsample").pp(i).pp(0),
             )?;
-            let block = ConvNeXtBlock::new(dcfg.latent_dim, decoder_vb.pp("upsample").pp(i).pp(1))?;
+            let block =
+                ConvNeXtBlock::new(dcfg.latent_dim, &decoder_vb.pp("upsample").pp(i).pp(1))?;
             upsample.push((up, block));
         }
 
@@ -1736,21 +1737,21 @@ impl NativeSpeechTokenizerDecoder {
             1,
             1,
             1,
-            decoder_vb.pp("decoder").pp(0),
+            &decoder_vb.pp("decoder").pp(0),
         )?));
 
         for i in 0..dcfg.upsample_rates.len() {
             decoder.push(DecoderTailLayer::DecoderBlock(DecoderBlock::new(
                 &dcfg,
                 i,
-                decoder_vb.pp("decoder").pp(i + 1),
+                &decoder_vb.pp("decoder").pp(i + 1),
             )?));
         }
 
         let output_dim = dcfg.decoder_dim / (1usize << dcfg.upsample_rates.len());
         decoder.push(DecoderTailLayer::Snake(SnakeBeta::new(
             output_dim,
-            decoder_vb.pp("decoder").pp(dcfg.upsample_rates.len() + 1),
+            &decoder_vb.pp("decoder").pp(dcfg.upsample_rates.len() + 1),
         )?));
         decoder.push(DecoderTailLayer::CausalConv(CausalConvNet::new(
             output_dim,
@@ -1759,7 +1760,7 @@ impl NativeSpeechTokenizerDecoder {
             1,
             1,
             1,
-            decoder_vb.pp("decoder").pp(dcfg.upsample_rates.len() + 2),
+            &decoder_vb.pp("decoder").pp(dcfg.upsample_rates.len() + 2),
         )?));
 
         let encoder_hf = match filenames.first() {
@@ -1780,7 +1781,7 @@ impl NativeSpeechTokenizerDecoder {
         let encoder = match MimiEncoder::new(
             &cfg.encoder_config,
             cfg.encoder_valid_num_quantizers,
-            vb.pp("encoder"),
+            &vb.pp("encoder"),
         ) {
             Ok(enc) => Some(enc),
             Err(e) => {
