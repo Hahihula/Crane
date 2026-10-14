@@ -35,7 +35,7 @@ struct WhisperAttention {
 }
 
 impl WhisperAttention {
-    fn new(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, vb: &VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
             q_proj: linear(dim, dim, vb.pp("q_proj"))?,
@@ -131,7 +131,7 @@ struct EncoderLayer {
 }
 
 impl EncoderLayer {
-    fn new(cfg: &AudioConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &AudioConfig, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             self_attn_layer_norm: layer_norm(
                 cfg.d_model,
@@ -141,7 +141,7 @@ impl EncoderLayer {
             self_attn: WhisperAttention::new(
                 cfg.d_model,
                 cfg.encoder_attention_heads,
-                vb.pp("self_attn"),
+                &vb.pp("self_attn"),
             )?,
             final_layer_norm: layer_norm(cfg.d_model, LAYER_NORM_EPS, vb.pp("final_layer_norm"))?,
             fc1: linear(cfg.d_model, cfg.encoder_ffn_dim, vb.pp("fc1"))?,
@@ -228,7 +228,7 @@ impl AudioEncoder {
     /// Returns an error if the `VarBuilder`'s convolution, position
     /// embedding, or encoder-layer weights are missing or don't match
     /// `cfg`'s expected shapes.
-    pub fn new(cfg: &AudioConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &AudioConfig, vb: &VarBuilder) -> Result<Self> {
         let conv1_cfg = Conv1dConfig {
             padding: 1,
             stride: 1,
@@ -251,7 +251,7 @@ impl AudioEncoder {
         let vb_layers = vb.pp("layers");
         let mut layers = Vec::with_capacity(cfg.encoder_layers);
         for i in 0..cfg.encoder_layers {
-            layers.push(EncoderLayer::new(cfg, vb_layers.pp(i))?);
+            layers.push(EncoderLayer::new(cfg, &vb_layers.pp(i))?);
         }
 
         let layer_norm = layer_norm(cfg.d_model, LAYER_NORM_EPS, vb.pp("layer_norm"))?;

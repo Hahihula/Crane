@@ -36,7 +36,7 @@ struct SiglipAttention {
 }
 
 impl SiglipAttention {
-    fn new(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, vb: &VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
             q_proj: linear(dim, dim, vb.pp("q_proj"))?,
@@ -148,7 +148,7 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(dim: usize, intermediate: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, intermediate: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             fc1: linear(dim, intermediate, vb.pp("fc1"))?,
             fc2: linear(intermediate, dim, vb.pp("fc2"))?,
@@ -207,7 +207,7 @@ impl VisionEmbeddings {
     ///
     /// Returns an error if the `VarBuilder`'s patch/position embedding
     /// weights are missing or don't match `cfg`'s expected shapes.
-    pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
             ..Default::default()
@@ -317,16 +317,16 @@ struct EncoderLayer {
 }
 
 impl EncoderLayer {
-    fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &VisionConfig, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             layer_norm1: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm1"))?,
             self_attn: SiglipAttention::new(
                 cfg.hidden_size,
                 cfg.num_attention_heads,
-                vb.pp("self_attn"),
+                &vb.pp("self_attn"),
             )?,
             layer_norm2: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm2"))?,
-            mlp: Mlp::new(cfg.hidden_size, cfg.intermediate_size, vb.pp("mlp"))?,
+            mlp: Mlp::new(cfg.hidden_size, cfg.intermediate_size, &vb.pp("mlp"))?,
         })
     }
 
@@ -386,12 +386,12 @@ impl VisionModel {
     /// Returns an error if the `VarBuilder`'s embedding, encoder-layer, or
     /// post-layernorm weights are missing or don't match `cfg`'s expected
     /// shapes.
-    pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
-        let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"))?;
+    pub fn new(cfg: &VisionConfig, vb: &VarBuilder) -> Result<Self> {
+        let embeddings = VisionEmbeddings::new(cfg, &vb.pp("embeddings"))?;
         let vb_layers = vb.pp("encoder").pp("layers");
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
-            layers.push(EncoderLayer::new(cfg, vb_layers.pp(i))?);
+            layers.push(EncoderLayer::new(cfg, &vb_layers.pp(i))?);
         }
         let post_layernorm =
             layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
@@ -514,7 +514,7 @@ mod hf_diff {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device) }
             .expect("varbuilder");
 
-        let vpm = VisionModel::new(&config.vision_config, vb.pp("vpm")).expect("load vpm");
+        let vpm = VisionModel::new(&config.vision_config, &vb.pp("vpm")).expect("load vpm");
         let vision_dim = config.vision_config.hidden_size;
         let embed_dim = config.llm.hidden_size;
         let resampler = Resampler::new(
@@ -522,7 +522,7 @@ mod hf_diff {
             embed_dim,
             embed_dim / 128,
             vision_dim,
-            vb.pp("resampler"),
+            &vb.pp("resampler"),
         )
         .expect("load resampler");
 
@@ -652,13 +652,13 @@ mod gguf_cross_check {
             crate::utils::utils::get_safetensors_files(&model_path).expect("safetensors files");
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device) }
             .expect("varbuilder");
-        let st_vpm = VisionModel::new(&config.vision_config, vb.pp("vpm")).expect("load vpm");
+        let st_vpm = VisionModel::new(&config.vision_config, &vb.pp("vpm")).expect("load vpm");
         let st_resampler = Resampler::new(
             config.query_num,
             embed_dim,
             embed_dim / 128,
             vision_dim,
-            vb.pp("resampler"),
+            &vb.pp("resampler"),
         )
         .expect("load resampler");
 

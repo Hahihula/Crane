@@ -34,7 +34,7 @@ struct TimestepEmbedder {
 }
 
 impl TimestepEmbedder {
-    fn new(hidden_size: usize, freq_dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(hidden_size: usize, freq_dim: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             fc1: linear(freq_dim, hidden_size, vb.pp("mlp").pp(0))?,
             fc2: linear(hidden_size, hidden_size, vb.pp("mlp").pp(2))?,
@@ -76,7 +76,7 @@ struct DitAttention {
 }
 
 impl DitAttention {
-    fn new(dim: usize, num_heads: usize, head_dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, head_dim: usize, vb: &VarBuilder) -> Result<Self> {
         let inner = num_heads * head_dim;
         Ok(Self {
             to_q: linear(dim, inner, vb.pp("to_q"))?,
@@ -123,7 +123,7 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(dim: usize, hidden: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, hidden: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             fc1: linear(dim, hidden, vb.pp("fc1"))?,
             fc2: linear(hidden, dim, vb.pp("fc2"))?,
@@ -147,6 +147,9 @@ struct CausalConv1d {
 }
 
 impl CausalConv1d {
+    // `vb` itself (not a `.pp()`-derived child) is passed by value straight
+    // into `candle_nn::conv1d`, which takes ownership — nothing to borrow.
+    #[allow(clippy::needless_pass_by_value)]
     fn new(in_ch: usize, out_ch: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
         let cfg = Conv1dConfig {
             padding: 0,
@@ -171,7 +174,7 @@ struct CausalConvBlock {
 }
 
 impl CausalConvBlock {
-    fn new(channels: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, kernel: usize, vb: &VarBuilder) -> Result<Self> {
         let block = vb.pp("block");
         Ok(Self {
             conv1: CausalConv1d::new(channels, channels, kernel, block.pp(1))?,
@@ -215,13 +218,13 @@ impl DiTBlock {
         num_heads: usize,
         head_dim: usize,
         mlp_ratio: f64,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let mlp_hidden = (hidden_size as f64 * mlp_ratio) as usize;
         Ok(Self {
-            attn: DitAttention::new(hidden_size, num_heads, head_dim, vb.pp("attn"))?,
-            mlp: Mlp::new(hidden_size, mlp_hidden, vb.pp("mlp"))?,
-            conv: CausalConvBlock::new(hidden_size, 3, vb.pp("conv"))?,
+            attn: DitAttention::new(hidden_size, num_heads, head_dim, &vb.pp("attn"))?,
+            mlp: Mlp::new(hidden_size, mlp_hidden, &vb.pp("mlp"))?,
+            conv: CausalConvBlock::new(hidden_size, 3, &vb.pp("conv"))?,
             ada_ln: linear(
                 hidden_size,
                 9 * hidden_size,
@@ -264,7 +267,7 @@ struct FinalLayer {
 }
 
 impl FinalLayer {
-    fn new(hidden_size: usize, out_channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(hidden_size: usize, out_channels: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             linear: linear(hidden_size, out_channels, vb.pp("linear"))?,
             ada_ln: linear(
@@ -311,9 +314,9 @@ impl DiT {
         num_heads: usize,
         head_dim: usize,
         mlp_ratio: f64,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
-        let t_embedder = TimestepEmbedder::new(hidden_size, 256, vb.pp("t_embedder"))?;
+        let t_embedder = TimestepEmbedder::new(hidden_size, 256, &vb.pp("t_embedder"))?;
         let in_proj = linear(in_channels, hidden_size, vb.pp("in_proj"))?;
         let vb_blocks = vb.pp("blocks");
         let mut blocks = Vec::with_capacity(depth);
@@ -323,10 +326,10 @@ impl DiT {
                 num_heads,
                 head_dim,
                 mlp_ratio,
-                vb_blocks.pp(i),
+                &vb_blocks.pp(i),
             )?);
         }
-        let final_layer = FinalLayer::new(hidden_size, out_channels, vb.pp("final_layer"))?;
+        let final_layer = FinalLayer::new(hidden_size, out_channels, &vb.pp("final_layer"))?;
         Ok(Self {
             t_embedder,
             in_proj,

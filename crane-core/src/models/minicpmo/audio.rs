@@ -27,7 +27,7 @@ impl AudioProjector {
     ///
     /// Returns an error if the `VarBuilder`'s `linear1`/`linear2` weights
     /// are missing or don't match `in_dim`/`out_dim`.
-    pub fn new(in_dim: usize, out_dim: usize, pool_step: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(in_dim: usize, out_dim: usize, pool_step: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             linear1: linear(in_dim, out_dim, vb.pp("linear1"))?,
             linear2: linear(out_dim, out_dim, vb.pp("linear2"))?,
@@ -131,7 +131,7 @@ mod hf_diff {
             .expect("varbuilder");
 
         let encoder =
-            super::super::audio_encoder::AudioEncoder::new(&config.audio_config, vb.pp("apm"))
+            super::super::audio_encoder::AudioEncoder::new(&config.audio_config, &vb.pp("apm"))
                 .expect("load apm");
         let audio_output_dim = config.audio_config.encoder_ffn_dim / 4;
         let embed_dim = config.llm.hidden_size;
@@ -139,7 +139,7 @@ mod hf_diff {
             audio_output_dim,
             embed_dim,
             config.audio_pool_step,
-            vb.pp("audio_projection_layer"),
+            &vb.pp("audio_projection_layer"),
         )
         .expect("load audio_projection_layer");
 
@@ -260,13 +260,13 @@ mod gguf_cross_check {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device) }
             .expect("varbuilder");
         let st_encoder =
-            super::super::audio_encoder::AudioEncoder::new(&config.audio_config, vb.pp("apm"))
+            super::super::audio_encoder::AudioEncoder::new(&config.audio_config, &vb.pp("apm"))
                 .expect("load apm");
         let st_projector = AudioProjector::new(
             audio_output_dim,
             embed_dim,
             config.audio_pool_step,
-            vb.pp("audio_projection_layer"),
+            &vb.pp("audio_projection_layer"),
         )
         .expect("load audio_projection_layer");
 
