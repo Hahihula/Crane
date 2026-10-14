@@ -40,6 +40,7 @@
 
 mod backend;
 mod cache;
+mod chunked;
 mod config;
 mod conv;
 #[cfg(feature = "cuda")]

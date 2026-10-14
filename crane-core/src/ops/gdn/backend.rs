@@ -350,7 +350,17 @@ fn fused_recurrence(
         Ok((q3, k3, v3, g2, beta2, state3))
     })?;
 
+    // Prefill (seq_len > 1) uses the chunked formulation: the serial kernel's
+    // cost scales with seq_len (one blocking loop iteration per token), while
+    // the chunked path turns that into `seq_len / CS` iterations of batched
+    // matmuls. Decode (seq_len == 1) has nothing to chunk, so it always uses
+    // the serial kernel. `CRANE_GDN_SERIAL_PREFILL=1` forces the serial
+    // kernel for prefill too, for A/B comparison.
+    let use_chunked = seq_len > 1 && std::env::var("CRANE_GDN_SERIAL_PREFILL").is_err();
     let (y, state_out) = timed(Span::GdnLaunch, || {
+        if use_chunked {
+            return super::chunked::chunked_recurrence(&q3, &k3, &v3, &g2, &beta2, &state3);
+        }
         #[cfg(feature = "cuda")]
         {
             super::cuda_backend::gdn_recurrence_cuda(&q3, &k3, &v3, &g2, &beta2, &state3)
