@@ -241,20 +241,25 @@ impl VoxCpm2Model {
         let table_len = cfg.max_length;
         let base_lm = load_phase!(
             "base_lm",
-            MiniCpm4Model::new(&cfg.lm_config, table_len, vb.pp("base_lm"))
+            MiniCpm4Model::new(&cfg.lm_config, table_len, &vb.pp("base_lm"))
         )?;
         let residual_cfg = cfg
             .lm_config
             .derive_residual_lm(cfg.residual_lm_num_layers, cfg.residual_lm_no_rope);
         let residual_lm = load_phase!(
             "residual_lm",
-            MiniCpm4Model::new(&residual_cfg, table_len, vb.pp("residual_lm"))
+            MiniCpm4Model::new(&residual_cfg, table_len, &vb.pp("residual_lm"))
         )?;
 
         let encoder_cfg = cfg.lm_config.derive(&cfg.encoder_config);
         let feat_encoder = load_phase!(
             "feat_encoder",
-            VoxCpmLocEnc::new(&encoder_cfg, cfg.feat_dim, table_len, vb.pp("feat_encoder"))
+            VoxCpmLocEnc::new(
+                &encoder_cfg,
+                cfg.feat_dim,
+                table_len,
+                &vb.pp("feat_encoder")
+            )
         )?;
 
         let dit_cfg = cfg.lm_config.derive(&cfg.dit_config.shape);
@@ -264,7 +269,7 @@ impl VoxCpm2Model {
                 &dit_cfg,
                 cfg.feat_dim,
                 table_len,
-                vb.pp("feat_decoder").pp("estimator"),
+                &vb.pp("feat_decoder").pp("estimator"),
             )
         )?;
         let feat_decoder = UnifiedCfm::new(estimator, cfg.dit_config.mean_mode);
@@ -275,7 +280,7 @@ impl VoxCpm2Model {
             hidden,
             cfg.scalar_quantization_latent_dim,
             cfg.scalar_quantization_scale,
-            vb.pp("fsq_layer"),
+            &vb.pp("fsq_layer"),
         )?;
         let enc_to_lm_proj = linear(
             cfg.encoder_config.hidden_dim,
@@ -311,7 +316,7 @@ impl VoxCpm2Model {
                 &avc.decoder_rates,
                 avc.sr_bin_boundaries,
                 avc.out_sample_rate,
-                vae_vb.pp("decoder"),
+                &vae_vb.pp("decoder"),
             )
         )?;
         let audio_vae_encoder = load_phase!(
@@ -320,7 +325,7 @@ impl VoxCpm2Model {
                 avc.encoder_dim,
                 avc.latent_dim,
                 &avc.encoder_rates,
-                vae_vb.pp("encoder"),
+                &vae_vb.pp("encoder"),
             )
         )?;
 
