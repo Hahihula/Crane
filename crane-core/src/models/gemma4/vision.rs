@@ -79,7 +79,7 @@ struct ClippedLinear {
 }
 
 impl ClippedLinear {
-    fn new(in_d: usize, out_d: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_d: usize, out_d: usize, vb: &VarBuilder) -> Result<Self> {
         let linear = linear_no_bias(in_d, out_d, vb.pp("linear"))?;
         // Load clip bounds (scalar tensors)
         let input_min: f64 = vb.get((), "input_min")?.to_dtype(DType::F64)?.to_scalar()?;
@@ -214,7 +214,7 @@ struct VisionPatchEmbedder {
 }
 
 impl VisionPatchEmbedder {
-    fn new(config: &Gemma4VisionConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(config: &Gemma4VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let patch_dim = 3 * config.patch_size * config.patch_size;
         let input_proj = linear_no_bias(patch_dim, config.hidden_size, vb.pp("input_proj"))?;
         let position_embedding_table = vb.get(
@@ -302,15 +302,15 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn new(config: &Gemma4VisionConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(config: &Gemma4VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let hd = config.head_dim;
         let nh = config.num_attention_heads;
         let nkv = config.num_key_value_heads;
 
-        let q_proj = ClippedLinear::new(config.hidden_size, nh * hd, vb.pp("q_proj"))?;
-        let k_proj = ClippedLinear::new(config.hidden_size, nkv * hd, vb.pp("k_proj"))?;
-        let v_proj = ClippedLinear::new(config.hidden_size, nkv * hd, vb.pp("v_proj"))?;
-        let o_proj = ClippedLinear::new(nh * hd, config.hidden_size, vb.pp("o_proj"))?;
+        let q_proj = ClippedLinear::new(config.hidden_size, nh * hd, &vb.pp("q_proj"))?;
+        let k_proj = ClippedLinear::new(config.hidden_size, nkv * hd, &vb.pp("k_proj"))?;
+        let v_proj = ClippedLinear::new(config.hidden_size, nkv * hd, &vb.pp("v_proj"))?;
+        let o_proj = ClippedLinear::new(nh * hd, config.hidden_size, &vb.pp("o_proj"))?;
 
         let q_norm = candle_nn::rms_norm(hd, config.rms_norm_eps, vb.pp("q_norm"))?;
         let k_norm = candle_nn::rms_norm(hd, config.rms_norm_eps, vb.pp("k_norm"))?;
@@ -401,21 +401,21 @@ struct VisionMlp {
 }
 
 impl VisionMlp {
-    fn new(config: &Gemma4VisionConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(config: &Gemma4VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let gate_proj = ClippedLinear::new(
             config.hidden_size,
             config.intermediate_size,
-            vb.pp("gate_proj"),
+            &vb.pp("gate_proj"),
         )?;
         let up_proj = ClippedLinear::new(
             config.hidden_size,
             config.intermediate_size,
-            vb.pp("up_proj"),
+            &vb.pp("up_proj"),
         )?;
         let down_proj = ClippedLinear::new(
             config.intermediate_size,
             config.hidden_size,
-            vb.pp("down_proj"),
+            &vb.pp("down_proj"),
         )?;
         Ok(Self {
             gate_proj,
@@ -444,9 +444,9 @@ struct VisionEncoderLayer {
 }
 
 impl VisionEncoderLayer {
-    fn new(config: &Gemma4VisionConfig, vb: VarBuilder) -> Result<Self> {
-        let self_attn = VisionAttention::new(config, vb.pp("self_attn"))?;
-        let mlp = VisionMlp::new(config, vb.pp("mlp"))?;
+    fn new(config: &Gemma4VisionConfig, vb: &VarBuilder) -> Result<Self> {
+        let self_attn = VisionAttention::new(config, &vb.pp("self_attn"))?;
+        let mlp = VisionMlp::new(config, &vb.pp("mlp"))?;
         let eps = config.rms_norm_eps;
         let hs = config.hidden_size;
         Ok(Self {
@@ -602,14 +602,14 @@ impl Gemma4VisionModel {
     ///
     /// Returns an error if a required tensor is missing or has a mismatched
     /// shape under `vb`, or if building the rotary embeddings fails.
-    pub fn new(config: &Gemma4VisionConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(config: &Gemma4VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let dtype = vb.dtype();
-        let patch_embedder = VisionPatchEmbedder::new(config, vb.pp("patch_embedder"))?;
+        let patch_embedder = VisionPatchEmbedder::new(config, &vb.pp("patch_embedder"))?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let layers_vb = vb.pp("encoder").pp("layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(VisionEncoderLayer::new(config, layers_vb.pp(i))?);
+            layers.push(VisionEncoderLayer::new(config, &layers_vb.pp(i))?);
         }
 
         let rotary_emb = VisionRotaryEmbedding::new(config, vb.device())?;
@@ -692,7 +692,7 @@ impl Gemma4MultimodalEmbedder {
         vision_hidden_size: usize,
         text_hidden_size: usize,
         rms_norm_eps: f64,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let projection = linear_no_bias(
             vision_hidden_size,

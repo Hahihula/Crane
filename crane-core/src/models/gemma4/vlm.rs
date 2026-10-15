@@ -61,20 +61,20 @@ impl Gemma4VLModel {
 
         // Vision tower
         let vision_tower =
-            Gemma4VisionModel::new(&config.vision_config, model_vb.pp("vision_tower"))?;
+            Gemma4VisionModel::new(&config.vision_config, &model_vb.pp("vision_tower"))?;
 
         // Vision → text projection
         let embed_vision = Gemma4MultimodalEmbedder::new(
             config.vision_config.hidden_size,
             config.text_config.hidden_size,
             config.vision_config.rms_norm_eps,
-            model_vb.pp("embed_vision"),
+            &model_vb.pp("embed_vision"),
         )?;
 
         // Text decoder (multimodal checkpoint: weights under model.language_model)
         let language_model = Gemma4Model::new(
             &config.text_config,
-            vb.clone(),
+            &vb,
             true, // is_multimodal
         )?;
 

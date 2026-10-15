@@ -108,7 +108,7 @@ impl Model {
                 (serde_json::from_slice(&config_data)?, false)
             };
 
-        let inner = Gemma4Model::new(&text_config, vb, is_multimodal)?;
+        let inner = Gemma4Model::new(&text_config, &vb, is_multimodal)?;
 
         Ok(Self {
             tokenizer: TokenOutputStream::new(tokenizer),
