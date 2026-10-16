@@ -74,7 +74,6 @@ impl EngineStats {
     pub fn snapshot(&self) -> StatsSnapshot {
         let total_decode = self.total_decode_steps.load(Ordering::Relaxed);
         let total_decode_us = self.total_decode_time_us.load(Ordering::Relaxed);
-        #[allow(clippy::cast_precision_loss)]
         let avg_decode_tok_s = if total_decode_us > 0 {
             (total_decode as f64) / (total_decode_us as f64 / 1_000_000.0)
         } else {
@@ -82,7 +81,6 @@ impl EngineStats {
         };
         let total_prefill_us = self.total_prefill_time_us.load(Ordering::Relaxed);
         let total_prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
-        #[allow(clippy::cast_precision_loss)]
         let avg_prefill_tok_s = if total_prefill_us > 0 {
             (total_prompt as f64) / (total_prefill_us as f64 / 1_000_000.0)
         } else {
@@ -90,7 +88,6 @@ impl EngineStats {
         };
         let ttft_count = self.ttft_count.load(Ordering::Relaxed);
         let total_ttft_us = self.total_ttft_us.load(Ordering::Relaxed);
-        #[allow(clippy::cast_precision_loss)]
         let avg_ttft_ms = if ttft_count > 0 {
             (total_ttft_us as f64 / 1000.0) / ttft_count as f64
         } else {

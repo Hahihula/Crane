@@ -325,7 +325,6 @@ impl NgramTable {
             Residency::Auto => crate::device::available_host_memory()
                 .is_some_and(|avail| avail >= len as u64 + RAM_HEADROOM),
         };
-        #[allow(clippy::cast_precision_loss)] // log output only
         let gib = |b: usize| b as f64 / f64::from(1u32 << 30);
         let (bytes, start) = if to_ram {
             let t = std::time::Instant::now();
@@ -611,7 +610,6 @@ impl PleLayer {
         let query = self.norm_query.forward(streams)?.reshape(per_stream)?;
         let value = self.value_proj.forward(&embeddings)?;
 
-        #[allow(clippy::cast_precision_loss)]
         let scale = 1.0 / (self.hidden as f64).sqrt();
         let score = ((key * query)?.sum_keepdim(D::Minus1)? * scale)?;
         // Signed square root before the sigmoid.

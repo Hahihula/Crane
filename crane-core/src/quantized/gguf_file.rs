@@ -555,6 +555,16 @@ impl<R: Read + Seek> Gguf<R> {
         Ok(candle_nn::Embedding::new(weight, hidden_size))
     }
 
+    /// The device dequantized/loaded tensors are placed on.
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// The target compute dtype dequantized tensors are cast to.
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
     /// Load a raw `QTensor` by name.
     ///
     /// # Errors

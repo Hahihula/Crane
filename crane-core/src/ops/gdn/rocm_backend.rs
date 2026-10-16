@@ -17,6 +17,7 @@
 
 use candle_core::{DType, Result, Tensor};
 
+use super::chunked::MAX_CHUNK_SIZE;
 use crate::ops::rocm::{self, arg};
 
 const MODULE_NAME: &str = "crane_gdn";
@@ -130,4 +131,59 @@ pub fn gdn_recurrence_rocm(
         rocm::wrap_f32(y_buf, &dev, (bh, s, vdim)),
         rocm::wrap_f32(state_out_buf, &dev, (bh, kdim, vdim)),
     ))
+}
+
+/// Batched inverse of a unit lower-triangular `[B_all,cs,cs]` matrix on
+/// `ROCm`: `T_inv = (I + kb)^-1`. Used by the chunked gated-delta-rule
+/// prefill path (`ops/gdn/chunked.rs`) in place of a 63-step
+/// host-orchestrated Candle loop.
+///
+/// # Errors
+///
+/// Returns an error if `cs > 78` (the kernel's shared-memory limit without a
+/// dynamic-shared-memory opt-in), if `kb` is not a contiguous f32 `ROCm`
+/// tensor, or if the launch fails.
+pub fn gdn_chunk_tri_inverse_rocm(kb: &Tensor) -> Result<Tensor> {
+    let (b_all, cs, cs2) = kb.dims3()?;
+    debug_assert_eq!(cs, cs2, "gdn chunk tri inverse: kb must be square");
+    if cs > MAX_CHUNK_SIZE {
+        candle_core::bail!(
+            "gdn chunk tri inverse kernel supports chunk size <= {MAX_CHUNK_SIZE}, got {cs}"
+        );
+    }
+    let dev = kb.device().as_rocm_device()?.clone();
+
+    let (kb_s, kb_l) = kb.storage_and_layout();
+    let kb_p = rocm::device_ptr(&kb_s, kb_l, DType::F32, "gdn chunk tri inverse kb")?;
+
+    let t_inv_buf = dev.alloc::<f32>(b_all * cs * cs)?;
+    let t_inv_p = t_inv_buf.as_ptr();
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let (grid, block, shared, cs_i) = (
+        b_all as u32,
+        cs as u32,
+        (2 * cs * cs * size_of::<f32>()) as u32,
+        cs as i32,
+    );
+
+    let mut args = vec![arg(&kb_p), arg(&t_inv_p), arg(&cs_i)];
+
+    // SAFETY: the argument list matches `gdn_chunk_tri_inverse_f32`'s signature
+    // in `kernels/cuda/gdn.cu`, the grid covers every batch element, and both
+    // operands outlive the launch.
+    unsafe {
+        rocm::launch(
+            &dev,
+            MODULE_NAME,
+            "gdn_chunk_tri_inverse_f32",
+            SOURCE,
+            grid,
+            block,
+            shared,
+            &mut args,
+        )?;
+    }
+
+    Ok(rocm::wrap_f32(t_inv_buf, &dev, (b_all, cs, cs)))
 }

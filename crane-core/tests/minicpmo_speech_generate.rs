@@ -52,7 +52,7 @@ fn minicpmo_speech_generate_produces_real_audio() {
     }
     .unwrap();
     let mut tts =
-        MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts tower");
+        MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), &device, dtype).expect("load tts tower");
 
     // Token2wav's DiT/CFM + HiFi-GAN math was validated in F32 for the
     // tightest possible numeric comparison (see the sub-module HF-diff

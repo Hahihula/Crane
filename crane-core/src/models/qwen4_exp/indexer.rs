@@ -191,7 +191,6 @@ impl QsaIndexer {
             .squeeze(0)?
             .squeeze(0)?; // [blocks, head_dim]
 
-            #[allow(clippy::cast_precision_loss)]
             let scale = 1.0 / (head_dim as f64).sqrt();
             let per_head = q
                 .to_dtype(DType::F32)?

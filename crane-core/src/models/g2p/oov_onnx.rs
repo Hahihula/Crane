@@ -300,9 +300,6 @@ fn length_normalized_score(score: f32, length: usize) -> f32 {
     if length == 0 {
         return score;
     }
-    // Phoneme sequences are always far under 2^24, so this conversion is
-    // exact.
-    #[allow(clippy::cast_precision_loss)]
     let length_f32 = length as f32;
     score / length_f32.powf(LENGTH_NORM_ALPHA)
 }

@@ -47,7 +47,7 @@ fn weight_norm_conv1d(
     out_ch: usize,
     kernel: usize,
     cfg: Conv1dConfig,
-    vb: VarBuilder,
+    vb: &VarBuilder,
 ) -> Result<Conv1d> {
     let g = vb.get((out_ch, 1, 1), "parametrizations.weight.original0")?;
     let v = vb.get((out_ch, in_ch, kernel), "parametrizations.weight.original1")?;
@@ -61,7 +61,7 @@ fn weight_norm_conv_transpose1d(
     out_ch: usize,
     kernel: usize,
     cfg: ConvTranspose1dConfig,
-    vb: VarBuilder,
+    vb: &VarBuilder,
 ) -> Result<ConvTranspose1d> {
     // PyTorch ConvTranspose1d weight shape: [in_ch, out_ch, kernel] — weight_norm dim=0 is still `in_ch` (the first dim).
     let g = vb.get((in_ch, 1, 1), "parametrizations.weight.original0")?;
@@ -78,7 +78,7 @@ struct Snake {
 }
 
 impl Snake {
-    fn new(channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             alpha: vb.get(channels, "alpha")?.reshape((1, channels, 1))?,
         })
@@ -102,7 +102,7 @@ struct ResBlock {
 }
 
 impl ResBlock {
-    fn new(channels: usize, kernel: usize, dilations: &[usize], vb: VarBuilder) -> Result<Self> {
+    fn new(channels: usize, kernel: usize, dilations: &[usize], vb: &VarBuilder) -> Result<Self> {
         let mut convs1 = Vec::with_capacity(dilations.len());
         let mut convs2 = Vec::with_capacity(dilations.len());
         let mut act1 = Vec::with_capacity(dilations.len());
@@ -119,7 +119,7 @@ impl ResBlock {
                 channels,
                 kernel,
                 cfg1,
-                vb.pp("convs1").pp(i),
+                &vb.pp("convs1").pp(i),
             )?);
             let cfg2 = Conv1dConfig {
                 padding: get_padding(kernel, 1),
@@ -132,10 +132,10 @@ impl ResBlock {
                 channels,
                 kernel,
                 cfg2,
-                vb.pp("convs2").pp(i),
+                &vb.pp("convs2").pp(i),
             )?);
-            act1.push(Snake::new(channels, vb.pp("activations1").pp(i))?);
-            act2.push(Snake::new(channels, vb.pp("activations2").pp(i))?);
+            act1.push(Snake::new(channels, &vb.pp("activations1").pp(i))?);
+            act2.push(Snake::new(channels, &vb.pp("activations2").pp(i))?);
         }
         Ok(Self {
             convs1,
@@ -166,7 +166,7 @@ struct ConvRNNF0Predictor {
 }
 
 impl ConvRNNF0Predictor {
-    fn new(in_channels: usize, cond_channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_channels: usize, cond_channels: usize, vb: &VarBuilder) -> Result<Self> {
         let vb_net = vb.pp("condnet");
         let mut convs = Vec::with_capacity(5);
         let dims = [
@@ -188,7 +188,7 @@ impl ConvRNNF0Predictor {
                 dims[i + 1],
                 3,
                 cfg,
-                vb_net.pp(2 * i),
+                &vb_net.pp(2 * i),
             )?);
         }
         let classifier = linear(cond_channels, 1, vb.pp("classifier"))?;
@@ -327,7 +327,7 @@ impl SourceModule {
         sine_amp: f32,
         noise_std: f32,
         upsample_scale: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
             l_linear: linear(harmonic_num + 1, 1, vb.pp("l_linear"))?,
@@ -471,14 +471,14 @@ impl HiFTGenerator {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], dtype, device) }?;
 
         let f0_predictor =
-            ConvRNNF0Predictor::new(IN_CHANNELS, BASE_CHANNELS, vb.pp("f0_predictor"))?;
+            ConvRNNF0Predictor::new(IN_CHANNELS, BASE_CHANNELS, &vb.pp("f0_predictor"))?;
         let upsample_scale = UPSAMPLE_RATES.iter().product::<usize>() * ISTFT_HOP;
         let m_source = SourceModule::new(
             NB_HARMONICS,
             NSF_ALPHA,
             NSF_SIGMA,
             upsample_scale,
-            vb.pp("m_source"),
+            &vb.pp("m_source"),
         )?;
 
         let conv_pre_cfg = Conv1dConfig {
@@ -491,7 +491,7 @@ impl HiFTGenerator {
             BASE_CHANNELS,
             7,
             conv_pre_cfg,
-            vb.pp("conv_pre"),
+            &vb.pp("conv_pre"),
         )?;
 
         let mut ups = Vec::with_capacity(3);
@@ -514,7 +514,7 @@ impl HiFTGenerator {
                 out_ch,
                 k,
                 cfg,
-                vb.pp("ups").pp(i),
+                &vb.pp("ups").pp(i),
             )?);
         }
 
@@ -565,7 +565,7 @@ impl HiFTGenerator {
                 out_ch,
                 SOURCE_RESBLOCK_KERNELS[i],
                 &RESBLOCK_DILATIONS[i],
-                vb.pp("source_resblocks").pp(i),
+                &vb.pp("source_resblocks").pp(i),
             )?);
         }
 
@@ -577,7 +577,7 @@ impl HiFTGenerator {
                     ch,
                     k,
                     &RESBLOCK_DILATIONS[j],
-                    vb.pp("resblocks").pp(i * RESBLOCK_KERNELS.len() + j),
+                    &vb.pp("resblocks").pp(i * RESBLOCK_KERNELS.len() + j),
                 )?);
             }
         }
@@ -593,7 +593,7 @@ impl HiFTGenerator {
             ISTFT_N_FFT + 2,
             7,
             conv_post_cfg,
-            vb.pp("conv_post"),
+            &vb.pp("conv_post"),
         )?;
 
         Ok(Self {

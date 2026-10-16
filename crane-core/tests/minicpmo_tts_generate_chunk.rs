@@ -50,7 +50,7 @@ fn minicpmo_tts_generate_chunk_persists_kv_across_calls() {
     }
     .unwrap();
     let mut tts =
-        MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts tower");
+        MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), &device, dtype).expect("load tts tower");
     let token2wav = Token2Wav::new(&dir, &device, dtype).expect("load token2wav");
 
     // ── Get a real chat response + hidden states (same recipe as

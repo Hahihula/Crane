@@ -110,7 +110,7 @@ struct Attention {
 }
 
 impl Attention {
-    fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(config: &Config, vb: &VarBuilder) -> Result<Self> {
         let head_dim = config.head_dim();
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads;
@@ -241,7 +241,7 @@ impl Attention {
     /// Uses `slice_set` for O(1) in-place writes when the buffer has room.
     /// Falls back to cat + reallocate when the buffer is full.
     /// Returns (`k_full`, `v_full`) views covering all valid cached data.
-    fn update_kv_cache(&mut self, k: Tensor, v: Tensor) -> Result<(Tensor, Tensor)> {
+    fn update_kv_cache(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         // slice_set requires contiguous tensors; K/V after transpose(1,2) are strided.
         let k = k.contiguous()?;
         let v = v.contiguous()?;
@@ -337,14 +337,14 @@ impl Attention {
         let q = rope(&q.contiguous()?, cos, sin)?;
         let k = rope(&k.contiguous()?, cos, sin)?;
 
-        let (k, v) = self.update_kv_cache(k, v)?;
+        let (k, v) = self.update_kv_cache(&k, &v)?;
 
-        self.compute_attention(q, k, v, attention_mask, b_sz, seq_len)
+        self.compute_attention(&q, k, v, attention_mask, b_sz, seq_len)
     }
 
     fn compute_attention(
         &self,
-        q: Tensor,
+        q: &Tensor,
         k: Tensor,
         v: Tensor,
         attention_mask: Option<&Tensor>,
@@ -451,7 +451,7 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(config: &Config, vb: &VarBuilder) -> Result<Self> {
         let gate_proj = linear_no_bias(
             config.hidden_size,
             config.intermediate_size,
@@ -533,9 +533,9 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
-        let self_attn = Attention::new(config, vb.pp("self_attn"))?;
-        let mlp = Mlp::new(config, vb.pp("mlp"))?;
+    fn new(config: &Config, vb: &VarBuilder) -> Result<Self> {
+        let self_attn = Attention::new(config, &vb.pp("self_attn"))?;
+        let mlp = Mlp::new(config, &vb.pp("mlp"))?;
         let input_layernorm = candle_nn::rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
@@ -613,7 +613,7 @@ impl MiniCpm5Model {
     ///
     /// Returns an error if a required tensor is missing or has a mismatched
     /// shape under `vb`, or if building the rotary embeddings fails.
-    pub fn new(config: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(config: &Config, vb: &VarBuilder) -> Result<Self> {
         let dtype = vb.dtype();
         let model_vb = vb.pp("model");
         let embed_tokens = candle_nn::embedding(
@@ -625,7 +625,7 @@ impl MiniCpm5Model {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let layers_vb = model_vb.pp("layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(config, layers_vb.pp(i))?);
+            layers.push(DecoderLayer::new(config, &layers_vb.pp(i))?);
         }
 
         let norm =

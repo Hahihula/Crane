@@ -363,7 +363,6 @@ impl PassTimer {
 /// Emit one window's summary, normalized per pass.
 fn report(kind: usize, t: &Totals) {
     let label = if kind == 0 { "decode" } else { "prefill" };
-    #[allow(clippy::cast_precision_loss)]
     let per = |ns: u64| ns as f64 / t.passes as f64 / 1e6;
     let (enqueue, wall) = (per(t.enqueue_ns), per(t.wall_ns));
     let ratio = if wall > 0.0 {
@@ -378,7 +377,6 @@ fn report(kind: usize, t: &Totals) {
             .collect::<Vec<_>>()
             .join("  ")
     };
-    #[allow(clippy::cast_precision_loss)]
     let sum = |range: std::ops::Range<usize>| range.map(|i| per(t.spans[i])).sum::<f64>();
 
     prof_log!(

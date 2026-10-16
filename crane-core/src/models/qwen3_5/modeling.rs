@@ -147,18 +147,11 @@ impl MRotaryEmbedding {
         // whereas HF pairs `i` with `i+rot_dim/2` inside the rotary slice — a
         // different rotation entirely.
         let half_rot = rot_dim / 2;
-        // half_rot and rot_dim are at most head_dim (a small model dimension,
-        // e.g. <=512), well within f32's 24-bit exact-integer range.
-        #[allow(clippy::cast_precision_loss)]
         let inv: Vec<f32> = (0..half_rot)
             .map(|i| 1.0 / base.powf(i as f32 * 2.0 / rot_dim as f32))
             .collect();
         let inv_freq = Tensor::new(inv.as_slice(), device)?;
 
-        // max_pos (max_position_embeddings) stays well below 2^24 (16_777_216),
-        // the largest integer f32 can represent exactly, even for long-context
-        // configs (e.g. 262_144 or 1_000_000).
-        #[allow(clippy::cast_precision_loss)]
         let positions: Vec<f32> = (0..max_pos).map(|i| i as f32).collect();
         let positions = Tensor::new(positions.as_slice(), device)?;
         let freqs = positions.unsqueeze(1)?.matmul(&inv_freq.unsqueeze(0)?)?; // [max_pos, half_rot]
@@ -607,7 +600,6 @@ impl FullAttention {
         };
 
         let n_rep = self.num_heads / self.num_kv_heads;
-        #[allow(clippy::cast_precision_loss)] // head_dim is small (<=512 in practice)
         let scale = 1.0 / (self.head_dim as f64).sqrt();
 
         let y = if legacy_attn_expand() {
@@ -879,7 +871,7 @@ impl DecoderLayer {
             ),
             LayerType::LinearAttention => {
                 let dims = GdnDims::new(cfg);
-                let gdn = GatedDeltaNet::load(vb, cfg, GdnInputProjectionKind::Split, quant)?;
+                let gdn = GatedDeltaNet::load(&vb, cfg, GdnInputProjectionKind::Split, quant)?;
                 (LayerImpl::LinearAttention(gdn), Some(dims))
             },
         };

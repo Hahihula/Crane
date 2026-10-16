@@ -3,6 +3,10 @@
 //! Device assignment and reusable VRAM-accounting primitives for models
 //! with offloadable sub-components (e.g. `MoE` experts).
 
+// Byte counts/ratios narrowed to f64 below are VRAM sizes far below f64's
+// exact-integer range (2^53 bytes).
+#![allow(clippy::cast_precision_loss)]
+
 use candle_core::Device;
 
 /// Fixed margin for allocator fragmentation and small runtime allocations,
@@ -226,12 +230,9 @@ pub fn greedy_fit_layers(layer_costs: &[u64], budget: u64) -> Vec<usize> {
 /// Formats a byte count for log messages (e.g. `"8.5G"`, `"512M"`, `"1024B"`).
 pub fn format_budget(bytes: u64) -> String {
     if bytes >= 1 << 30 {
-        // Byte counts are far below f64's 52-bit mantissa limit.
-        #[allow(clippy::cast_precision_loss)]
         let gb = bytes as f64 / (1u64 << 30) as f64;
         format!("{gb:.1}G")
     } else if bytes >= 1 << 20 {
-        #[allow(clippy::cast_precision_loss)]
         let mb = bytes as f64 / (1u64 << 20) as f64;
         format!("{mb:.0}M")
     } else {

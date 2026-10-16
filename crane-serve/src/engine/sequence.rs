@@ -267,8 +267,6 @@ impl Sequence {
         if elapsed <= 0.0 {
             return 0.0;
         }
-        // decoded is bounded by max_tokens, far below 2^53, so f64 precision loss is not a concern.
-        #[allow(clippy::cast_precision_loss)]
         let tok_s = decoded as f64 / elapsed;
         tok_s
     }

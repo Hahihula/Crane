@@ -52,7 +52,7 @@ fn minicpmo_profile_llm_and_tts_latency() {
     }
     .unwrap();
     let mut tts =
-        MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts");
+        MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), &device, dtype).expect("load tts");
     println!("[load] llm + tts: {:?}", t0.elapsed());
 
     // ── LLM: prefill + per-token decode ──

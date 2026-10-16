@@ -10,6 +10,8 @@ use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 use candle_core::op::BackpropOp;
 use candle_core::{CudaStorage, Result, Storage, Tensor};
 
+use super::chunked::MAX_CHUNK_SIZE;
+
 // PTX compiled from kernels/cuda/gdn.cu — embedded at build time.
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/crane_kernels_ptx.rs"));
@@ -148,4 +150,55 @@ pub fn gdn_recurrence_cuda(
         false,
     );
     Ok((y, state_out))
+}
+
+/// Batched inverse of a unit lower-triangular `[B_all,cs,cs]` matrix on CUDA:
+/// `T_inv = (I + kb)^-1`. Used by the chunked gated-delta-rule prefill path
+/// (`ops/gdn/chunked.rs`) in place of a 63-step host-orchestrated Candle loop.
+///
+/// # Errors
+///
+/// Returns an error if `cs > 78` (the kernel's shared-memory limit without a
+/// dynamic-shared-memory opt-in), if `kb` is not a contiguous f32 CUDA
+/// tensor, or if the launch fails.
+pub fn gdn_chunk_tri_inverse_cuda(kb: &Tensor) -> Result<Tensor> {
+    let (b_all, cs, cs2) = kb.dims3()?;
+    debug_assert_eq!(cs, cs2, "gdn chunk tri inverse: kb must be square");
+    if cs > MAX_CHUNK_SIZE {
+        candle_core::bail!(
+            "gdn chunk tri inverse kernel supports chunk size <= {MAX_CHUNK_SIZE}, got {cs}"
+        );
+    }
+    let dev = kb.device().as_cuda_device()?.clone();
+
+    let (kb_s, kb_l) = kb.storage_and_layout();
+    let kb_sl = match &*kb_s {
+        Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+        _ => candle_core::bail!("gdn chunk tri inverse: kb must be a cuda tensor"),
+    };
+    let kb_v = kb_sl.slice(kb_l.start_offset()..);
+
+    let t_inv_buf = unsafe { dev.alloc::<f32>(b_all * cs * cs) }?;
+
+    let cfg = LaunchConfig {
+        grid_dim: (b_all as u32, 1, 1),
+        block_dim: (cs as u32, 1, 1),
+        shared_mem_bytes: (2 * cs * cs * std::mem::size_of::<f32>()) as u32,
+    };
+
+    #[allow(clippy::cast_possible_wrap)]
+    let cs_i = cs as i32;
+    let func = dev.get_or_load_custom_func("gdn_chunk_tri_inverse_f32", MODULE_NAME, ptx::GDN)?;
+    let mut builder = func.builder();
+    builder.arg(&kb_v);
+    builder.arg(&t_inv_buf);
+    builder.arg(&cs_i);
+    unsafe { builder.launch(cfg) }.w()?;
+
+    Ok(Tensor::from_storage(
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(t_inv_buf, dev)),
+        (b_all, cs, cs),
+        BackpropOp::none(),
+        false,
+    ))
 }

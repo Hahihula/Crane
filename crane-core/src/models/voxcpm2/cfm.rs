@@ -194,7 +194,7 @@ mod hf_diff {
             &dit_cfg,
             cfg.feat_dim,
             cfg.max_length,
-            vb.pp("feat_decoder").pp("estimator"),
+            &vb.pp("feat_decoder").pp("estimator"),
         )
         .unwrap();
         let mut cfm = UnifiedCfm::new(estimator, cfg.dit_config.mean_mode);

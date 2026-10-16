@@ -25,7 +25,7 @@ impl RotaryEmbedding {
     /// # Errors
     ///
     /// Returns a candle error if tensor allocation or arithmetic fails.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn new(dim: usize, max_pos: usize, theta: f64, device: &Device) -> Result<Self> {
         let inv: Vec<f32> = (0..dim)
             .step_by(2)

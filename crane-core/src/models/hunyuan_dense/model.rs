@@ -373,9 +373,6 @@ impl ModelForCausalLM for Model {
         }
 
         if config.report_speed {
-            // generated_tokens is a small per-request token count; f64 has ample
-            // precision for it, this is purely a display metric.
-            #[allow(clippy::cast_precision_loss)]
             let tokens_per_sec = generated_tokens as f64 / dt.as_secs_f64();
             println!("\n{generated_tokens} tokens generated ({tokens_per_sec:.2} token/s)\n");
         }

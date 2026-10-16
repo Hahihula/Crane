@@ -28,6 +28,10 @@
 //! | `model_factory` | Auto-detection and factory creation               |
 //! | `memory`        | GPU memory-limit parsing + usage queries          |
 
+// Sequence lengths, token counts, and byte sizes narrowed to f32/f64
+// throughout the engine stay far below either type's exact-integer range.
+#![allow(clippy::cast_precision_loss)]
+
 pub mod backend;
 pub mod grammar;
 pub(crate) mod memory;
@@ -502,7 +506,6 @@ impl InferenceEngine {
         } else {
             String::new()
         };
-        #[allow(clippy::cast_precision_loss)]
         let gpu_info = if gpu_total > 0 {
             format!(
                 " | gpu_mem: {:.1}G/{:.1}G ({:.0}%) | kv_cache: {}{}",
@@ -1224,7 +1227,6 @@ impl InferenceEngine {
             .total_prefill_time_us
             .fetch_add(prefill_us, Ordering::Relaxed);
 
-        #[allow(clippy::cast_precision_loss)]
         let prefill_tok_s = if prefill_us > 0 {
             (prompt_len as f64) / (prefill_us as f64 / 1_000_000.0)
         } else {
@@ -1583,7 +1585,6 @@ impl InferenceEngine {
             .fetch_add(decode_us, Ordering::Relaxed);
 
         if total_tokens_this_step > 0 {
-            #[allow(clippy::cast_precision_loss)]
             let tok_s = if decode_us > 0 {
                 (total_tokens_this_step as f64) / (decode_us as f64 / 1_000_000.0)
             } else {
@@ -1703,7 +1704,6 @@ impl InferenceEngine {
             .fetch_add(decode_us, Ordering::Relaxed);
 
         if total_tokens > 0 {
-            #[allow(clippy::cast_precision_loss)]
             let tok_s = if decode_us > 0 {
                 (total_tokens as f64) / (decode_us as f64 / 1_000_000.0)
             } else {
@@ -1968,8 +1968,6 @@ impl InferenceEngine {
             let decode_tok_s = seq.decode_tokens_per_sec();
             let ttft_ms = seq.ttft_ms();
             let total_secs = seq.created_at.elapsed().as_secs_f64();
-            // total_tokens is bounded by prompt_len + max_tokens, far below 2^53.
-            #[allow(clippy::cast_precision_loss)]
             let total_tok_s = if total_secs > 0.0 {
                 (seq.prompt_len + completion_tokens) as f64 / total_secs
             } else {

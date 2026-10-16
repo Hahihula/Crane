@@ -29,7 +29,7 @@ impl DownsampleMlp {
         merge_h: usize,
         merge_w: usize,
         out_hidden: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let merged = in_hidden * merge_h * merge_w;
         Ok(Self {
@@ -62,7 +62,7 @@ impl Merger {
     ///
     /// Returns an error if the `VarBuilder`'s weights are missing or have a
     /// shape that doesn't match the merger's expected layer dimensions.
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: &VarBuilder) -> Result<Self> {
         let (merge_h, merge_w) = cfg.merge_kernel_size;
         let vision_hidden = cfg.vision_config.hidden_size;
         let llm_hidden = cfg.text_config.hidden_size;
@@ -76,7 +76,7 @@ impl Merger {
                 merge_h,
                 merge_w,
                 vision_hidden,
-                vb_mlp.pp(i),
+                &vb_mlp.pp(i),
             )?);
         }
         mlp.push(DownsampleMlp::new(
@@ -84,7 +84,7 @@ impl Merger {
             merge_h,
             merge_w,
             llm_hidden,
-            vb_mlp.pp(merger_times - 1),
+            &vb_mlp.pp(merger_times - 1),
         )?);
 
         Ok(Self {

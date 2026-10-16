@@ -21,7 +21,6 @@
 //! the whole step (Python only upcasts `sample`, only after
 //! `convert_model_output`). Strictly more precision; done for simplicity.
 
-#![allow(clippy::cast_precision_loss)] // linspace/exp math: usize->f64 intentional
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // i64 timestep->f32: bounded 0-999
 #![allow(clippy::missing_errors_doc)] // Result-returning helpers: errors are candle tensor errors
 #![allow(clippy::must_use_candidate)] // getters are conventionally used at call sites

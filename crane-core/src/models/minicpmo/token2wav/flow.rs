@@ -71,7 +71,7 @@ impl Flow {
             ENCODER_ATTENTION_HEADS,
             ENCODER_LINEAR_UNITS,
             ENCODER_MAX_LEN,
-            vb.pp("encoder"),
+            &vb.pp("encoder"),
         )?;
         let encoder_proj = linear(INPUT_SIZE, OUTPUT_SIZE, vb.pp("encoder_proj"))?;
         let estimator = DiT::new(
@@ -82,7 +82,7 @@ impl Flow {
             DIT_NUM_HEADS,
             DIT_HEAD_DIM,
             DIT_MLP_RATIO,
-            vb.pp("decoder").pp("estimator"),
+            &vb.pp("decoder").pp("estimator"),
         )?;
 
         Ok(Self {

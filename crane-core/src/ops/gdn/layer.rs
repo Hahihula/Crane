@@ -52,7 +52,7 @@ impl GatedDeltaNet {
     /// config names an unsupported gate activation, or a loaded tensor's
     /// shape does not match `cfg`'s dimensions.
     pub fn load(
-        vb: VarBuilder,
+        vb: &VarBuilder,
         cfg: &dyn GdnConfig,
         projection_kind: GdnInputProjectionKind,
         quant: Option<GgmlDType>,
@@ -60,7 +60,7 @@ impl GatedDeltaNet {
         let dims = GdnDims::new(cfg);
         let vb_la = vb.pp("linear_attn");
 
-        let input_proj = GdnInputProjection::load(vb_la.clone(), &dims, projection_kind, quant)?;
+        let input_proj = GdnInputProjection::load(&vb_la, &dims, projection_kind, quant)?;
         let conv1d_weight =
             vb_la.get((dims.conv_dim, 1, dims.conv_kernel_size), "conv1d.weight")?;
         let dt_bias = vb_la.get(dims.num_v_heads, "dt_bias")?;
@@ -70,7 +70,7 @@ impl GatedDeltaNet {
             dims.head_v_dim,
             cfg.rms_norm_eps(),
             cfg.output_gate_activation()?,
-            vb_la.pp("norm"),
+            &vb_la.pp("norm"),
         )?;
         let out_proj = linear_layer(
             dims.value_dim,
@@ -265,7 +265,7 @@ impl GatedDeltaNet {
             if let Some((y, state)) = fused {
                 cache.recurrent_state = state;
                 return timed(Span::GdnFinish, || {
-                    self.finish_forward(y, projected.z, batch_size, seq_len)
+                    self.finish_forward(&y, &projected.z, batch_size, seq_len)
                 });
             }
         }
@@ -292,14 +292,14 @@ impl GatedDeltaNet {
 
         // 7. Gated RMSNorm + output projection.
         timed(Span::GdnFinish, || {
-            self.finish_forward(y, projected.z, batch_size, seq_len)
+            self.finish_forward(&y, &projected.z, batch_size, seq_len)
         })
     }
 
     fn finish_forward(
         &self,
-        y: Tensor,
-        z: Tensor,
+        y: &Tensor,
+        z: &Tensor,
         batch_size: usize,
         seq_len: usize,
     ) -> Result<Tensor> {

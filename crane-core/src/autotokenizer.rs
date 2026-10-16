@@ -1,5 +1,9 @@
+// `u64 as usize` below is lossless on every supported (64-bit) target.
+#![allow(clippy::cast_possible_truncation)]
+
 use hf_hub::{HFClientBuilder, split_id};
 use minijinja_contrib::add_to_environment;
+use minijinja_contrib::pycompat::unknown_method_callback;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokenizers::{EncodeInput, Tokenizer};
@@ -501,6 +505,10 @@ impl AutoTokenizer {
         let mut env = minijinja::Environment::new();
         // Register Python-compatible builtins (tojson, namespace, etc.)
         add_to_environment(&mut env);
+        // `add_to_environment` doesn't wire this in itself (per its own doc
+        // comment). Without it, Python dict/list methods HF templates rely
+        // on (e.g. Gemma 4's `message.get('reasoning')`) fail to render.
+        env.set_unknown_method_callback(unknown_method_callback);
 
         // Additional Python-style string filters.
         env.add_filter("startswith", |s: &str, prefix: &str| s.starts_with(prefix));

@@ -52,7 +52,7 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn new(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, vb: &VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
             q_proj: linear(dim, dim, vb.pp("q_proj"))?,
@@ -137,7 +137,7 @@ impl Mlp {
         dim: usize,
         intermediate: usize,
         activation: Activation,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
             fc1: linear(dim, intermediate, vb.pp("fc1"))?,
@@ -168,7 +168,7 @@ impl VisionEmbeddings {
     ///
     /// Returns an error if the `VarBuilder`'s patch/position embedding
     /// weights are missing or don't match `cfg`'s expected shapes.
-    pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
             ..Default::default()
@@ -257,20 +257,20 @@ impl EncoderLayer {
     ///
     /// Returns an error if the `VarBuilder`'s layer weights are missing or
     /// don't match `cfg`'s expected shapes.
-    pub fn new(cfg: &VisionConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &VisionConfig, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             layer_norm1: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm1"))?,
             self_attn: VisionAttention::new(
                 cfg.hidden_size,
                 cfg.num_attention_heads,
-                vb.pp("self_attn"),
+                &vb.pp("self_attn"),
             )?,
             layer_norm2: layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("layer_norm2"))?,
             mlp: Mlp::new(
                 cfg.hidden_size,
                 cfg.intermediate_size,
                 Activation::GeluPytorchTanh,
-                vb.pp("mlp"),
+                &vb.pp("mlp"),
             )?,
         })
     }
@@ -314,7 +314,7 @@ impl WindowAttentionMerger {
     pub fn new(
         cfg: &VisionConfig,
         window_kernel_size: (usize, usize),
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let (window_h, window_w) = window_kernel_size;
         let window_hidden_size = cfg.hidden_size * window_h * window_w;
@@ -324,7 +324,7 @@ impl WindowAttentionMerger {
             self_attn: VisionAttention::new(
                 cfg.hidden_size,
                 cfg.num_attention_heads,
-                vb.pp("self_attn"),
+                &vb.pp("self_attn"),
             )?,
             pre_norm: layer_norm(window_hidden_size, cfg.layer_norm_eps, vb.pp("pre_norm"))?,
             linear_1: linear(
@@ -467,15 +467,15 @@ impl VisionModel {
         cfg: &VisionConfig,
         insert_layer_id: usize,
         window_kernel_size: (usize, usize),
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
-        let embeddings = VisionEmbeddings::new(cfg, vb.pp("embeddings"))?;
+        let embeddings = VisionEmbeddings::new(cfg, &vb.pp("embeddings"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_layers = vb.pp("encoder").pp("layers");
         for i in 0..cfg.num_hidden_layers {
-            layers.push(EncoderLayer::new(cfg, vb_layers.pp(i))?);
+            layers.push(EncoderLayer::new(cfg, &vb_layers.pp(i))?);
         }
-        let vit_merger = WindowAttentionMerger::new(cfg, window_kernel_size, vb.pp("vit_merger"))?;
+        let vit_merger = WindowAttentionMerger::new(cfg, window_kernel_size, &vb.pp("vit_merger"))?;
         let post_layernorm =
             layer_norm(cfg.hidden_size, cfg.layer_norm_eps, vb.pp("post_layernorm"))?;
         Ok(Self {

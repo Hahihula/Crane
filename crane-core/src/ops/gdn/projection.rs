@@ -77,7 +77,7 @@ impl GdnInputProjection {
     /// Returns an error if a required projection weight is missing from
     /// `vb` for the given `kind`.
     pub fn load(
-        vb: VarBuilder,
+        vb: &VarBuilder,
         dims: &super::config::GdnDims,
         kind: GdnInputProjectionKind,
         quant: Option<GgmlDType>,
@@ -144,8 +144,8 @@ impl GdnInputProjection {
                 in_proj_qkvz,
                 in_proj_ba,
             } => GdnProjection::from_grouped(
-                in_proj_qkvz.forward(x)?,
-                in_proj_ba.forward(x)?,
+                &in_proj_qkvz.forward(x)?,
+                &in_proj_ba.forward(x)?,
                 dims,
                 batch_size,
                 seq_len,
@@ -156,10 +156,10 @@ impl GdnInputProjection {
                 in_proj_b,
                 in_proj_a,
             } => GdnProjection::from_split(
-                in_proj_qkv.forward(x)?,
-                in_proj_z.forward(x)?,
-                in_proj_b.forward(x)?,
-                in_proj_a.forward(x)?,
+                &in_proj_qkv.forward(x)?,
+                &in_proj_z.forward(x)?,
+                &in_proj_b.forward(x)?,
+                &in_proj_a.forward(x)?,
                 dims,
                 batch_size,
                 seq_len,
@@ -182,7 +182,7 @@ impl GdnInputProjection {
                 let [Some(qkv), Some(z), Some(b), Some(a)] = parts else {
                     candle_core::bail!("fused GDN projection is missing a part")
                 };
-                GdnProjection::from_split(qkv, z, b, a, dims, batch_size, seq_len)
+                GdnProjection::from_split(&qkv, &z, &b, &a, dims, batch_size, seq_len)
             },
         }
     }
@@ -209,8 +209,8 @@ pub struct GdnProjection {
 
 impl GdnProjection {
     fn from_grouped(
-        mixed_qkvz: Tensor,
-        mixed_ba: Tensor,
+        mixed_qkvz: &Tensor,
+        mixed_ba: &Tensor,
         dims: &super::config::GdnDims,
         batch_size: usize,
         seq_len: usize,
@@ -245,10 +245,10 @@ impl GdnProjection {
     }
 
     fn from_split(
-        mixed_qkv: Tensor,
-        mixed_z: Tensor,
-        mixed_b: Tensor,
-        mixed_a: Tensor,
+        mixed_qkv: &Tensor,
+        mixed_z: &Tensor,
+        mixed_b: &Tensor,
+        mixed_a: &Tensor,
         dims: &super::config::GdnDims,
         batch_size: usize,
         seq_len: usize,

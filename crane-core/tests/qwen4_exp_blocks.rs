@@ -181,7 +181,7 @@ fn ple_matches_reference_in_one_shot_and_chunked() -> Result<()> {
 fn gated_delta_net_with_sigmoid_gate_matches_reference() -> Result<()> {
     let f = Fixture::load();
     let gdn = GatedDeltaNet::load(
-        f.vb.pp("layers.1"),
+        &f.vb.pp("layers.1"),
         &f.cfg,
         GdnInputProjectionKind::Split,
         None,

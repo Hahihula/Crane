@@ -498,9 +498,6 @@ pub fn apply_penalties_inplace(
         let deltas: Vec<f32> = token_ids
             .iter()
             .map(|id| {
-                // Counts are bounded by `context.len()`, which is always far
-                // smaller than f32's 2^24 exact-integer limit.
-                #[allow(clippy::cast_precision_loss)]
                 let count = counts[id] as f32;
                 count * frequency_penalty + presence_penalty
             })

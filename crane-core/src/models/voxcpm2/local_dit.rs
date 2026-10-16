@@ -40,7 +40,7 @@ struct TimestepEmbedding {
 }
 
 impl TimestepEmbedding {
-    fn new(in_channels: usize, time_embed_dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_channels: usize, time_embed_dim: usize, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
             linear_1: linear(in_channels, time_embed_dim, vb.pp("linear_1"))?,
             linear_2: linear(time_embed_dim, time_embed_dim, vb.pp("linear_2"))?,
@@ -84,20 +84,20 @@ impl VoxCpmLocDit {
         cfg: &MiniCpm4Config,
         in_channels: usize,
         max_length: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         Ok(Self {
             in_proj: linear(in_channels, hidden_size, vb.pp("in_proj"))?,
             cond_proj: linear(in_channels, hidden_size, vb.pp("cond_proj"))?,
             out_proj: linear(hidden_size, in_channels, vb.pp("out_proj"))?,
-            time_mlp: TimestepEmbedding::new(hidden_size, hidden_size, vb.pp("time_mlp"))?,
+            time_mlp: TimestepEmbedding::new(hidden_size, hidden_size, &vb.pp("time_mlp"))?,
             delta_time_mlp: TimestepEmbedding::new(
                 hidden_size,
                 hidden_size,
-                vb.pp("delta_time_mlp"),
+                &vb.pp("delta_time_mlp"),
             )?,
-            decoder: MiniCpm4Model::new(cfg, max_length, vb.pp("decoder"))?,
+            decoder: MiniCpm4Model::new(cfg, max_length, &vb.pp("decoder"))?,
             hidden_size,
             in_channels,
             time_freqs: sinusoidal_freqs(hidden_size, vb.device())?,

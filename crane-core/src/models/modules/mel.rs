@@ -34,7 +34,7 @@ pub(crate) fn hann_window(n: usize) -> Vec<f32> {
     // n is an STFT window/FFT size, far below f64's exact-integer range, so
     // the usize -> f64 casts below lose no precision; the window magnitude
     // is in [0, 1], so the final f64 -> f32 cast cannot truncate meaningfully.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)]
     let window: Vec<f32> = (0..n)
         .map(|i| {
             let v = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos());
@@ -197,14 +197,12 @@ pub(crate) fn build_mel_filterbank(
     }
 
     let n_bins = n_fft / 2 + 1;
-    #[allow(clippy::cast_precision_loss)]
     let fft_freqs: Vec<f64> = (0..n_bins)
         .map(|k| k as f64 * sr as f64 / n_fft as f64)
         .collect();
 
     let mel_min = hz_to_mel(fmin);
     let mel_max = hz_to_mel(fmax);
-    #[allow(clippy::cast_precision_loss)]
     let mel_points: Vec<f64> = (0..=n_mels + 1)
         .map(|i| mel_min + (mel_max - mel_min) * i as f64 / (n_mels + 1) as f64)
         .collect();

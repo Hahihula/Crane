@@ -41,7 +41,6 @@ pub(crate) fn random_blocks(ty: IQuantType, n: usize, seed: u32) -> Vec<u8> {
     let mut state = seed | 1;
     let mut out = Vec::with_capacity(n * ty.block_bytes());
     for i in 0..n {
-        #[allow(clippy::cast_precision_loss)]
         let scale = f16::from_f32(0.002 + 0.0001 * (i % 7) as f32).to_le_bytes();
         let start = out.len();
         out.extend(scale);

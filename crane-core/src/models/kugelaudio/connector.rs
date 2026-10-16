@@ -7,7 +7,6 @@
 
 #![allow(clippy::needless_pass_by_value)] // VarBuilder by-value is the candle idiom
 #![allow(clippy::doc_markdown)] // KugelAudio is the model name, not generic Markdown text
-#![allow(clippy::cast_precision_loss)] // test fill: bounded n
 #![allow(clippy::float_cmp)] // test asserts on exact f64 step outputs
 
 use candle_core::{Module, Result, Tensor};

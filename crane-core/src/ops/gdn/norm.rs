@@ -61,7 +61,7 @@ impl RmsNormGated {
     ///
     /// Returns an error if the `weight` tensor of length `size` is missing
     /// from `vb`.
-    pub fn new(size: usize, eps: f64, activation: GateActivation, vb: VarBuilder) -> Result<Self> {
+    pub fn new(size: usize, eps: f64, activation: GateActivation, vb: &VarBuilder) -> Result<Self> {
         let weight = vb.get(size, "weight")?;
         Ok(Self::from_weight(weight, eps, activation))
     }

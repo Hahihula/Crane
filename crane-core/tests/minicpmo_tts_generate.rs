@@ -54,7 +54,7 @@ fn minicpmo_tts_generate_produces_plausible_codes() {
     }
     .unwrap();
     let mut tts =
-        MiniCpmTts::new(&config.tts_config, vb.pp("tts"), &device, dtype).expect("load tts tower");
+        MiniCpmTts::new(&config.tts_config, &vb.pp("tts"), &device, dtype).expect("load tts tower");
 
     // Same think-block + <|tts_bos|> prompt convention as
     // `MiniCpmOVlModel::render_prompt`/`render_prompt_for_tts`.

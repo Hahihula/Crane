@@ -27,11 +27,11 @@ impl VoxCpmLocEnc {
         cfg: &MiniCpm4Config,
         input_dim: usize,
         max_length: usize,
-        vb: VarBuilder,
+        vb: &VarBuilder,
     ) -> Result<Self> {
         let special_token = vb.get((1, 1, 1, cfg.hidden_size), "special_token")?;
         let in_proj = linear(input_dim, cfg.hidden_size, vb.pp("in_proj"))?;
-        let encoder = MiniCpm4Model::new(cfg, max_length, vb.pp("encoder"))?;
+        let encoder = MiniCpm4Model::new(cfg, max_length, &vb.pp("encoder"))?;
         Ok(Self {
             special_token,
             in_proj,

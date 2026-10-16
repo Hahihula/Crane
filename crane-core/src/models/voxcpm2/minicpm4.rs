@@ -123,7 +123,7 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(cfg: &MiniCpm4Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &MiniCpm4Config, vb: &VarBuilder) -> Result<Self> {
         let attn_cfg = AttentionConfig {
             dim: cfg.hidden_size,
             n_heads: cfg.num_attention_heads,
@@ -153,7 +153,6 @@ impl DecoderLayer {
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
         )?;
-        #[allow(clippy::cast_precision_loss)]
         let residual_scale = if cfg.use_mup {
             cfg.scale_depth / (cfg.num_hidden_layers as f64).sqrt()
         } else {
@@ -207,7 +206,7 @@ impl MiniCpm4Model {
     ///
     /// Returns an error if any embedding, decoder layer, or norm weight
     /// can't be loaded from `vb`, or if building the rotary table fails.
-    pub fn new(cfg: &MiniCpm4Config, rope_table_len: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &MiniCpm4Config, rope_table_len: usize, vb: &VarBuilder) -> Result<Self> {
         let embed_tokens = if cfg.vocab_size > 0 {
             Some(embedding(
                 cfg.vocab_size,
@@ -221,7 +220,7 @@ impl MiniCpm4Model {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_layers = vb.pp("layers");
         for i in 0..cfg.num_hidden_layers {
-            layers.push(DecoderLayer::new(cfg, vb_layers.pp(i))?);
+            layers.push(DecoderLayer::new(cfg, &vb_layers.pp(i))?);
             release_load_staging(vb.device());
         }
 

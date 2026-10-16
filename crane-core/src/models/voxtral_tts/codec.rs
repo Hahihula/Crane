@@ -93,7 +93,6 @@ fn reflect_pad_1d(x: &Tensor, left_pad: usize) -> Result<Tensor> {
 // ── ALiBi helpers ────────────────────────────────────────────────────────────
 
 /// Precompute `ALiBi` slopes: `slopes[h] = 2^(-8/n_heads × (h+1))`.
-#[allow(clippy::cast_precision_loss)]
 fn compute_alibi_slopes(n_heads: usize) -> Vec<f32> {
     (0..n_heads)
         .map(|h| 2f32.powf(-8.0 / n_heads as f32 * (h + 1) as f32))
@@ -105,7 +104,6 @@ fn compute_alibi_slopes(n_heads: usize) -> Vec<f32> {
 /// Shape: `[1, n_heads, seq_len, seq_len]`.  Valid positions get an `ALiBi`
 /// bias `slope[h] × (j − i)` (always ≤ 0 for causal); blocked positions
 /// get `−∞`.
-#[allow(clippy::cast_precision_loss)]
 fn build_alibi_sliding_mask(
     seq_len: usize,
     window: usize,
@@ -276,7 +274,7 @@ impl CodecAttention {
     /// Forward pass with a precomputed `ALiBi` + sliding-window mask.
     ///
     /// `x` has shape `[B, T, dim]`.  `mask` has shape `[1, n_heads, T, T]`.
-    #[allow(clippy::many_single_char_names, clippy::cast_precision_loss)]
+    #[allow(clippy::many_single_char_names)]
     fn forward(&self, x: &Tensor, mask: &Tensor) -> Result<Tensor> {
         let (batch, seq, _) = x.dims3()?;
 
@@ -598,7 +596,6 @@ impl CodecDecoder {
     /// dtype — internally cast to F32; special token offset 2 already
     /// included). Returns `[B, 292, n_frames]` (channel-first) with dtype
     /// [`Self::dtype`].
-    #[allow(clippy::cast_precision_loss)]
     fn embed_codes(&self, codes: &Tensor) -> Result<Tensor> {
         let (b, n_frames, _) = codes.dims3()?;
         let codes = &codes.to_dtype(DType::F32)?;
