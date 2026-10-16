@@ -97,7 +97,7 @@ impl DecoderLayer {
         };
         let mixer = match cfg.layer_types[idx] {
             LayerType::LinearAttention => TokenMixer::Linear {
-                gdn: GatedDeltaNet::load(vb.clone(), cfg, GdnInputProjectionKind::Split, None)?,
+                gdn: GatedDeltaNet::load(vb, cfg, GdnInputProjectionKind::Split, None)?,
                 dims: GdnDims::new(cfg),
             },
             LayerType::IndexedAttention => {
