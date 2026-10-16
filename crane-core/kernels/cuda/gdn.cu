@@ -196,3 +196,73 @@ extern "C" __global__ void gdn_chunk_tri_inverse_f32(
         t_inv_b[idx] = tinv_sh[idx];
     }
 }
+
+extern "C" __global__ void gdn_float_math(
+    const float* x, float* y, unsigned int n, int kind) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float v = x[i];
+    y[i] = kind == 0 ? rsqrtf(v) : (v > 20.f ? v : log1pf(expf(v)));
+}
+
+#if defined(__CUDACC__)
+#include <cuda_bf16.h>
+// Preserve the four-accumulator warp reduction used by Torch's F32 sum
+// after BF16 elementwise squaring under autocast.
+extern "C" __global__ void gdn_l2_bf16_128(
+    const float* x, float* y, unsigned int n, int unused) {
+    unsigned int row = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    unsigned int lane = threadIdx.x % 32;
+    if (row >= n / 128) return;
+    float values[4], sum = 0.f;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        float v = x[row * 128 + lane + 32 * j];
+        values[j] = v;
+    }
+    float partial[4];
+    for (int j = 0; j < 4; ++j)
+        partial[j] = __bfloat162float(__float2bfloat16_rn(values[j]*values[j]));
+    sum = __fadd_rn(__fadd_rn(__fadd_rn(partial[0], partial[1]), partial[2]), partial[3]);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum = __fadd_rn(sum, __shfl_down_sync(0xffffffff, sum, offset));
+    }
+    float inv = rsqrtf(__fadd_rn(__shfl_sync(0xffffffff, sum, 0), 1e-6f));
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        y[row * 128 + lane + 32 * j] = values[j] * inv;
+    }
+}
+#endif
+
+// Preserve the portable Torch row-update graph, including separate multiply,
+// reduction and add rounding. The FP32 fast path keeps its original kernel.
+extern "C" __global__ void gdn_chunk_tri_inverse_torch_f32(
+    const float* kb, float* out, int cs) {
+    extern __shared__ float memory[];
+    float* source=memory;
+    float* solved=memory+cs*cs;
+    int t=threadIdx.x;
+    int base=blockIdx.x*cs*cs;
+    for(int j=t;j<cs*cs;j+=blockDim.x) {
+        source[j]=kb[base+j];
+        solved[j]=0.f;
+    }
+    __syncthreads();
+    for(int i=1;i<cs;++i) {
+        if(t<i) {
+            // Torch's small-strided reduction keeps four independent
+            // accumulators per output before combining them left to right.
+            float accum[4]={0.f,0.f,0.f,0.f};
+            for(int j=0;j<i;++j) {
+                float term=__fmul_rn(-source[i*cs+j],solved[j*cs+t]);
+                accum[j%4]=__fadd_rn(accum[j%4],term);
+            }
+            float sum=__fadd_rn(__fadd_rn(__fadd_rn(accum[0],accum[1]),accum[2]),accum[3]);
+            solved[i*cs+t]=__fadd_rn(-source[i*cs+t],sum);
+        }
+        __syncthreads();
+    }
+    for(int j=t;j<cs*cs;j+=blockDim.x)
+        out[base+j]=__fadd_rn(solved[j],(j/cs==j%cs)?1.f:0.f);
+}

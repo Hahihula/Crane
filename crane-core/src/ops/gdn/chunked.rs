@@ -97,6 +97,18 @@ pub fn chunked_recurrence(
 /// Returns an error if `seq_len == 0`, if the inputs' shapes are
 /// inconsistent, or if any underlying tensor op fails.
 #[allow(clippy::many_single_char_names)]
+/// Match Transformers' portable recurrence under CUDA BF16 autocast.
+pub fn chunked_recurrence_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    g: &Tensor,
+    beta: &Tensor,
+    state: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    chunked_recurrence_with_dtype(q, k, v, g, beta, state, 64, Some(DType::BF16))
+}
+
 fn chunked_recurrence_with_cs(
     q: &Tensor,
     k: &Tensor,
@@ -106,21 +118,38 @@ fn chunked_recurrence_with_cs(
     state: &Tensor,
     cs: usize,
 ) -> Result<(Tensor, Tensor)> {
-    let (bh, s, kdim) = q.dims3()?;
-    let vdim = v.dim(2)?;
-    let device = q.device();
+    chunked_recurrence_with_dtype(q, k, v, g, beta, state, cs, None)
+}
 
-    if s == 0 {
-        candle_core::bail!("gdn chunked recurrence: seq_len must be >= 1, got 0");
-    }
-    let cs = cs.min(s);
-    let n_chunks = s.div_ceil(cs);
-    let s_pad = n_chunks * cs;
-    let pad = s_pad - s;
-
+fn chunked_recurrence_with_dtype(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    g: &Tensor,
+    beta: &Tensor,
+    state: &Tensor,
+    cs: usize,
+    mm_dtype: Option<DType>,
+) -> Result<(Tensor, Tensor)> {
+    let mm = |a: &Tensor, b: &Tensor| -> Result<Tensor> {
+        match mm_dtype {
+            Some(dtype) => a.to_dtype(dtype)?.matmul(&b.to_dtype(dtype)?),
+            None => a.matmul(b),
+        }
+    };
     // Zero-pad the tail chunk. Padded rows have beta=0 (so k_beta=v_beta=0)
     // and g=0 (so they add no extra decay to g_cum) — they neither
     // contribute to nor disturb the real rows' state updates, and their
+    let (bh, s, kdim) = q.dims3()?;
+    let vdim = v.dim(2)?;
+    let device = q.device();
+    if s == 0 {
+        candle_core::bail!("gdn chunked recurrence: seq_len must be >= 1, got 0");
+    }
+    let cs = if mm_dtype.is_some() { cs } else { cs.min(s) };
+    let n_chunks = s.div_ceil(cs);
+    let s_pad = n_chunks * cs;
+    let pad = s_pad - s;
     // output is discarded below.
     let (q, k, v, g, beta) = if pad > 0 {
         (
@@ -147,7 +176,7 @@ fn chunked_recurrence_with_cs(
     let mask_strict_lower = mask_lower_diag
         .broadcast_sub(&Tensor::eye(cs, DType::F32, device)?.reshape((1, cs, cs))?)?;
 
-    let g_cum = g.cumsum(1)?; // [B_all, CS], inclusive cumsum of log-decay
+    let g_cum = crate::ops::float_math::cumsum_last_dim(&g)?;
     let g_cum_exp = g_cum.exp()?; // [B_all, CS]
 
     let beta3 = beta.unsqueeze(2)?; // [B_all, CS, 1]
@@ -164,8 +193,10 @@ fn chunked_recurrence_with_cs(
     let decay_strict_lower = decay.broadcast_mul(&mask_strict_lower)?;
 
     let k_t = k.transpose(1, 2)?.contiguous()?; // [B_all, K, CS]
-    let kb = k_beta.matmul(&k_t)?.mul(&decay_strict_lower)?; // [B_all, CS, CS]
-    let kq = q.matmul(&k_t)?.mul(&decay_lower_diag)?; // [B_all, CS, CS]
+    let kb = mm(&k_beta, &k_t)?
+        .to_dtype(DType::F32)?
+        .mul(&decay_strict_lower)?;
+    let kq = mm(&q, &k_t)?.to_dtype(DType::F32)?.mul(&decay_lower_diag)?;
 
     let g_cum_exp3 = g_cum_exp.unsqueeze(2)?; // [B_all, CS, 1]
     let k_beta_g = k_beta.broadcast_mul(&g_cum_exp3)?; // [B_all, CS, K]
@@ -178,10 +209,17 @@ fn chunked_recurrence_with_cs(
 
     // T_inv = (I + kb)^-1. See `build_tri_inverse`: fused kernel on CUDA/ROCm,
     // portable row-by-row fallback elsewhere.
+    #[cfg(feature = "cuda")]
+    let t_inv = if mm_dtype.is_some() && kb.device().is_cuda() {
+        super::cuda_backend::gdn_chunk_tri_inverse_torch_cuda(&kb.contiguous()?)?
+    } else {
+        build_tri_inverse(&kb, cs)?
+    };
+    #[cfg(not(feature = "cuda"))]
     let t_inv = build_tri_inverse(&kb, cs)?;
 
-    let v_corrected = t_inv.matmul(&v_beta)?; // [B_all, CS, V]
-    let k_cd = t_inv.matmul(&k_beta_g)?; // [B_all, CS, K]
+    let v_corrected = mm(&t_inv, &v_beta)?;
+    let k_cd = mm(&t_inv, &k_beta_g)?;
 
     // Unmerge chunks from the batch dim for the sequential inter-chunk loop.
     let v_corrected = v_corrected.reshape((bh, n_chunks, cs, vdim))?;
@@ -201,14 +239,14 @@ fn chunked_recurrence_with_cs(
         let k_gdiff_c = k_gdiff.narrow(1, c, 1)?.squeeze(1)?; // [BH, CS, K]
         let g_last_exp_c = g_last_exp.narrow(1, c, 1)?.squeeze(1)?; // [BH, 1, 1]
 
-        let v_prime = k_cd_c.matmul(&state)?; // [BH, CS, V]
+        let v_prime = mm(&k_cd_c, &state)?;
         let v_new = (v_corrected_c - v_prime)?; // [BH, CS, V]
-        let y_intra = kq_c.matmul(&v_new)?; // [BH, CS, V]
-        let y_inter = q_g_exp_c.matmul(&state)?; // [BH, CS, V]
+        let y_intra = mm(&kq_c, &v_new)?;
+        let y_inter = mm(&q_g_exp_c, &state)?;
         y_chunks.push((y_inter + y_intra)?);
 
-        let kgv = k_gdiff_c.transpose(1, 2)?.contiguous()?.matmul(&v_new)?; // [BH, K, V]
-        state = (state.broadcast_mul(&g_last_exp_c)? + kgv)?;
+        let kgv = mm(&k_gdiff_c.transpose(1, 2)?.contiguous()?, &v_new)?;
+        state = (state.broadcast_mul(&g_last_exp_c)? + kgv.to_dtype(DType::F32)?)?;
     }
 
     let y = Tensor::cat(&y_chunks, 1)?.narrow(1, 0, s)?.contiguous()?;

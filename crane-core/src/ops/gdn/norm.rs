@@ -83,6 +83,25 @@ impl RmsNormGated {
     /// Returns an error if `x` and `gate` have incompatible shapes or
     /// dtypes for the underlying `rms_norm`/activation/multiply ops.
     pub fn forward(&self, x: &Tensor, gate: &Tensor) -> Result<Tensor> {
+        if matches!(
+            x.dtype(),
+            candle_core::DType::BF16 | candle_core::DType::F16
+        ) {
+            let dtype = x.dtype();
+            let xf = x.to_dtype(candle_core::DType::F32)?.contiguous()?;
+            // HF: F32 normalization -> input dtype -> weight multiply in input
+            // dtype -> F32 activation/multiply -> final input dtype.
+            let normalized = crate::ops::float_math::rms_norm(&xf, None, self.eps)?
+                .to_dtype(dtype)?
+                .broadcast_mul(&self.weight.to_dtype(dtype)?)?;
+            let gate = self
+                .activation
+                .apply(&gate.to_dtype(candle_core::DType::F32)?)?;
+            return normalized
+                .to_dtype(candle_core::DType::F32)?
+                .mul(&gate)?
+                .to_dtype(dtype);
+        }
         // Norm before gate (HF order): normalize, scale by weight, then * act(gate).
         let weight = self.weight.to_dtype(x.dtype())?;
         let normalized = candle_nn::ops::rms_norm(&x.contiguous()?, &weight, self.eps)?;

@@ -56,7 +56,12 @@ impl Qwen35RmsNorm {
     /// Returns an error if the `weight` tensor is missing or has an unexpected shape.
     pub fn load(size: usize, eps: f64, vb: &VarBuilder) -> Result<Self> {
         let weight = vb.get(size, "weight")?;
-        Ok(Self::from_folded(weight.affine(1.0, 1.0)?, eps))
+        // HF adds the unit offset in F32, before the final output cast.
+        // Folding in BF16 changes the learned scale by a full low-precision ULP.
+        Ok(Self::from_folded(
+            weight.to_dtype(DType::F32)?.affine(1.0, 1.0)?,
+            eps,
+        ))
     }
 
     /// Construct from a scale that already includes the `+1` unit offset
@@ -78,6 +83,15 @@ impl Module for Qwen35RmsNorm {
         // does require `alpha` to share `x`'s dtype and `x` to be contiguous;
         // both hold already on every call site here, so both conversions are
         // no-op clones rather than kernels.
+        if matches!(x.dtype(), DType::BF16 | DType::F16) {
+            let alpha = self.alpha.to_dtype(DType::F32)?;
+            return crate::ops::float_math::rms_norm(
+                &x.to_dtype(DType::F32)?.contiguous()?,
+                Some(&alpha),
+                self.eps,
+            )?
+            .to_dtype(x.dtype());
+        }
         let alpha = self.alpha.to_dtype(x.dtype())?;
         candle_nn::ops::rms_norm(&x.contiguous()?, &alpha, self.eps)
     }
@@ -133,6 +147,40 @@ impl MRotaryEmbedding {
         mrope_section: &[usize],
         device: &Device,
     ) -> Result<Self> {
+        Self::from_params_with_frequency_dtype(
+            rot_dim,
+            rope_theta,
+            max_pos,
+            mrope_section,
+            device,
+            DType::F32,
+        )
+    }
+
+    /// Match HF's explicit model.to(dtype) cast of nonpersistent RoPE buffers.
+    pub fn new_with_frequency_dtype(
+        cfg: &TextConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        Self::from_params_with_frequency_dtype(
+            cfg.rot_dim(),
+            cfg.rope_theta(),
+            cfg.max_position_embeddings,
+            cfg.mrope_section(),
+            device,
+            dtype,
+        )
+    }
+
+    fn from_params_with_frequency_dtype(
+        rot_dim: usize,
+        rope_theta: f64,
+        max_pos: usize,
+        mrope_section: &[usize],
+        device: &Device,
+        frequency_dtype: DType,
+    ) -> Result<Self> {
         // rope_theta is a positive frequency base (e.g. 10_000 or 10_000_000);
         // computing the RoPE table in f32 matches HF's own float32 rotary math.
         #[allow(clippy::cast_possible_truncation)]
@@ -150,7 +198,9 @@ impl MRotaryEmbedding {
         let inv: Vec<f32> = (0..half_rot)
             .map(|i| 1.0 / base.powf(i as f32 * 2.0 / rot_dim as f32))
             .collect();
-        let inv_freq = Tensor::new(inv.as_slice(), device)?;
+        let inv_freq = Tensor::new(inv.as_slice(), device)?
+            .to_dtype(frequency_dtype)?
+            .to_dtype(DType::F32)?;
 
         let positions: Vec<f32> = (0..max_pos).map(|i| i as f32).collect();
         let positions = Tensor::new(positions.as_slice(), device)?;
@@ -300,6 +350,35 @@ impl MRotaryEmbedding {
 pub fn apply_mrope(x: &Tensor, cos: &Tensor, sin: &Tensor, rot_dim: usize) -> Result<Tensor> {
     let (_b, _h, _seq_len, head_dim) = x.dims4()?;
     let dtype = x.dtype();
+    if matches!(dtype, DType::BF16 | DType::F16) {
+        let half = rot_dim / 2;
+        let seq = x.dim(2)?;
+        let xr = x.narrow(D::Minus1, 0, rot_dim)?;
+        let rotated = Tensor::cat(
+            &[
+                xr.narrow(D::Minus1, half, half)?.neg()?,
+                xr.narrow(D::Minus1, 0, half)?,
+            ],
+            D::Minus1,
+        )?;
+        let cos = Tensor::cat(&[cos, cos], D::Minus1)?
+            .reshape((1, 1, seq, rot_dim))?
+            .to_dtype(dtype)?;
+        let sin = Tensor::cat(&[sin, sin], D::Minus1)?
+            .reshape((1, 1, seq, rot_dim))?
+            .to_dtype(dtype)?;
+        // HF rounds each low-precision product before their low-precision sum.
+        let r = (xr.broadcast_mul(&cos)? + rotated.broadcast_mul(&sin)?)?;
+        return if rot_dim == head_dim {
+            Ok(r)
+        } else {
+            Tensor::cat(
+                &[r, x.narrow(D::Minus1, rot_dim, head_dim - rot_dim)?],
+                D::Minus1,
+            )?
+            .contiguous()
+        };
+    }
     // `cos`/`sin` are kept in f32; the rope op requires its inputs to share a
     // dtype, so for half-precision activations (F16/BF16 on GPU) we rotate in
     // f32 and cast back. This also matches HF, which applies RoPE in float.
@@ -386,6 +465,7 @@ pub struct FullAttention {
     /// Dtype the K/V cache and attention run in when it differs from the
     /// activations' (see [`Self::set_attention_dtype`]); `None` follows them.
     attn_dtype: Option<DType>,
+    flash_causal: bool,
 }
 
 impl FullAttention {
@@ -447,6 +527,7 @@ impl FullAttention {
             head_dim,
             has_output_gate: output_gate,
             attn_dtype: None,
+            flash_causal: false,
         })
     }
 
@@ -511,6 +592,7 @@ impl FullAttention {
             head_dim: dims.head_dim,
             has_output_gate: dims.output_gate,
             attn_dtype: None,
+            flash_causal: false,
         })
     }
 
@@ -602,7 +684,29 @@ impl FullAttention {
         let n_rep = self.num_heads / self.num_kv_heads;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
 
-        let y = if legacy_attn_expand() {
+        #[cfg(feature = "flash-attn")]
+        let flash_output = if self.flash_causal
+            && q.device().is_cuda()
+            && matches!(q.dtype(), DType::BF16 | DType::F16)
+        {
+            Some(
+                candle_flash_attn::flash_attn(
+                    &q.transpose(1, 2)?.contiguous()?,
+                    &k.transpose(1, 2)?.contiguous()?,
+                    &v.transpose(1, 2)?.contiguous()?,
+                    scale as f32,
+                    true,
+                )?
+                .reshape((b_sz, seq_len, self.num_heads * self.head_dim))?,
+            )
+        } else {
+            None
+        };
+        #[cfg(not(feature = "flash-attn"))]
+        let flash_output: Option<Tensor> = None;
+        let y = if let Some(output) = flash_output {
+            output
+        } else if legacy_attn_expand() {
             expanded_sdpa(&q, &k, &v, attention_mask, scale, n_rep)?
         } else {
             grouped_sdpa(&q, &k, &v, attention_mask, scale, n_rep)?
@@ -612,7 +716,8 @@ impl FullAttention {
         // Qwen 3.5 gates the attention output before `o_proj`.
         let y = match gate {
             Some(g) => {
-                let gate = candle_nn::ops::sigmoid(&g.to_dtype(y.dtype())?)?;
+                let gate =
+                    candle_nn::ops::sigmoid(&g.to_dtype(DType::F32)?)?.to_dtype(y.dtype())?;
                 y.broadcast_mul(&gate)?
             },
             None => y,
@@ -691,6 +796,20 @@ fn grouped_sdpa_slice(
     n_rep: usize,
 ) -> Result<Tensor> {
     let (b_sz, num_heads, seq_len, head_dim) = q.dims4()?;
+    if matches!(q.dtype(), DType::BF16 | DType::F16) {
+        // SDPA accumulates QK, softmax and PV in F32, rounding only its
+        // final output. Separate BF16 tensor ops round every intermediate.
+        let mask = mask.map(|m| m.to_dtype(DType::F32)).transpose()?;
+        return grouped_sdpa_slice(
+            &q.to_dtype(DType::F32)?,
+            &k.to_dtype(DType::F32)?,
+            &v.to_dtype(DType::F32)?,
+            mask.as_ref(),
+            scale,
+            n_rep,
+        )?
+        .to_dtype(q.dtype());
+    }
     let (_, kv_heads, cells, _) = k.dims4()?;
     // Heads sharing a KV head are adjacent, so this is a free view.
     let q_g = (q.reshape((b_sz, kv_heads, n_rep * seq_len, head_dim))? * scale)?;
@@ -808,7 +927,13 @@ impl Module for Mlp {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let gate = self.gate.forward(x)?;
         let up = self.up.forward(x)?;
-        let h = crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?;
+        let h = if matches!(gate.dtype(), DType::BF16 | DType::F16) {
+            candle_nn::ops::silu(&gate.to_dtype(DType::F32)?)?
+                .to_dtype(gate.dtype())?
+                .mul(&up)?
+        } else {
+            crate::ops::fused_ops::swiglu::swiglu(&gate, &up)?
+        };
         self.down.forward(&h)
     }
 }
@@ -834,6 +959,15 @@ enum LayerImpl {
 }
 
 impl DecoderLayer {
+    /// Enable fused causal attention. Caller guarantees an unpadded standard
+    /// causal mask; arbitrary masks must retain the default attention path.
+    #[cfg(feature = "flash-attn")]
+    pub fn enable_flash_causal(&mut self) {
+        if let LayerImpl::FullAttention(attention) = &mut self.layer_impl {
+            attention.flash_causal = true;
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if a required weight tensor is missing or has an unexpected shape.

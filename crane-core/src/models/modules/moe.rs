@@ -1429,7 +1429,7 @@ impl SparseMoeBlock {
             .packed_gate_up_exps
             .as_ref()
             .map_or_else(|| "n/a".to_string(), |t| format!("{:?}", t.dtype()));
-        log::trace!(
+        ribo::utils::log::tracing::trace!(
             "MoE layer {}: dispatch={}, expert_device={:?}, dtype={dtype}",
             self.layer_idx,
             self.dispatch_kind(),

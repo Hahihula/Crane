@@ -60,6 +60,32 @@ pub fn l2_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
 /// of `alpha` fails, or the fused `rms_norm` kernel rejects the input shapes.
 pub fn l2_norm_fused(x: &Tensor, alpha: &Tensor, eps: f64) -> Result<Tensor> {
     #[allow(clippy::cast_possible_truncation)]
+    if matches!(x.dtype(), DType::BF16 | DType::F16) {
+        // Under CUDA BF16 autocast, the product rounds in BF16, while sum
+        #[cfg(feature = "cuda")]
+        if x.device().is_cuda()
+            && x.dtype() == DType::BF16
+            && x.dim(D::Minus1)? == 128
+            && eps == 1e-6
+        {
+            return super::cuda_backend::float_math(&x.to_dtype(DType::F32)?, 2);
+        }
+        // promotes to F32; the normalization output therefore stays F32.
+        let sum = x
+            .sqr()?
+            .to_dtype(DType::F32)?
+            .sum_keepdim(D::Minus1)?
+            .affine(1.0, eps)?;
+        #[cfg(feature = "cuda")]
+        let inv = if x.device().is_cuda() {
+            super::cuda_backend::float_math(&sum, 0)?
+        } else {
+            sum.sqrt()?.recip()?
+        };
+        #[cfg(not(feature = "cuda"))]
+        let inv = sum.sqrt()?.recip()?;
+        return x.to_dtype(DType::F32)?.broadcast_mul(&inv);
+    }
     let eps_mean = (eps / x.dim(D::Minus1)? as f64) as f32;
     let alpha = alpha.to_dtype(x.dtype())?;
     candle_nn::ops::rms_norm(&x.contiguous()?, &alpha, eps_mean)
@@ -86,6 +112,10 @@ pub fn l2_alpha(head_k_dim: usize, dtype: DType, device: &candle_core::Device) -
 /// Returns an error if the underlying `exp`, `affine`, or `log` tensor ops
 /// fail.
 pub fn softplus(x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if x.device().is_cuda() && x.dtype() == DType::F32 {
+        return super::cuda_backend::float_math(x, 1);
+    }
     x.exp()?.affine(1.0, 1.0)?.log()
 }
 
@@ -232,15 +262,14 @@ pub fn compute_beta_g(
     b: &Tensor,
     a: &Tensor,
     consts: &GdnGateConsts,
-    dtype: DType,
+    _dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
     // β and g are tiny per-head ops; computed in pure Candle.
-    let beta = candle_nn::ops::sigmoid(b)?;
+    let beta = candle_nn::ops::sigmoid(&b.to_dtype(DType::F32)?)?.to_dtype(b.dtype())?;
     let a_f = a.to_dtype(DType::F32)?;
     let g = consts
         .neg_exp_a_log
-        .broadcast_mul(&softplus(&a_f.broadcast_add(&consts.dt_bias)?)?)?
-        .to_dtype(dtype)?;
+        .broadcast_mul(&softplus(&a_f.broadcast_add(&consts.dt_bias)?)?)?;
     Ok((beta, g))
 }
 
@@ -359,6 +388,11 @@ fn fused_recurrence(
     let use_chunked = seq_len > 1 && std::env::var("CRANE_GDN_SERIAL_PREFILL").is_err();
     let (y, state_out) = timed(Span::GdnLaunch, || {
         if use_chunked {
+            if dtype == DType::BF16 {
+                return super::chunked::chunked_recurrence_bf16(
+                    &q3, &k3, &v3, &g2, &beta2, &state3,
+                );
+            }
             return super::chunked::chunked_recurrence(&q3, &k3, &v3, &g2, &beta2, &state3);
         }
         #[cfg(feature = "cuda")]

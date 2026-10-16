@@ -176,9 +176,10 @@ impl VisionHiddenAct {
     pub fn to_activation(self) -> candle_nn::Activation {
         use candle_nn::Activation;
         match self {
-            // `gelu_pytorch_tanh`: exact GELU with the tanh approximation,
-            // matching nn.GELU(approximate='tanh') used by the Qwen ViT MLP.
-            VisionHiddenAct::Gelu | VisionHiddenAct::GeluPytorchTanh => Activation::Gelu,
+            // Candle Activation::Gelu is erf; HF gelu_pytorch_tanh is tanh.
+            // Keep the two checkpoint activation names distinct.
+            VisionHiddenAct::Gelu => Activation::Gelu,
+            VisionHiddenAct::GeluPytorchTanh => Activation::GeluPytorchTanh,
             VisionHiddenAct::Relu => Activation::Relu,
             VisionHiddenAct::Silu => Activation::Silu,
         }

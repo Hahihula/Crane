@@ -162,6 +162,12 @@ pub fn gdn_recurrence_cuda(
 /// dynamic-shared-memory opt-in), if `kb` is not a contiguous f32 CUDA
 /// tensor, or if the launch fails.
 pub fn gdn_chunk_tri_inverse_cuda(kb: &Tensor) -> Result<Tensor> {
+    tri_inverse(kb, false)
+}
+pub fn gdn_chunk_tri_inverse_torch_cuda(kb: &Tensor) -> Result<Tensor> {
+    tri_inverse(kb, true)
+}
+fn tri_inverse(kb: &Tensor, torch: bool) -> Result<Tensor> {
     let (b_all, cs, cs2) = kb.dims3()?;
     debug_assert_eq!(cs, cs2, "gdn chunk tri inverse: kb must be square");
     if cs > MAX_CHUNK_SIZE {
@@ -188,7 +194,12 @@ pub fn gdn_chunk_tri_inverse_cuda(kb: &Tensor) -> Result<Tensor> {
 
     #[allow(clippy::cast_possible_wrap)]
     let cs_i = cs as i32;
-    let func = dev.get_or_load_custom_func("gdn_chunk_tri_inverse_f32", MODULE_NAME, ptx::GDN)?;
+    let name = if torch {
+        "gdn_chunk_tri_inverse_torch_f32"
+    } else {
+        "gdn_chunk_tri_inverse_f32"
+    };
+    let func = dev.get_or_load_custom_func(name, MODULE_NAME, ptx::GDN)?;
     let mut builder = func.builder();
     builder.arg(&kb_v);
     builder.arg(&t_inv_buf);
@@ -198,6 +209,39 @@ pub fn gdn_chunk_tri_inverse_cuda(kb: &Tensor) -> Result<Tensor> {
     Ok(Tensor::from_storage(
         Storage::Cuda(CudaStorage::wrap_cuda_slice(t_inv_buf, dev)),
         (b_all, cs, cs),
+        BackpropOp::none(),
+        false,
+    ))
+}
+
+/// F32 rsqrt (kind 0) or stable softplus (kind 1), matching Torch math.
+pub fn float_math(xs: &Tensor, kind: i32) -> Result<Tensor> {
+    let xs = xs.contiguous()?;
+    let dev = xs.device().as_cuda_device()?.clone();
+    let (storage, layout) = xs.storage_and_layout();
+    let slice = match &*storage {
+        Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+        _ => candle_core::bail!("gdn math requires CUDA F32"),
+    };
+    let input = slice.slice(layout.start_offset()..);
+    let n = xs.elem_count() as u32;
+    let out = unsafe { dev.alloc::<f32>(n as usize) }?;
+    let name = if kind == 2 {
+        "gdn_l2_bf16_128"
+    } else {
+        "gdn_float_math"
+    };
+    let func = dev.get_or_load_custom_func(name, MODULE_NAME, ptx::GDN)?;
+    let mut builder = func.builder();
+    builder.arg(&input);
+    builder.arg(&out);
+    builder.arg(&n);
+    builder.arg(&kind);
+    let threads = if kind == 2 { n / 4 } else { n };
+    unsafe { builder.launch(LaunchConfig::for_num_elems(threads)) }.w()?;
+    Ok(Tensor::from_storage(
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev)),
+        xs.shape().clone(),
         BackpropOp::none(),
         false,
     ))

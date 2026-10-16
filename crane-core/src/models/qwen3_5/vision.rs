@@ -2,16 +2,19 @@ use std::f64;
 
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{
-    Activation, Embedding, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, embedding,
-    layer_norm, linear,
+    Activation, Embedding, LayerNorm, LayerNormConfig, Module, VarBuilder, embedding, layer_norm,
 };
-
-use crate::models::qwen3_5::conv3d_temporal_2::{Conv3dConfig, Conv3dNoBias};
 
 use super::config::VisionConfig;
 
+// Preserve the original BF16 biased GEMM epilogue and reduction algorithm.
+// The CPU/F32 paths retain Candle's portable linear implementation.
+type Linear = crate::ops::biased_linear::BiasedLinear;
+fn linear(input: usize, output: usize, vb: VarBuilder) -> Result<Linear> {
+    Linear::load(input, output, vb)
+}
 struct PatchEmbed {
-    proj: Conv3dNoBias,
+    proj: Tensor,
     bias: Tensor,
     in_channels: usize,
     patch_size: usize,
@@ -22,16 +25,21 @@ struct PatchEmbed {
 impl PatchEmbed {
     fn new(cfg: &VisionConfig, vb: &VarBuilder) -> Result<Self> {
         let proj_vb = vb.pp("proj");
-        let proj = Conv3dNoBias::new(
-            cfg.in_channels,
-            cfg.hidden_size,
-            [cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size],
-            Conv3dConfig {
-                stride: cfg.patch_size,
-                ..Default::default()
-            },
-            &proj_vb,
-        )?;
+        // Each incoming row is exactly one non-overlapping 3D patch.
+        // A single GEMM preserves Conv3d's F32 accumulation across both
+        // temporal slices, avoiding two independently rounded BF16 Conv2ds.
+        let proj = proj_vb
+            .get(
+                (
+                    cfg.hidden_size,
+                    cfg.in_channels,
+                    cfg.temporal_patch_size,
+                    cfg.patch_size,
+                    cfg.patch_size,
+                ),
+                "weight",
+            )?
+            .reshape((cfg.hidden_size, ()))?;
         let bias = proj_vb.get(cfg.hidden_size, "bias")?;
         Ok(Self {
             proj,
@@ -44,17 +52,12 @@ impl PatchEmbed {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = xs.reshape((
-            (),
-            self.in_channels,
-            self.temporal_patch_size,
-            self.patch_size,
-            self.patch_size,
-        ))?;
-        let xs = self.proj.forward(&xs)?;
-        let xs = xs.reshape(((), self.hidden_size))?;
-        let bias = self.bias.unsqueeze(0)?;
-        xs.broadcast_add(&bias)
+        let width = self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size;
+        let dtype = self.bias.dtype();
+        let xs = xs.reshape(((), width))?.to_dtype(dtype)?;
+        let xs = xs.matmul(&self.proj.t()?)?;
+        // ATen adds Conv3d bias after cuDNN rounds the convolution output.
+        xs.to_dtype(dtype)?.broadcast_add(&self.bias.unsqueeze(0)?)
     }
 }
 
@@ -75,7 +78,10 @@ impl VisionMlp {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = self.fc1.forward(xs)?;
-        let xs = xs.apply(&self.act)?;
+        let xs = xs
+            .to_dtype(DType::F32)?
+            .apply(&self.act)?
+            .to_dtype(xs.dtype())?;
         self.fc2.forward(&xs)
     }
 }
@@ -140,6 +146,9 @@ impl VisionAttention {
         k = k.to_dtype(DType::F32)?;
         v = v.to_dtype(DType::F32)?;
         (q, k) = apply_rotary_pos_emb_vision(&q, &k, &cos, &sin)?;
+        // HF rotates in F32, then rounds Q/K back before attention.
+        q = q.to_dtype(xs.dtype())?.to_dtype(DType::F32)?;
+        k = k.to_dtype(xs.dtype())?.to_dtype(DType::F32)?;
 
         let mut outputs = Vec::new();
         for window in cu_seqlens.windows(2) {
@@ -157,16 +166,38 @@ impl VisionAttention {
                 let q = q_chunk.unsqueeze(0)?;
                 let k = k_chunk.unsqueeze(0)?;
                 let v = v_chunk.unsqueeze(0)?;
-
-                let scale = (self.head_dim as f64).sqrt();
-                let attn_weights = (q.matmul(&k.transpose(2, 3)?)? / scale)?;
-
-                let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-                attn_weights.matmul(&v)?
+                let scale = 1. / (self.head_dim as f64).sqrt();
+                #[cfg(feature = "flash-attn")]
+                let flash =
+                    if xs.device().is_cuda() && matches!(xs.dtype(), DType::BF16 | DType::F16) {
+                        Some(
+                            candle_flash_attn::flash_attn(
+                                &q.to_dtype(xs.dtype())?.transpose(1, 2)?.contiguous()?,
+                                &k.to_dtype(xs.dtype())?.transpose(1, 2)?.contiguous()?,
+                                &v.to_dtype(xs.dtype())?.transpose(1, 2)?.contiguous()?,
+                                scale as f32,
+                                false,
+                            )?
+                            .transpose(1, 2)?
+                            .to_dtype(DType::F32)?,
+                        )
+                    } else {
+                        None
+                    };
+                #[cfg(not(feature = "flash-attn"))]
+                let flash: Option<Tensor> = None;
+                match flash {
+                    Some(output) => output,
+                    None => {
+                        let weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+                        candle_nn::ops::softmax_last_dim(&weights)?.matmul(&v)?
+                    },
+                }
             };
             chunk_out = chunk_out.squeeze(0)?.transpose(0, 1)?;
 
-            chunk_out.device().synchronize()?;
+            // Tensor dependencies are ordered on Candle's CUDA stream.
+            // Synchronize only at the caller's measurement/response boundary.
             chunk_out = chunk_out.reshape((len, self.num_heads * self.head_dim))?;
             outputs.push(chunk_out.to_dtype(xs.dtype())?);
         }
@@ -273,7 +304,9 @@ impl PatchMerger {
             normed.reshape((grouped, self.merged_hidden_size))?
         };
         let xs = self.fc1.forward(&reshaped)?;
-        let xs = xs.gelu()?;
+        // HF PatchMerger uses nn.GELU() (erf), independently of the
+        // configurable tanh GELU used by the vision transformer MLPs.
+        let xs = xs.to_dtype(DType::F32)?.gelu_erf()?.to_dtype(xs.dtype())?;
         self.fc2.forward(&xs)
     }
 }
@@ -302,7 +335,9 @@ impl VisionRotaryEmbedding {
 
     fn make_embeds(&self, seqlen: usize) -> Result<Tensor> {
         let seqlen_f32 = seqlen as f32;
-        let seq = Tensor::arange(0f32, seqlen_f32, self.inv_freq.device())?.unsqueeze(D::Minus1)?;
+        let seq = Tensor::arange(0f32, seqlen_f32, self.inv_freq.device())?
+            .to_dtype(self.inv_freq.dtype())?
+            .unsqueeze(D::Minus1)?;
         seq.broadcast_matmul(&self.inv_freq)
     }
 }
@@ -387,7 +422,15 @@ impl Qwen3_5VisionModel {
         }
         let max_val = (self.num_grid_per_side - 1) as f32;
         let step = max_val / (steps.saturating_sub(1)) as f32;
-        (0..steps).map(|i| i as f32 * step).collect()
+        (0..steps).map(|i| {
+            if i < steps / 2 {
+                i as f32 * step
+            } else {
+                // CUDA linspace works backwards from the endpoint in the
+                // upper half and contracts the multiply/subtract.
+                (-step).mul_add((steps - 1 - i) as f32, max_val)
+            }
+        }).collect()
     }
 
     // This function's length comes from building four separate bilinear-
@@ -481,9 +524,9 @@ impl Qwen3_5VisionModel {
             .iter()
             .map(|weights| Tensor::from_vec(weights.clone(), (weights.len(),), device))
             .collect::<Result<Vec<_>>>()?;
-        let weight_tensor = Tensor::stack(&weight_tensors, 0)?.to_dtype(dtype)?;
+        let weight_tensor = Tensor::stack(&weight_tensors, 0)?;
 
-        let pos_embeds = self.pos_embed.forward(&idx_tensor)?;
+        let pos_embeds = self.pos_embed.forward(&idx_tensor)?.to_dtype(DType::F32)?;
         let pos_embeds = pos_embeds.broadcast_mul(&weight_tensor.unsqueeze(D::Minus1)?)?;
         let pos_embeds = pos_embeds.sum(0)?;
 
@@ -514,7 +557,7 @@ impl Qwen3_5VisionModel {
             permuted.push(pos_embed);
         }
 
-        Tensor::cat(&permuted, 0)
+        Tensor::cat(&permuted, 0)?.to_dtype(dtype)
     }
 
     fn rot_pos_emb(&self, grid_thw: &Tensor) -> Result<Tensor> {
@@ -592,10 +635,26 @@ impl Qwen3_5VisionModel {
     ///
     /// Returns an error if the forward pass fails.
     pub fn forward(&self, xs: &Tensor, grid_thw: &Tensor) -> Result<(Tensor, Vec<Tensor>)> {
+        self.forward_with_callback(xs, grid_thw, |_, _| Ok(()))
+    }
+
+    pub fn set_rotary_buffer_dtype(&mut self, dtype: DType) -> Result<()> {
+        self.rotary_pos_emb.inv_freq = self.rotary_pos_emb.inv_freq.to_dtype(dtype)?;
+        Ok(())
+    }
+
+    pub fn forward_with_callback(
+        &self,
+        xs: &Tensor,
+        grid_thw: &Tensor,
+        mut capture: impl FnMut(usize, &Tensor) -> Result<()>,
+    ) -> Result<(Tensor, Vec<Tensor>)> {
         let dtype = self.pos_embed.embeddings().dtype();
         let xs = self.patch_embed.forward(&xs.to_dtype(dtype)?)?;
+        capture(0, &xs)?;
         let pos_embeds = self.fast_pos_embed_interpolate(grid_thw)?;
         let mut hidden_states = xs.add(&pos_embeds)?;
+        capture(1, &hidden_states)?;
 
         let rotary_pos_emb = self.rot_pos_emb(grid_thw)?;
         let seq_len = hidden_states.dim(0)?;
@@ -609,6 +668,7 @@ impl Qwen3_5VisionModel {
         let mut deepstack_features = Vec::new();
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             hidden_states = block.forward(&hidden_states, &cu_seqlens, &cos, &sin)?;
+            capture(layer_idx + 2, &hidden_states)?;
             if let Some(merger_idx) = self.deepstack_lookup[layer_idx] {
                 let feat = self.deepstack_mergers[merger_idx].forward(&hidden_states)?;
                 deepstack_features.push(feat);
@@ -616,6 +676,7 @@ impl Qwen3_5VisionModel {
         }
 
         let hidden_states = self.merger.forward(&hidden_states)?;
+        capture(self.blocks.len() + 2, &hidden_states)?;
         Ok((hidden_states, deepstack_features))
     }
 }

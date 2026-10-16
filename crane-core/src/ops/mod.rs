@@ -15,6 +15,8 @@
 //! first use.
 
 pub mod fused_ops;
+pub mod float_math;
+pub mod biased_linear;
 pub mod gdn;
 pub mod hyper_connection;
 pub mod linear;

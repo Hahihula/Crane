@@ -1,0 +1,692 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.0
+   Compiling bitflags v2.11.1
+   Compiling log v0.4.29
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling pkg-config v0.3.33
+   Compiling smallvec v1.15.1
+   Compiling equivalent v1.0.2
+   Compiling regex-syntax v0.8.10
+   Compiling stable_deref_trait v1.2.1
+   Compiling rayon-core v1.13.0
+   Compiling hashbrown v0.17.1
+   Compiling either v1.15.0
+   Compiling zeroize v1.8.2
+   Compiling version_check v0.9.5
+   Compiling zerocopy v0.8.48
+   Compiling getrandom v0.3.4
+   Compiling zmij v1.0.21
+   Compiling pin-project-lite v0.2.17
+   Compiling thiserror v2.0.18
+   Compiling fnv v1.0.7
+   Compiling anyhow v1.0.102
+   Compiling strsim v0.11.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling bytes v1.11.1
+   Compiling futures-core v0.3.32
+   Compiling serde_json v1.0.149
+   Compiling paste v1.0.15
+   Compiling futures-sink v0.3.32
+   Compiling dunce v1.0.5
+   Compiling fs_extra v1.3.0
+   Compiling ident_case v1.0.1
+   Compiling tracing-core v0.1.36
+   Compiling ryu v1.0.23
+   Compiling unicode-segmentation v1.13.2
+   Compiling slab v0.4.12
+   Compiling typenum v1.20.0
+   Compiling num-traits v0.2.19
+   Compiling futures-channel v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling cpufeatures v0.3.0
+   Compiling aho-corasick v1.1.4
+   Compiling aws-lc-rs v1.17.1
+   Compiling rustls-pki-types v1.14.1
+   Compiling powerfmt v0.2.0
+   Compiling getrandom v0.4.2
+   Compiling utf8_iter v1.0.4
+   Compiling rand_core v0.10.1
+   Compiling icu_normalizer_data v2.2.0
+   Compiling crc32fast v1.5.0
+   Compiling icu_properties_data v2.2.0
+   Compiling time-core v0.1.8
+   Compiling futures-task v0.3.32
+   Compiling num-conv v0.2.1
+   Compiling num_threads v0.1.7
+   Compiling crossbeam-epoch v0.9.18
+   Compiling deranged v0.5.8
+   Compiling percent-encoding v2.3.2
+   Compiling rustix v1.1.4
+   Compiling itertools v0.14.0
+   Compiling simd-adler32 v0.3.9
+   Compiling indexmap v2.14.0
+   Compiling time-macros v0.2.27
+   Compiling untrusted v0.9.0
+   Compiling http v1.4.0
+   Compiling rustls v0.23.40
+   Compiling parking_lot_core v0.9.12
+   Compiling static_assertions v1.1.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling syn v2.0.117
+   Compiling syn v3.0.6
+   Compiling rustversion v1.0.22
+   Compiling httparse v1.10.1
+   Compiling base64 v0.22.1
+   Compiling signal-hook v0.3.18
+   Compiling tower-service v0.3.3
+   Compiling subtle v2.6.1
+   Compiling atomic-waker v1.1.2
+   Compiling cmov v0.5.4
+   Compiling try-lock v0.2.5
+   Compiling form_urlencoded v1.2.2
+   Compiling generic-array v0.14.7
+   Compiling want v0.3.1
+   Compiling scopeguard v1.2.0
+   Compiling unicase v2.9.0
+   Compiling const-oid v0.10.2
+   Compiling arrayvec v0.7.6
+   Compiling lock_api v0.4.14
+   Compiling pulp v0.22.2
+   Compiling sync_wrapper v1.0.2
+   Compiling ctutils v0.4.2
+   Compiling lazy_static v1.5.0
+   Compiling tower-layer v0.3.3
+   Compiling adler2 v2.0.1
+   Compiling ipnet v2.12.0
+   Compiling webpki-roots v1.0.7
+   Compiling raw-cpuid v11.6.0
+   Compiling miniz_oxide v0.8.9
+   Compiling dyn-stack-macros v0.1.3
+   Compiling same-file v1.0.6
+   Compiling pulp-wasm-simd-flag v0.1.0
+   Compiling reborrow v0.5.5
+   Compiling jobserver v0.1.34
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling rayon v1.12.0
+   Compiling hybrid-array v0.4.13
+   Compiling errno v0.3.14
+   Compiling walkdir v2.5.0
+   Compiling rand_core v0.9.5
+   Compiling cc v1.2.62
+   Compiling http-body v1.0.1
+   Compiling time v0.3.47
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling http-body-util v0.1.3
+   Compiling num_cpus v1.17.0
+   Compiling mime_guess v2.0.5
+   Compiling crossbeam-channel v0.5.17
+   Compiling constant_time_eq v0.4.2
+   Compiling zlib-rs v0.6.6
+   Compiling glob v0.3.3
+   Compiling seq-macro v0.3.6
+   Compiling openssl-probe v0.2.1
+   Compiling regex-automata v0.4.18
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling allocator-api2 v0.2.21
+   Compiling rustls-native-certs v0.8.4
+   Compiling num-integer v0.1.46
+   Compiling sharded-slab v0.1.7
+   Compiling convert_case v0.10.0
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling fastrand v2.4.1
+   Compiling mime v0.3.17
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling nu-ansi-term v0.50.3
+   Compiling option-ext v0.2.0
+   Compiling minimal-lexical v0.2.1
+   Compiling digest v0.10.7
+   Compiling cmake v0.1.58
+   Compiling dirs-sys v0.5.0
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-mio v0.2.5
+   Compiling chacha20 v0.10.1
+   Compiling encoding_rs v0.8.35
+   Compiling tempfile v3.27.0
+   Compiling nom v7.1.3
+   Compiling typewit v1.15.2
+   Compiling env_home v0.1.0
+   Compiling digest v0.11.3
+   Compiling heck v0.5.0
+   Compiling cpufeatures v0.2.17
+   Compiling litrs v1.0.0
+   Compiling rand v0.10.2
+   Compiling sha2 v0.10.9
+   Compiling dirs v6.0.0
+   Compiling num-bigint v0.4.6
+   Compiling sha2 v0.11.0
+   Compiling fs2 v0.4.3
+   Compiling os_str_bytes v6.6.1
+   Compiling ahash v0.8.12
+   Compiling linktime-proc-macro v0.2.3
+   Compiling which v7.0.3
+   Compiling const_panic v0.2.17
+   Compiling colored v3.1.1
+   Compiling iana-time-zone v0.1.65
+   Compiling link-section v0.19.3
+   Compiling aws-lc-sys v0.42.0
+   Compiling onig_sys v69.9.3
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling document-features v0.2.12
+   Compiling blake3 v1.8.7
+   Compiling zstd-safe v7.2.4
+   Compiling konst_proc_macros v0.4.1
+   Compiling utf8parse v0.2.2
+   Compiling symlink v0.1.0
+   Compiling esaxx-rs v0.1.10
+   Compiling unicode-width v0.2.0
+   Compiling anstyle-parse v1.0.0
+   Compiling chrono v0.4.44
+   Compiling inout v0.2.2
+   Compiling ctor v1.0.13
+   Compiling sysinfo v0.38.4
+   Compiling whoami v2.1.3
+   Compiling itertools v0.13.0
+   Compiling as-slice v0.2.1
+   Compiling base64 v0.13.1
+   Compiling macro_rules_attribute-proc_macro v0.2.2
+   Compiling const-str v1.1.0
+   Compiling redb v3.1.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling more-asserts v0.3.1
+   Compiling av-scenechange v0.14.1
+   Compiling anstyle-query v1.1.5
+   Compiling konst v0.4.3
+   Compiling anstyle v1.0.14
+   Compiling oneshot v0.1.13
+   Compiling humantime v2.4.0
+   Compiling twox-hash v2.1.4
+   Compiling colorchoice v1.0.5
+   Compiling built v0.8.0
+   Compiling rustix v0.38.44
+   Compiling lz4_flex v0.13.1
+   Compiling macro_rules_attribute v0.2.2
+   Compiling anstream v1.0.0
+   Compiling aligned v0.4.3
+   Compiling cipher v0.5.2
+   Compiling rayon-cond v0.4.0
+   Compiling hmac v0.13.0
+   Compiling approx v0.5.1
+   Compiling num-rational v0.4.2
+   Compiling uuid v1.23.1
+   Compiling countio v0.3.0
+   Compiling no_std_io2 v0.9.4
+   Compiling nom v8.0.0
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling foldhash v0.2.0
+   Compiling libbz2-rs-sys v0.2.5
+   Compiling quick-error v2.0.1
+   Compiling prettyplease v0.3.0
+   Compiling heapify v0.2.0
+   Compiling cpubits v0.1.1
+   Compiling rav1e v0.8.1
+   Compiling bumpalo v3.20.2
+   Compiling safe-transmute v0.11.3
+   Compiling y4m v0.8.0
+   Compiling foldhash v0.1.5
+   Compiling pastey v0.1.1
+   Compiling cudarc v0.19.8
+   Compiling linux-raw-sys v0.4.15
+   Compiling unicode-width v0.1.14
+   Compiling unicode_categories v0.1.1
+   Compiling zopfli v0.8.3
+   Compiling hashbrown v0.15.5
+   Compiling aes v0.9.1
+   Compiling hashbrown v0.16.1
+   Compiling bitstream-io v4.10.0
+   Compiling darling_core v0.24.1
+   Compiling regex v1.12.3
+   Compiling bstr v1.12.3
+   Compiling matchers v0.2.0
+   Compiling flate2 v1.1.9
+   Compiling bzip2 v0.6.1
+   Compiling statrs v0.18.0
+   Compiling pbkdf2 v0.13.0
+   Compiling synstructure v0.13.2
+   Compiling darling_core v0.20.11
+   Compiling lzma-rust2 v0.16.5
+   Compiling maybe-rayon v0.1.1
+   Compiling sha1 v0.11.0
+   Compiling simd_helpers v0.1.0
+   Compiling libloading v0.9.0
+   Compiling weezl v0.1.12
+   Compiling ppmd-rust v1.4.0
+   Compiling deflate64 v0.1.12
+   Compiling shellexpand v3.1.2
+   Compiling indoc v2.0.7
+   Compiling imgref v1.12.1
+   Compiling urlencoding v2.1.3
+   Compiling typed-path v0.12.3
+   Compiling portable-atomic v1.13.1
+   Compiling strict v0.2.0
+   Compiling thiserror v1.0.69
+   Compiling noop_proc_macro v0.3.0
+   Compiling zune-core v0.5.1
+   Compiling new_debug_unreachable v1.0.6
+   Compiling bit-vec v0.8.0
+   Compiling bit-vec v0.6.3
+   Compiling loop9 v0.1.5
+   Compiling crossterm v0.28.1
+   Compiling lru v0.12.5
+   Compiling unicode-truncate v1.1.0
+   Compiling alloca v0.4.0
+   Compiling compact_str v0.8.2
+   Compiling memmap2 v0.9.10
+   Compiling avif-serialize v0.8.9
+   Compiling zune-inflate v0.2.54
+   Compiling bit-set v0.5.3
+   Compiling bit-set v0.8.0
+   Compiling fdeflate v0.3.7
+   Compiling crossbeam-queue v0.3.14
+   Compiling quick-xml v0.42.0
+   Compiling zune-jpeg v0.5.15
+   Compiling rgb v0.8.53
+   Compiling pxfm v0.1.29
+   Compiling ciborium-io v0.2.2
+   Compiling pulldown-cmark v0.13.4
+   Compiling byteorder-lite v0.1.0
+   Compiling lebe v0.5.3
+   Compiling cassowary v0.3.0
+   Compiling fax v0.2.7
+   Compiling base64 v0.23.1
+   Compiling bit_field v0.10.3
+   Compiling byteorder v1.5.0
+   Compiling gearhash v0.1.4
+   Compiling linked-hash-map v0.5.6
+   Compiling plotters-backend v0.3.7
+   Compiling color_quant v1.1.0
+   Compiling async-trait v0.1.92
+   Compiling serde_repr v0.1.21
+   Compiling clap_lex v1.1.0
+   Compiling yaml-rust v0.4.5
+   Compiling gif v0.14.2
+   Compiling image-webp v0.2.4
+   Compiling png v0.18.1
+   Compiling plotters-svg v0.3.7
+   Compiling clap_builder v4.6.0
+   Compiling crossbeam v0.8.5
+   Compiling fancy-regex v0.13.0
+   Compiling env_filter v2.0.0
+   Compiling getopts v0.2.24
+   Compiling serde_derive v1.0.228
+   Compiling bytemuck_derive v1.10.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling zerocopy-derive v0.8.48
+   Compiling yoke-derive v0.8.2
+   Compiling thiserror-impl v2.0.18
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tokio-macros v2.7.0
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.32
+   Compiling equator-macro v0.4.2
+   Compiling derive_more-impl v2.1.1
+   Compiling git-version-macro v0.3.9
+   Compiling pin-project-internal v1.1.13
+   Compiling darling_macro v0.20.11
+   Compiling monostate-impl v0.1.18
+   Compiling arg_enum_proc_macro v0.3.4
+   Compiling tokio v1.52.3
+   Compiling equator v0.4.2
+   Compiling git-version v0.3.9
+   Compiling profiling-procmacros v1.0.18
+   Compiling bytemuck v1.25.0
+   Compiling derive_more v2.1.1
+   Compiling darling v0.20.11
+   Compiling crossterm v0.29.0
+   Compiling aligned-vec v0.6.4
+   Compiling derive_builder_core v0.20.2
+   Compiling monostate v0.1.18
+   Compiling futures-util v0.3.32
+   Compiling zerofrom v0.1.8
+   Compiling num-derive v0.4.2
+   Compiling profiling v1.0.18
+   Compiling strum_macros v0.26.4
+   Compiling yoke v0.8.2
+   Compiling num-complex v0.4.6
+   Compiling dyn-stack v0.13.2
+   Compiling v_frame v0.3.9
+   Compiling thiserror-impl v1.0.69
+   Compiling moxcms v0.8.1
+   Compiling pin-project v1.1.13
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling darling_macro v0.24.1
+   Compiling qoi v0.4.1
+   Compiling av1-grain v0.2.5
+   Compiling clap_derive v4.6.1
+   Compiling console v0.15.11
+   Compiling bindgen_cuda v0.1.6
+   Compiling tracing v0.1.44
+   Compiling darling v0.24.1
+   Compiling coolor v1.1.0
+   Compiling instability v0.3.14
+   Compiling lazy-regex-proc_macros v3.6.0
+   Compiling bon-macros v3.10.1
+   Compiling minimad v0.14.0
+   Compiling cast v0.3.0
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling derive_builder_macro v0.20.2
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling memo-map v0.3.3
+   Compiling rustc-hash v1.1.0
+   Compiling pulldown-cmark-escape v0.11.0
+   Compiling derive_builder v0.20.2
+   Compiling jiff v0.2.31
+   Compiling fst v0.4.7
+   Compiling lazy-regex v3.6.0
+   Compiling simdutf8 v0.1.5
+   Compiling number_prefix v0.4.0
+   Compiling strength_reduce v0.2.4
+   Compiling indicatif v0.17.11
+   Compiling transpose v0.2.3
+   Compiling tiktoken-rs v0.9.1
+   Compiling crane-core v26.9.0 (/home/lumos1/work/Crane/crane-core)
+   Compiling crokey-proc_macros v1.5.0
+   Compiling criterion-plot v0.8.2
+   Compiling plotters v0.3.7
+   Compiling fancy-regex v0.18.0
+   Compiling globset v0.4.20
+   Compiling primal-check v0.3.4
+   Compiling page_size v0.6.0
+   Compiling pathdiff v0.2.3
+   Compiling daachorse v1.0.1
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling rustfft v6.4.1
+   Compiling icu_provider v2.2.0
+   Compiling strum v0.26.3
+   Compiling ratatui v0.29.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling clap v4.6.1
+   Compiling fancy-regex v0.19.2
+   Compiling serde_urlencoded v0.7.1
+   Compiling tracing-serde v0.2.0
+   Compiling compact_str v0.9.0
+   Compiling spm_precompiled v0.1.4
+   Compiling cudaforge v0.1.6
+   Compiling dary_heap v0.3.9
+   Compiling tracing-subscriber v0.3.23
+   Compiling safetensors v0.8.0
+   Compiling crokey v1.5.0
+   Compiling bincode v1.3.3
+   Compiling plist v1.10.1
+   Compiling termimad v0.34.1
+   Compiling minijinja v2.21.0
+   Compiling tinytemplate v1.2.1
+   Compiling futures-executor v0.3.32
+   Compiling idna_adapter v1.2.2
+   Compiling futures v0.3.32
+   Compiling serde_plain v1.0.2
+   Compiling hound v3.5.1
+   Compiling idna v1.1.0
+   Compiling candle-kernels v0.11.0
+   Compiling url v2.5.8
+   Compiling onig v6.5.3
+   Compiling tracing-appender v0.2.5
+   Compiling ansi-to-tui v7.0.0
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling tokio-retry v0.3.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling env_logger v0.11.11
+   Compiling bon v3.10.1
+   Compiling syntect v5.3.0
+   Compiling rand_chacha v0.9.0
+   Compiling tower-http v0.6.10
+   Compiling h2 v0.4.14
+   Compiling tekken v0.2.0
+   Compiling rand v0.9.4
+   Compiling ravif v0.13.0
+   Compiling rand_distr v0.5.1
+   Compiling tokenizers v0.22.2
+   Compiling tokenizers v0.23.1
+   Compiling minijinja-contrib v2.21.0
+   Compiling half v2.7.1
+   Compiling gemm-common v0.19.0
+   Compiling float8 v0.7.0
+   Compiling ciborium-ll v0.2.2
+   Compiling exr v1.74.0
+   Compiling tiff v0.11.3
+   Compiling zstd v0.13.3
+   Compiling zip v8.6.0
+   Compiling ciborium v0.2.2
+   Compiling gemm-f32 v0.19.0
+   Compiling hyper v1.9.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-f16 v0.19.0
+   Compiling criterion v0.8.2
+   Compiling gemm v0.19.0
+   Compiling hyper-util v0.1.20
+   Compiling image v0.25.10
+   Compiling rustls-webpki v0.103.13
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling reqwest v0.12.28
+   Compiling ribo v0.1.4
+   Compiling xet-runtime v1.6.0
+   Compiling reqwest-middleware v0.5.2
+   Compiling xet-core-structures v1.6.0
+   Compiling xet-client v1.6.0
+   Compiling xet-data v1.6.0
+   Compiling hf-xet v1.6.0
+   Compiling hf-hub v1.0.0
+   Compiling candle-core v0.11.0
+   Compiling candle-nn v0.11.0
+   Compiling candle-transformers v0.11.0
+warning: unused import: `super::*`
+   --> crane-core/src/ops/fused_ops/moe_combine.rs:153:9
+    |
+153 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `candle_core::Device`
+   --> crane-core/src/ops/fused_ops/moe_combine.rs:154:9
+    |
+154 |     use candle_core::Device;
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `CudaDevice`
+ --> crane-core/src/ops/fused_ops/cuda_impl.rs:9:19
+  |
+9 | use candle_core::{CudaDevice, DType, Device, Layout, Result, Shape, Tensor, WithDType};
+  |                   ^^^^^^^^^^
+
+warning: unused import: `self`
+  --> crane-core/src/utils/prof.rs:32:24
+   |
+32 | use ribo::utils::log::{self, tracing};
+   |                        ^^^^
+
+warning: unused import: `CudaDType`
+   --> crane-core/src/ops/fused_ops/cuda_topk.rs:124:41
+    |
+124 |         use candle_core::cuda_backend::{CudaDType, WrapErr};
+    |                                         ^^^^^^^^^
+
+warning: unused import: `candle_core::backend::BackendStorage`
+    --> crane-core/src/ops/fused_ops/fattn_mma.rs:1047:9
+     |
+1047 |     use candle_core::backend::BackendStorage;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD128` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:2:11
+  |
+2 | pub const FATTN_MMA_HD128: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd128.ptx"));
+  |           ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `FATTN_MMA_HD128_BF16` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:3:11
+  |
+3 | pub const FATTN_MMA_HD128_BF16: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd128_bf16.ptx"));
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD256` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:4:11
+  |
+4 | pub const FATTN_MMA_HD256: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd256.ptx"));
+  |           ^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD256_BF16` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:5:11
+  |
+5 | pub const FATTN_MMA_HD256_BF16: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd256_bf16.ptx"));
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD512` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:6:11
+  |
+6 | pub const FATTN_MMA_HD512: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd512.ptx"));
+  |           ^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD512_BF16` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:7:11
+  |
+7 | pub const FATTN_MMA_HD512_BF16: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd512_bf16.ptx"));
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD64` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:8:11
+  |
+8 | pub const FATTN_MMA_HD64: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd64.ptx"));
+  |           ^^^^^^^^^^^^^^
+
+warning: constant `FATTN_MMA_HD64_BF16` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:9:11
+  |
+9 | pub const FATTN_MMA_HD64_BF16: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd64_bf16.ptx"));
+  |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FATTN_TILE_INSTANCES` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:10:11
+   |
+10 | pub const FATTN_TILE_INSTANCES: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_tile_instances.ptx"));
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FUSED_OPS` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:11:11
+   |
+11 | pub const FUSED_OPS: &str = include_str!(concat!(env!("OUT_DIR"), "/fused_ops.ptx"));
+   |           ^^^^^^^^^
+
+warning: constant `GDN` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:12:11
+   |
+12 | pub const GDN: &str = include_str!(concat!(env!("OUT_DIR"), "/gdn.ptx"));
+   |           ^^^
+
+warning: constant `HYPER_CONNECTION` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:13:11
+   |
+13 | pub const HYPER_CONNECTION: &str = include_str!(concat!(env!("OUT_DIR"), "/hyper_connection.ptx"));
+   |           ^^^^^^^^^^^^^^^^
+
+warning: constant `QSA_MASK` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:14:11
+   |
+14 | pub const QSA_MASK: &str = include_str!(concat!(env!("OUT_DIR"), "/qsa_mask.ptx"));
+   |           ^^^^^^^^
+
+warning: constant `QUANT_IQ` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:15:11
+   |
+15 | pub const QUANT_IQ: &str = include_str!(concat!(env!("OUT_DIR"), "/quant_iq.ptx"));
+   |           ^^^^^^^^
+
+warning: constant `QUANT_IQ4` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:16:11
+   |
+16 | pub const QUANT_IQ4: &str = include_str!(concat!(env!("OUT_DIR"), "/quant_iq4.ptx"));
+   |           ^^^^^^^^^
+
+warning: constant `QUANT_TERNARY` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:17:11
+   |
+17 | pub const QUANT_TERNARY: &str = include_str!(concat!(env!("OUT_DIR"), "/quant_ternary.ptx"));
+   |           ^^^^^^^^^^^^^
+
+warning: constant `SNAKE` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:18:11
+   |
+18 | pub const SNAKE: &str = include_str!(concat!(env!("OUT_DIR"), "/snake.ptx"));
+   |           ^^^^^
+
+warning: constant `SWIGLU` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:19:11
+   |
+19 | pub const SWIGLU: &str = include_str!(concat!(env!("OUT_DIR"), "/swiglu.ptx"));
+   |           ^^^^^^
+
+warning: constant `TOPK` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:20:11
+   |
+20 | pub const TOPK: &str = include_str!(concat!(env!("OUT_DIR"), "/topk.ptx"));
+   |           ^^^^
+
+warning: constant `TOPK_MOE` is never used
+  --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:21:11
+   |
+21 | pub const TOPK_MOE: &str = include_str!(concat!(env!("OUT_DIR"), "/topk_moe.ptx"));
+   |           ^^^^^^^^
+
+warning: constant `ATAN2` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:1:11
+  |
+1 | pub const ATAN2: &str = include_str!(concat!(env!("OUT_DIR"), "/atan2.ptx"));
+  |           ^^^^^
+
+warning: constant `FATTN_MMA_HD128` is never used
+ --> /home/lumos1/work/Crane/target/debug/build/crane-core-e187471c48b1c1ba/out/crane_kernels_ptx.rs:2:11
+  |
+2 | pub const FATTN_MMA_HD128: &str = include_str!(concat!(env!("OUT_DIR"), "/fattn_mma_hd128.ptx"));
+  |           ^^^^^^^^^^^^^^^
+
+warning: `crane-core` (lib test) generated 237 warnings (209 duplicates) (run `cargo fix --lib -p crane-core --tests` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 14s
+     Running unittests src/lib.rs (target/debug/deps/crane_core-2bda0187777335b8)
+
+running 1 test
+
+thread 'ops::fused_ops::fattn_mma::gpu_tests::causal_bf16_hd64' (1968108) panicked at crane-core/src/ops/fused_ops/fattn_mma.rs:2123:13:
+[1024] got inf, want 0.0006484157 (bf16 causal, head_dim=64)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test ops::fused_ops::fattn_mma::gpu_tests::causal_bf16_hd64 ... FAILED
+
+failures:
+
+failures:
+    ops::fused_ops::fattn_mma::gpu_tests::causal_bf16_hd64
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 605 filtered out; finished in 0.37s
+
+error: test failed, to rerun pass `-p crane-core --lib`

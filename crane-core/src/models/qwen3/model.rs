@@ -365,7 +365,7 @@ impl Model {
             .unwrap_or(config.max_position_embeddings) as u64;
         let kv_storage = effective_seq_len * config.kv_bytes_per_token(self.dtype.size_in_bytes());
         let runtime_reservation_bytes = crate::device::kv_vram_overhead(kv_storage, max_concurrent);
-        log::trace!(
+        ribo::utils::log::tracing::trace!(
             "KV reservation: vram_ceiling={}, max_concurrent={max_concurrent}, \
              effective_seq_len={effective_seq_len}, kv_storage={} \
              (batch_factor={}, safety_margin={}), runtime_reservation={}",

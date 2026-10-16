@@ -64,8 +64,19 @@ pub fn causal_conv1d(
                 dims.conv_kernel_size
             ))
         })?;
-    let out = shift_accumulate(&hidden, &weight, seq_len, offset)?;
-    candle_nn::ops::silu(&out)?.transpose(1, 2)
+    // CUDA Conv1d accumulates low precision inputs in float, rounding once
+    // before the activation. Rounding every product and partial sum changes
+    // the recurrent state throughout the entire prompt.
+    let out = shift_accumulate(
+        &hidden.to_dtype(candle_core::DType::F32)?,
+        &weight.to_dtype(candle_core::DType::F32)?,
+        seq_len,
+        offset,
+    )?
+    .to_dtype(x.dtype())?;
+    candle_nn::ops::silu(&out.to_dtype(candle_core::DType::F32)?)?
+        .to_dtype(x.dtype())?
+        .transpose(1, 2)
 }
 
 /// Single-token specialization of [`causal_conv1d`], for decode.
@@ -106,8 +117,14 @@ fn decode_conv1d(x: &Tensor, conv1d_weight: &Tensor, cache: &mut GdnLayerCache) 
         .squeeze(1)?
         .to_dtype(window.dtype())?
         .unsqueeze(0)?; // [1, C, kernel]
-    let out = window.broadcast_mul(&w)?.sum_keepdim(2)?; // [B, C, 1]
-    candle_nn::ops::silu(&out)?.transpose(1, 2)
+    let out = window
+        .to_dtype(candle_core::DType::F32)?
+        .broadcast_mul(&w.to_dtype(candle_core::DType::F32)?)?
+        .sum_keepdim(2)?
+        .to_dtype(x.dtype())?; // [B, C, 1]
+    candle_nn::ops::silu(&out.to_dtype(candle_core::DType::F32)?)?
+        .to_dtype(x.dtype())?
+        .transpose(1, 2)
 }
 
 /// `out[.., .., t] = sum_j padded[.., .., offset + t + j] * weight[.., j]`.

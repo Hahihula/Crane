@@ -30,6 +30,7 @@ required-features = ["onnx"]
 ahash = "0.8"
 anyhow = "1.0.97"
 
+candle-flash-attn = { version = "0.11.0", optional = true }
 # Candle backend variants — see `src/candle_backend.rs`. Every variant,
 # including the plain/stock one, is a *renamed* dependency on the underlying
 # `candle-core`/`candle-nn`/`candle-transformers` package (`candle-core-default`,
@@ -147,6 +148,7 @@ cuda = [
     "dep:bindgen_cuda",
 ]
 cudnn = ["candle-core-default/cudnn"]
+flash-attn = ["cuda", "dep:candle-flash-attn"]
 # AMD ROCm/HIP backend (experimental fork). Also enables the fork's own
 # `rocm` feature — it's off by default there too. Build with
 # `--no-default-features`: this crate's `default` feature pulls in the
