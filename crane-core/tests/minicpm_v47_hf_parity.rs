@@ -41,6 +41,8 @@ fn run(fixture: &str, mode: &str) {
         strip_thinking: false,
         enable_thinking: Some(false),
         downsample_mode: Some(mode.to_string()),
+        dspark: None,
+        ..Default::default()
     };
     let text = model
         .generate(Some(&image), PROMPT, &cfg, |_| {})
@@ -105,6 +107,8 @@ fn run_gguf(fixture: &str, mode: &str) {
         strip_thinking: false,
         enable_thinking: Some(false),
         downsample_mode: Some(mode.to_string()),
+        dspark: None,
+        ..Default::default()
     };
     let text = model
         .generate(Some(&image), PROMPT, &cfg, |_| {})

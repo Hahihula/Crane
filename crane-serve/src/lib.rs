@@ -154,6 +154,12 @@ pub struct Args {
     /// full `mmproj-model-f16.gguf` is preferred over the `-4x` one).
     #[arg(long, help_heading = "Model")]
     pub mmproj: Option<String>,
+    /// MiniCPM-V only: enable DSpark speculative decoding with this drafter —
+    /// the `MiniCPM-V-4.7-1B-DSpark` checkpoint directory or a
+    /// `dspark-*.gguf` file. Output is unchanged (greedy verification); only
+    /// the speed differs, mostly on code/math-like text.
+    #[arg(long, help_heading = "Model")]
+    pub dspark: Option<String>,
     /// API key required to access non-exempt endpoints (`/health`,
     /// `/v1/stats`, `/`, and `/ui/*` excluded). Repeatable to configure
     /// multiple valid keys. Pass with no value (`--api-key`) to generate a
@@ -1391,6 +1397,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             );
             let model_path_clone = args.model_path.clone();
             let mmproj_clone = args.mmproj.clone();
+            let dspark_clone = args.dspark.clone();
             let device_clone = device.clone();
             let dtype_clone = dtype;
             let (mcpv_tx, mut mcpv_rx) =
@@ -1422,7 +1429,16 @@ pub async fn run(mut args: Args) -> Result<()> {
                             return;
                         },
                     };
-                    info!("MiniCPM-V-4.6 engine thread started");
+                    if let Some(draft) = &dspark_clone {
+                        match vlm.load_dspark(draft) {
+                            Ok(()) => info!("DSpark speculative decoding enabled ({draft})"),
+                            Err(e) => {
+                                tracing::error!("Failed to load DSpark drafter {draft}: {e:#}");
+                                return;
+                            },
+                        }
+                    }
+                    info!("MiniCPM-V engine thread started");
                     while let Some(req) = mcpv_rx.blocking_recv() {
                         let MinicpmVVlmRequest {
                             img_path,
@@ -1444,9 +1460,25 @@ pub async fn run(mut args: Args) -> Result<()> {
                                 }
                             })?;
                             tracing::info!(
-                                "MiniCPM-V-4.6 request completed in {:?}",
+                                "MiniCPM-V request completed in {:?}",
                                 started.elapsed()
                             );
+                            if let Some(st) = vlm.last_spec_stats() {
+                                tracing::info!(
+                                    "DSpark: {} rounds, {:.2} tokens/round, {} drafts accepted \
+                                     (draft {:.0} ms, verify {:.0} ms, other {:.0} ms); \
+                                     {} plain tokens, {} switches ({:.0} ms)",
+                                    st.rounds,
+                                    st.mean_accept_len(),
+                                    st.accepted_drafts,
+                                    st.draft_secs * 1e3,
+                                    st.verify_secs * 1e3,
+                                    st.other_secs * 1e3,
+                                    st.plain_tokens,
+                                    st.switches,
+                                    st.switch_secs * 1e3,
+                                );
+                            }
                             Ok(out)
                         })();
                         if let Err(ref e) = res {

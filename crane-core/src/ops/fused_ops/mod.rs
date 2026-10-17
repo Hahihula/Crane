@@ -75,3 +75,22 @@ pub mod portable;
 
 #[cfg(not(any(feature = "cuda", feature = "rocm", feature = "sycl")))]
 pub use portable::*;
+
+/// Top-`k` indices of every row of a contiguous f32 `[rows, n]` matrix, as
+/// `[rows, k]`. One pair of launches on CUDA; a per-row loop elsewhere.
+///
+/// # Errors
+///
+/// Returns an error if `x` is not a contiguous f32 matrix or `k` is out of range.
+pub fn topk_indices_rows(x: &candle_core::Tensor, k: usize) -> candle_core::Result<candle_core::Tensor> {
+    #[cfg(feature = "cuda")]
+    if x.device().is_cuda() {
+        return cuda_topk::topk_indices(x, k);
+    }
+    let (rows, _) = x.dims2()?;
+    let per_row = (0..rows)
+        .map(|i| topk_indices(&x.narrow(0, i, 1)?.flatten_all()?.contiguous()?, k)?.unsqueeze(0))
+        .collect::<candle_core::Result<Vec<_>>>()?;
+    candle_core::Tensor::cat(&per_row, 0)
+}
+

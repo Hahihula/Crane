@@ -315,6 +315,19 @@ pub fn apply_recurrence(
     gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)
 }
 
+/// `CRANE_GDN_SERIAL_MAX`: longest pass sent to the serial recurrence kernel
+/// instead of the chunked formulation (default 0); see `fused_recurrence`.
+#[cfg(any(feature = "cuda", feature = "rocm", feature = "sycl"))]
+fn serial_max() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("CRANE_GDN_SERIAL_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Prepare tensors and launch the fused recurrence kernel.
 ///
 /// Lays inputs out as the kernel expects (`[BH, S, *]`, contiguous f32),
@@ -365,52 +378,19 @@ fn fused_recurrence(
     // in prefill it is amortised over the whole prompt. Whether that fixed cost
     // matters is the question `CRANE_PROF` exists to settle, so the two must
     // not be lumped together.
-    let (q3, k3, v3, g2, beta2, state3) = timed(Span::GdnPrep, || -> Result<_> {
+    let (q3, k3, v3, g2, beta2) = timed(Span::GdnPrep, || -> Result<_> {
         let q3 = prep3(q)?.affine(scale, 0.0)?;
         let k3 = prep3(k)?;
         let v3 = prep3(v)?;
         let g2 = prep2(g)?;
         let beta2 = prep2(beta)?;
-        let state3 = cache
-            .recurrent_state
-            .to_dtype(DType::F32)?
-            .reshape((bh, kd, vd))?
-            .contiguous()?;
-        Ok((q3, k3, v3, g2, beta2, state3))
+        Ok((q3, k3, v3, g2, beta2))
     })?;
-
-    // Prefill (seq_len > 1) uses the chunked formulation: the serial kernel's
-    // cost scales with seq_len (one blocking loop iteration per token), while
-    // the chunked path turns that into `seq_len / CS` iterations of batched
-    // matmuls. Decode (seq_len == 1) has nothing to chunk, so it always uses
-    // the serial kernel. `CRANE_GDN_SERIAL_PREFILL=1` forces the serial
-    // kernel for prefill too, for A/B comparison.
-    let use_chunked = seq_len > 1 && std::env::var("CRANE_GDN_SERIAL_PREFILL").is_err();
-    let (y, state_out) = timed(Span::GdnLaunch, || {
-        if use_chunked {
-            if dtype == DType::BF16 {
-                return super::chunked::chunked_recurrence_bf16(
-                    &q3, &k3, &v3, &g2, &beta2, &state3,
-                );
-            }
-            return super::chunked::chunked_recurrence(&q3, &k3, &v3, &g2, &beta2, &state3);
-        }
-        #[cfg(feature = "cuda")]
-        {
-            super::cuda_backend::gdn_recurrence_cuda(&q3, &k3, &v3, &g2, &beta2, &state3)
-        }
-        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
-        {
-            super::rocm_backend::gdn_recurrence_rocm(&q3, &k3, &v3, &g2, &beta2, &state3)
-        }
-        #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
-        {
-            super::sycl_backend::gdn_recurrence_sycl(&q3, &k3, &v3, &g2, &beta2, &state3)
-        }
-    })?;
+    let y = recurrence_prepped(
+        &q3, &k3, &v3, &g2, &beta2, dims, batch_size, seq_len, cache, dtype,
+    )?;
 
     timed(Span::GdnPost, || {
-        cache.recurrent_state = state_out.reshape((batch_size, hv, kd, vd))?;
         // [BH, S, V] -> [B, Hv, S, V] -> [B, S, Hv, V], back to model dtype. Cast
         // before the copy for the same reason `prep3` casts after it: the narrower
         // side of the conversion is the one worth materialising.
@@ -419,6 +399,75 @@ fn fused_recurrence(
             .to_dtype(dtype)?
             .contiguous()
     })
+}
+
+/// Run the recurrence on tensors already in the kernel layout (`q3`, `k3`:
+/// `[BH, S, K]`; `v3`: `[BH, S, V]`; `g2`, `beta2`: `[BH, S]`; all contiguous
+/// f32, `q3` pre-scaled by `1/sqrt(K)`), advancing `cache.recurrent_state`.
+/// Returns `y: [BH, S, V]` f32.
+#[cfg(any(feature = "cuda", feature = "rocm", feature = "sycl"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn recurrence_prepped(
+    q3: &Tensor,
+    k3: &Tensor,
+    v3: &Tensor,
+    g2: &Tensor,
+    beta2: &Tensor,
+    dims: &GdnDims,
+    batch_size: usize,
+    seq_len: usize,
+    cache: &mut GdnLayerCache,
+    dtype: DType,
+) -> Result<Tensor> {
+    use crate::utils::prof::{Span, timed};
+
+    let (hv, kd, vd) = (dims.num_v_heads, dims.head_k_dim, dims.head_v_dim);
+    let bh = batch_size * hv;
+    let state3 = cache
+        .recurrent_state
+        .to_dtype(DType::F32)?
+        .reshape((bh, kd, vd))?
+        .contiguous()?;
+
+    // Prefill (seq_len > 1) uses the chunked formulation: the serial kernel's
+    // cost scales with seq_len (one blocking loop iteration per token), while
+    // the chunked path turns that into `seq_len / CS` iterations of batched
+    // matmuls. Decode (seq_len == 1) has nothing to chunk, so it always uses
+    // the serial kernel. `CRANE_GDN_SERIAL_PREFILL=1` forces the serial
+    // kernel for prefill too, for A/B comparison.
+    //
+    // Short speculative-decoding verification blocks opt in to the serial
+    // kernel (`cache.prefer_serial`): it is one launch where the chunked
+    // path is dozens, and its f32 math makes splitting a pass at a checkpoint
+    // exact. `CRANE_GDN_SERIAL_MAX` (default 0 = off) extends that to every
+    // pass up to that length.
+    let use_chunked = seq_len > 1
+        && !cache.prefer_serial
+        && seq_len > serial_max()
+        && std::env::var("CRANE_GDN_SERIAL_PREFILL").is_err();
+    let (y, state_out) = timed(Span::GdnLaunch, || {
+        if use_chunked {
+            if dtype == DType::BF16 {
+                return super::chunked::chunked_recurrence_bf16(q3, k3, v3, g2, beta2, &state3);
+            }
+            return super::chunked::chunked_recurrence(q3, k3, v3, g2, beta2, &state3);
+        }
+        #[cfg(feature = "cuda")]
+        {
+            super::cuda_backend::gdn_recurrence_cuda(q3, k3, v3, g2, beta2, &state3)
+        }
+        #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+        {
+            super::rocm_backend::gdn_recurrence_rocm(q3, k3, v3, g2, beta2, &state3)
+        }
+        #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
+        {
+            super::sycl_backend::gdn_recurrence_sycl(q3, k3, v3, g2, beta2, &state3)
+        }
+    })?;
+
+    cache.recurrent_state = state_out.reshape((batch_size, hv, kd, vd))?;
+    Ok(y)
 }
 
 // ─────────────────────────────────────────────────────────────────────

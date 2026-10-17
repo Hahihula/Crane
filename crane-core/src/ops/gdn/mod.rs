@@ -45,6 +45,8 @@ mod config;
 mod conv;
 #[cfg(feature = "cuda")]
 mod cuda_backend;
+#[cfg(feature = "cuda")]
+mod gdn_fused;
 mod layer;
 mod norm;
 mod projection;

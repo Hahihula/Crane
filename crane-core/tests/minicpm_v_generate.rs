@@ -44,6 +44,8 @@ fn minicpm_v_generate_is_coherent() {
         strip_thinking: false,
         enable_thinking: None,
         downsample_mode: None,
+        dspark: None,
+        ..Default::default()
     };
     let text = model
         .generate(

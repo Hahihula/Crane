@@ -263,6 +263,21 @@ MODELS = {
         },
         "description": "MiniCPM-V 4.7 1B, GGUF LLM quant + mmproj vision projector, embedded tokenizer (Apache-2.0)",
     },
+    "minicpm-v-4.7-dspark": {
+        "repo_id": "openbmb/MiniCPM-V-4.7-1B-DSpark",
+        "dirname": "MiniCPM-V-4.7-1B-DSpark",
+        "kind": "vlm",
+        "usage_hint": "crane-serve --model-path <MiniCPM-V-4.7-1B dir> --dspark {target}",
+        "description": "DSpark speculative-decoding draft heads for MiniCPM-V 4.7 1B, BF16 (Apache-2.0); pass to crane-serve --dspark",
+    },
+    "minicpm-v-4.7-dspark-gguf": {
+        "repo_id": "openbmb/MiniCPM-V-4.7-1B-DSpark-gguf",
+        "dirname": "MiniCPM-V-4.7-1B-DSpark-gguf",
+        "kind": "vlm",
+        "quant_template": "dspark-MiniCPM-V-4_7-1B-{quant}.gguf",
+        "usage_hint": "crane-serve --model-path <MiniCPM-V-4.7-1B GGUF> --dspark {target}",
+        "description": "DSpark speculative-decoding draft heads for MiniCPM-V 4.7 1B, GGUF quant (Apache-2.0); pass to crane-serve --dspark",
+    },
     "minicpm-o-4.5": {
         "repo_id": "openbmb/MiniCPM-o-4_5",
         "dirname": "MiniCPM-o-4_5",
