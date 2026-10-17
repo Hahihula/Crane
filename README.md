@@ -89,6 +89,7 @@ We include:
 
 ## 🔥 Updates
 
+- **`2026.10.17`**: 👁️ **MiniCPM-V 4.7 (1B) support** — safetensors *and* llama.cpp GGUF (`MiniCPM-V-4_7-1B-*.gguf` + `mmproj-model-f16.gguf`, no `config.json`/`tokenizer.json` needed). Reuses the 4.6 vision tower and the Qwen 3.5 hybrid decoder; new is **canvas M-RoPE** (images are laid on a 2D canvas, thumbnail stretched over the slice grid — position ids match HF `get_rope_index` exactly) and the **`4x`** visual-token mode (skips the mid-ViT window merger). On `test_chart.png`, greedy output matches HF-f32 token-for-token in f32 (16x), and HF-bf16 in 4x/bf16; GGUF Q8_0 + mmproj tracks HF for the full 64 tokens in 4x. Text decode on an RTX 3090 (pp512, tg64, 1B): **~120 t/s BF16**, **~200 t/s Q8_0 / Q4_K_M** at 2–3 GiB VRAM. See [the MiniCPM-V section](#minicpm-v-46--47-vision-language) below.
 - **`2026.09.21`**: 🌳 **Heavyweight support for Bonsai 2 Ternary 27B!** Crane now loads Prism's PTQ1_0 (GGUF type 143) and PQ2_0 (type 142) files directly, auto-detects the ternary format, and routes only the affected weights through a modular `TernaryLinear` backend. Native CPU and CUDA kernels cover ternary matvec, normalized blockwise Hadamard transforms, and Qwen 3.5 GDN value-head regrouping; ordinary GGUF models continue through the existing Candle path. No Candle fork or dependency patch is required. The same GGUF works in `chat_cli` and the OpenAI/SGLang-compatible `crane-serve`.
 - **`2026.09.15`**: 🍎 **KugelAudio Metal support verified + Q4_0 in-situ quantization for low-VRAM/low-RAM.** Metal was already wired up at the device-selection level; added Metal-specific regression tests (conv tokenizer encoder/decoder, decoder backbone, diffusion head, DPM-Solver++ scheduler) confirming no CUDA-only code paths anywhere in the port. New `--quant q4_0` (any `GgmlDType`, or `CRANE_ISQ`) in-situ-quantizes the ~7B-parameter Qwen2 decoder's Q/K/V/O and MLP projections as they load — `quantize_linear_onto` reads each tensor from a CPU-scoped `VarBuilder` and quantizes it directly onto the target device, so the transient bf16/f16 weight never occupies target-device (GPU/unified) memory, only the much smaller quantized buffer does. `embed_tokens`/`lm_head` (untied, ~1 GB each in F16) stay dense — candle's `QTensor::quantize` on their 152064-row shape was observed to spike memory disproportionately. Covered by 32 unit tests (CPU + Metal, synthetic weights) including a numeric quantized-vs-unquantized sanity check; **loading the real ~18.7GB checkpoint end-to-end has not been verified on a memory-constrained machine** — see `example/kugelaudio_simple.rs`'s doc comment.
 - **`2026.08.16`**: 🧠 **Qwen 3.8 / Qwen 3.6 (27B) support + flexible thinking control.** Both declare `model_type: "qwen3_5"` and convert to GGUF as `qwen35`, so they are the Qwen 3.5 architecture scaled up (64 layers, 24 q / 4 KV heads, 48 GDN value heads, untied `lm_head`) and need **no new modeling code** — every difference is a config value. Thinking is now controllable per request via `chat_template_kwargs: {"enable_thinking": …, "reasoning_effort": "low|medium|xhigh"}` (or OpenAI's top-level `reasoning_effort`), and the `<think>` scratchpad is separated out of `content` into **`reasoning_content`**, streaming included. 🗜️ GGUF embedding tables now stay quantized and dequantize only the rows a forward pass gathers, instead of expanding all 248320 of them at load: **1772 MiB saved** on Qwen 3.8-27B Q4_K_M (peak 22007 → 20235 MiB), bit-exact on untied checkpoints (prefill logits cosine `1.000000000`). Qwen 3.8-27B Q4_K_M runs text-only on a single 24 GB RTX 3090.
@@ -699,6 +700,37 @@ experts cost mostly per chunk, but a chunk's temporaries must fit in the
 in RAM: ~15 tok/s decode on short prompts, ~10 tok/s at 4k context and ~4 tok/s
 at 20k; prefill ~120–130 tok/s (a 20k-token prompt in under 3 minutes). Text only for now; the vision tower (`mmproj`) and the MTP
 head are not loaded.
+
+### MiniCPM-V 4.6 / 4.7 (vision-language)
+
+MiniCPM-V pairs a NaViT SigLIP-style vision tower (mid-stack window merger +
+hierarchical downsample merger) with Qwen 3.5's hybrid GDN/attention decoder.
+4.7 (1B) adds canvas M-RoPE, a `4x` mode that keeps 4× more visual tokens for
+fine detail (`16x` is the default), and an instruct-mode prompt that
+pre-closes the think block (`enable_thinking=false`).
+
+```bash
+# download (safetensors, or a GGUF quant + the mmproj it needs)
+./data/crane-model-download --model minicpm-v-4.7 --path ~/models
+./data/crane-model-download --model minicpm-v-4.7-gguf --path ~/models --quant Q8_0
+
+# serve — the checkpoint dir, or the GGUF (the mmproj*.gguf beside it is
+# found automatically; pass --mmproj to point elsewhere)
+crane-serve --model-path ~/models/vlm/MiniCPM-V-4.7-1B
+crane-serve --model-path ~/models/vlm/MiniCPM-V-4.7-1B-gguf/MiniCPM-V-4_7-1B-Q8_0.gguf
+```
+
+Requests use OpenAI `image_url` parts (URL or `data:image/...;base64,…`);
+at least one image is required on this route. A MiniCPM-V LLM GGUF is a plain
+`qwen35` file — it is routed to the vision loader because a MiniCPM-V
+`mmproj*.gguf` sits beside it (or force it with `--model-type minicpmv46`).
+`mmproj-model-f16.gguf` serves both `16x` and `4x`; the `-4x` file only `4x`.
+
+Tests: `cargo test -p crane-core --lib minicpm_v` (position-id and mmproj
+name-mapping unit tests, no weights needed); HF parity via
+`CRANE_MINICPM_V47_DIR=<dir> cargo test -p crane-core --features cuda --test minicpm_v47_hf_parity -- --ignored`
+(GGUF variants: `CRANE_MINICPM_V47_GGUF` + `CRANE_MINICPM_V47_MMPROJ`). The
+speculative-decoding DSpark draft heads are not supported yet.
 
 ### MuScriptor (Automatic Music Transcription)
 

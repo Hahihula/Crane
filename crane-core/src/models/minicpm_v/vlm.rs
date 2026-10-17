@@ -1,12 +1,13 @@
-//! MiniCPM-V-4.6 vision-language model.
+//! MiniCPM-V-4.6 / 4.7 vision-language model.
 //!
 //! Glues [`super::vision::VisionModel`] + [`super::merger::Merger`] onto
 //! [`Qwen3_5TextModel`] — MiniCPM-V-4.6's text backbone is Qwen 3.5's hybrid
 //! GDN/full-attention decoder, reused here **unmodified** (see
-//! `super::config` module docs). Unlike Qwen 3.5-VL, no MRoPE/grid position
-//! math is needed: HF's own `MiniCPMV4_6Model.forward` just uses plain
-//! sequential positions, so the `[3, S]` position tensor `forward_embeds`
-//! expects is simply three identical rows.
+//! `super::config` module docs). 4.6 needs no MRoPE/grid position math: HF's
+//! own `MiniCPMV4_6Model.forward` just uses plain sequential positions, so the
+//! `[3, S]` position tensor `forward_embeds` expects is simply three identical
+//! rows. 4.7 (`mrope_mode: "canvas"`) lays images on a 2D canvas instead — see
+//! [`super::canvas_rope`] — and decode positions are `cache_len + rope_delta`.
 //!
 //! Forward flow mirrors [`crate::models::qwen3_5::vlm::Qwen3_5VLModel`]:
 //! 1. Preprocess the image (`super::preprocess`) -> packed pixel values +
@@ -25,8 +26,10 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
+use super::canvas_rope::{CanvasTokenIds, canvas_position_ids};
 use super::config::{Config, load_config};
 use super::merger::Merger;
+use super::mmproj_gguf::load_mmproj;
 use super::preprocess::{
     self, PlaceholderTokens, PreprocessorConfig, ProcessedImage, build_placeholder,
     downsample_divisor, load_preprocessor_config,
@@ -43,6 +46,14 @@ pub struct VlGenerationConfig {
     /// Strip a leading `<think> … </think>` block from the returned string
     /// (still generated/streamed, just not included in the final text).
     pub strip_thinking: bool,
+    /// `Some(false)` pre-closes the think block in the generation prompt
+    /// (`<think>\n\n</think>\n\n`, the 4.7 instruct default); `Some(true)`
+    /// opens it (`<think>\n`); `None` uses the model default (4.7: off,
+    /// 4.6: legacy prompt with no think tag at all).
+    pub enable_thinking: Option<bool>,
+    /// Per-call override of the checkpoint's `downsample_mode` (`"16x"` or
+    /// `"4x"`); `None` keeps the config value.
+    pub downsample_mode: Option<String>,
 }
 
 impl Default for VlGenerationConfig {
@@ -50,6 +61,8 @@ impl Default for VlGenerationConfig {
         Self {
             max_new_tokens: 512,
             strip_thinking: true,
+            enable_thinking: None,
+            downsample_mode: None,
         }
     }
 }
@@ -83,6 +96,8 @@ fn load_placeholder_tokens(model_path: &str) -> Result<PlaceholderTokens> {
     })
 }
 
+/// Serves both MiniCPM-V-4.6 and 4.7 (the name predates 4.7; 4.7 differs only
+/// in canvas M-RoPE, the prompt template, and the `"4x"` mode being exercised).
 pub struct MinicpmV46VLModel {
     pub tokenizer: TokenOutputStream,
     pub device: Device,
@@ -91,7 +106,15 @@ pub struct MinicpmV46VLModel {
     pub preprocessor: PreprocessorConfig,
     placeholder_tokens: PlaceholderTokens,
     downsample_divisor: usize,
+    /// `downsample_divisor` from `config.json`, restored when a call doesn't
+    /// override the mode.
+    config_divisor: usize,
     use_image_id: bool,
+    /// `Some` for 4.7 checkpoints (`mrope_mode: "canvas"`).
+    canvas_ids: Option<CanvasTokenIds>,
+    /// Offset added to the cache length to get a decode token's position;
+    /// set by the last prefill (0 for text-only / sequential-position models).
+    rope_delta: i64,
     eos_token_ids: Vec<u32>,
     vision: VisionModel,
     merger: Merger,
@@ -170,7 +193,139 @@ impl MinicpmV46VLModel {
             preprocessor,
             placeholder_tokens,
             downsample_divisor: downsample_divisor(&cfg),
+            config_divisor: downsample_divisor(&cfg),
             use_image_id,
+            canvas_ids: cfg.canvas_token_ids(),
+            rope_delta: 0,
+            eos_token_ids,
+            vision,
+            merger,
+            text,
+        })
+    }
+
+    /// Load from llama.cpp files: a `qwen35`-arch LLM GGUF (any quant) plus
+    /// the matching `mmproj-*.gguf` vision projector. No `config.json`,
+    /// `tokenizer.json` or safetensors needed — the tokenizer comes from the
+    /// LLM GGUF, the marker token ids from its vocab, and the vision config
+    /// from the mmproj metadata.
+    ///
+    /// `dtype` is the vision tower's compute dtype; the text model picks its
+    /// own (see `Qwen3_5TextModel::from_gguf`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either file can't be read or isn't the expected
+    /// kind, if the vocab lacks the image marker tokens, or if building the
+    /// vision tower, merger or text model fails.
+    pub fn from_gguf(
+        llm_gguf: &str,
+        mmproj_gguf: &str,
+        device: &Device,
+        dtype: &DType,
+    ) -> Result<Self> {
+        let gguf_path = std::path::Path::new(llm_gguf);
+        let mmap = crate::quantized::gguf_file::mmap_gguf_file(gguf_path)
+            .with_context(|| format!("mmap GGUF file {llm_gguf}"))?;
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let (ct, extended) = crate::quantized::extended_gguf::read_content(mmap.as_ref())?;
+        let tokenizer = crate::utils::tokenizer_utils::resolve_gguf_tokenizer(&ct, gguf_path)?;
+
+        let proj = load_mmproj(std::path::Path::new(mmproj_gguf), device, *dtype)
+            .context("load mmproj")?;
+        // 4.7's projector uses canvas M-RoPE; 4.6's keeps sequential positions.
+        let canvas = proj.projector_type == "minicpmv4_7";
+        let divisor = if proj.scale_factor == 2 { 4 } else { 16 };
+
+        let id_of = |tok: &str| -> Result<u32> {
+            tokenizer
+                .token_to_id(tok)
+                .with_context(|| format!("vocab has no {tok:?} token"))
+        };
+        let placeholder_tokens = PlaceholderTokens {
+            image_token: "<|image_pad|>".into(),
+            image_start_token: "<image>".into(),
+            image_end_token: "</image>".into(),
+            slice_start_token: "<slice>".into(),
+            slice_end_token: "</slice>".into(),
+            image_id_start_token: "<image_id>".into(),
+            image_id_end_token: "</image_id>".into(),
+        };
+        let image_token_id = id_of("<|image_pad|>")?;
+        let canvas_ids = if canvas {
+            let newline = tokenizer
+                .encode("\n", false)
+                .map_err(E::msg)?
+                .get_ids()
+                .first()
+                .copied()
+                .context("tokenizer produced no id for \\n")?;
+            Some(CanvasTokenIds {
+                image_start: id_of("<image>")?,
+                image_end: id_of("</image>")?,
+                slice_start: id_of("<slice>")?,
+                slice_end: id_of("</slice>")?,
+                newline,
+            })
+        } else {
+            None
+        };
+
+        let eos_token_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"]
+            .iter()
+            .filter_map(|t| tokenizer.token_to_id(t))
+            .collect();
+        if eos_token_ids.is_empty() {
+            anyhow::bail!("tokenizer has neither <|im_end|> nor <|endoftext|>");
+        }
+
+        eprintln!(
+            "[minicpm_v] GGUF: projector={} scale_factor={} insert_layer_id={}",
+            proj.projector_type, proj.scale_factor, proj.insert_layer_id
+        );
+        let vision = VisionModel::new(
+            &proj.vision_config,
+            proj.insert_layer_id,
+            (2, 2),
+            &proj.vb.pp("model").pp("vision_tower"),
+        )
+        .context("build vision tower")?;
+        let merger = Merger::with_dims(
+            proj.vision_config.hidden_size,
+            proj.projection_dim,
+            (2, 2),
+            1,
+            &proj.vb.pp("model").pp("merger"),
+        )
+        .context("build merger")?;
+
+        let text = if extended.is_empty() {
+            Qwen3_5TextModel::from_gguf(ct, &mut cursor, device)?
+        } else {
+            Qwen3_5TextModel::from_gguf_extended(ct, &mut cursor, device, extended)?
+        };
+
+        let preprocessor = PreprocessorConfig {
+            max_slice_nums: proj.max_slice_nums.unwrap_or(9),
+            scale_resolution: 448,
+            patch_size: proj.vision_config.patch_size,
+            slice_mode: true,
+            use_image_id: true,
+            image_mean: proj.image_mean,
+            image_std: proj.image_std,
+        };
+        Ok(Self {
+            tokenizer: TokenOutputStream::new(tokenizer),
+            device: device.clone(),
+            dtype: *dtype,
+            image_token_id,
+            preprocessor,
+            placeholder_tokens,
+            downsample_divisor: divisor,
+            config_divisor: divisor,
+            use_image_id: true,
+            canvas_ids,
+            rope_delta: 0,
             eos_token_ids,
             vision,
             merger,
@@ -196,7 +351,7 @@ impl MinicpmV46VLModel {
     ) -> Result<Tensor> {
         let (vision_out, downsampled_sizes) = self
             .vision
-            .forward(pixel_values, target_sizes)
+            .forward(pixel_values, target_sizes, self.downsample_divisor == 16)
             .context("vision forward")?;
         self.merger
             .forward(&vision_out, &downsampled_sizes)
@@ -228,7 +383,6 @@ impl MinicpmV46VLModel {
             _ => None,
         };
 
-        let (_b, seq_len) = input_ids.dims2()?;
         let mut hidden_states = self.text.embed_only(input_ids)?;
 
         if let Some(img_emb) = image_embeds {
@@ -236,15 +390,40 @@ impl MinicpmV46VLModel {
                 splice_image_features(input_ids, &hidden_states, &img_emb, self.image_token_id)?;
         }
 
-        // No MRoPE grid needed (see module docs) — all three axes share the
-        // plain sequential position.
-        let flat: Vec<u32> = (0..seq_len)
-            .flat_map(|i| std::iter::repeat_n((start_pos + i) as u32, 3))
-            .collect();
-        let position_ids = Tensor::from_vec(flat, (3, seq_len), &self.device)?;
+        let position_ids = self.prefill_positions(input_ids, target_sizes, start_pos)?;
 
         self.text
             .forward_embeds(&hidden_states, &position_ids, start_pos, None)
+    }
+
+    /// `[3, S]` position ids for a prefill chunk, recording `rope_delta`.
+    ///
+    /// Canvas models (4.7) lay images on a 2D canvas on the first chunk;
+    /// everything else (4.6, text-only turns) is plain sequential positions.
+    fn prefill_positions(
+        &mut self,
+        input_ids: &Tensor,
+        target_sizes: Option<&[(usize, usize)]>,
+        start_pos: usize,
+    ) -> Result<Tensor> {
+        let seq_len = input_ids.dim(1)?;
+        if let (Some(ids), Some(sizes), 0) = (&self.canvas_ids, target_sizes, start_pos) {
+            let tokens = input_ids.flatten_all()?.to_vec1::<u32>()?;
+            let merge = if self.downsample_divisor == 4 { 2 } else { 4 };
+            let canvas = canvas_position_ids(&tokens, self.image_token_id, sizes, ids, merge);
+            self.rope_delta = canvas.rope_deltas;
+            let flat: Vec<i64> = canvas.position_ids.into_iter().flatten().collect();
+            let flat: Vec<u32> = flat.into_iter().map(|p| p as u32).collect();
+            return Ok(Tensor::from_vec(flat, (3, seq_len), &self.device)?);
+        }
+        if start_pos == 0 {
+            self.rope_delta = 0;
+        }
+        let base = start_pos as i64 + self.rope_delta;
+        let flat: Vec<u32> = (0..seq_len)
+            .flat_map(|i| std::iter::repeat_n((base + i as i64) as u32, 3))
+            .collect();
+        Ok(Tensor::from_vec(flat, (3, seq_len), &self.device)?)
     }
 
     /// Decode one new token. The KV cache must already hold the prefill.
@@ -256,7 +435,7 @@ impl MinicpmV46VLModel {
     pub fn decode_step(&mut self, token: u32, start_pos: usize) -> Result<Tensor> {
         let input = Tensor::from_vec(vec![token], (1usize, 1usize), &self.device)?;
         let hidden = self.text.embed_only(&input)?;
-        let p = start_pos as u32;
+        let p = (start_pos as i64 + self.rope_delta) as u32;
         let pos = Tensor::from_vec(vec![p, p, p], (3usize, 1usize), &self.device)?;
         self.text.forward_embeds(&hidden, &pos, start_pos, None)
     }
@@ -283,6 +462,7 @@ impl MinicpmV46VLModel {
         &self,
         image: Option<&image::DynamicImage>,
         user_text: &str,
+        enable_thinking: Option<bool>,
     ) -> Result<(Vec<u32>, Option<ProcessedImage>)> {
         let processed = image
             .map(|img| preprocess::process_image(img, &self.preprocessor, &self.device, self.dtype))
@@ -301,8 +481,17 @@ impl MinicpmV46VLModel {
             },
             None => user_text.to_string(),
         };
-        let rendered =
-            format!("<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n");
+        // 4.7's template defaults to instruct mode (`enable_thinking=False`):
+        // the generation prompt carries a pre-closed empty think block. 4.6's
+        // legacy prompt carries no think tag at all.
+        let think_tag = match enable_thinking.or(self.canvas_ids.map(|_| false)) {
+            Some(false) => "<think>\n\n</think>\n\n",
+            Some(true) => "<think>\n",
+            None => "",
+        };
+        let rendered = format!(
+            "<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n{think_tag}"
+        );
 
         let base = self
             .tokenizer
@@ -327,7 +516,12 @@ impl MinicpmV46VLModel {
         cfg: &VlGenerationConfig,
         mut on_token: impl FnMut(&str),
     ) -> Result<String> {
-        let (input_ids, processed) = self.render_prompt(image, user_text)?;
+        self.downsample_divisor = match cfg.downsample_mode.as_deref() {
+            Some("4x") => 4,
+            Some(_) => 16,
+            None => self.config_divisor,
+        };
+        let (input_ids, processed) = self.render_prompt(image, user_text, cfg.enable_thinking)?;
         let input_tensor =
             Tensor::from_vec(input_ids.clone(), (1usize, input_ids.len()), &self.device)?;
 
