@@ -48,6 +48,8 @@ mod cuda_backend;
 #[cfg(feature = "cuda")]
 mod gdn_fused;
 mod layer;
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+mod metal_backend;
 mod norm;
 mod projection;
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
@@ -65,6 +67,8 @@ pub use conv::causal_conv1d;
 #[cfg(feature = "cuda")]
 pub use cuda_backend::gdn_recurrence_cuda;
 pub use layer::GatedDeltaNet;
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+pub use metal_backend::{gdn_chunk_tri_inverse_metal, gdn_recurrence_metal};
 pub use norm::{GateActivation, RmsNormGated};
 pub use projection::{GdnInputProjection, GdnInputProjectionKind, GdnPart, GdnProjection};
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]

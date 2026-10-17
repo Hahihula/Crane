@@ -26,10 +26,12 @@
 
 #[cfg(feature = "cuda")]
 mod cuda;
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+mod metal;
 pub mod policy;
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{D, DType, Device, Module, Tensor};
 use candle_nn::{Linear, VarBuilder, linear_no_bias, ops::rms_norm, rotary_emb::rope};
 use serde::Deserialize;
 
@@ -500,7 +502,8 @@ impl DSparkDrafter {
     ///
     /// Returns an error if a tensor op fails.
     pub fn markov_chain(&self, c: &MarkovCandidates, anchor: u32) -> Result<(Vec<u32>, Tensor)> {
-        // One launch on CUDA instead of ~10 per position (see `kernels/cuda/dspark.cu`).
+        // One launch on CUDA / Metal instead of ~10 per position (see
+        // `kernels/cuda/dspark.cu`, `kernels/metal/dspark.metal`).
         #[cfg(feature = "cuda")]
         if self.device.is_cuda()
             && let Some((tokens, prevs)) =
@@ -508,27 +511,14 @@ impl DSparkDrafter {
         {
             return Ok((tokens.to_vec1::<u32>()?, prevs));
         }
-        let blk = c.ids.dim(0)?;
-        let mut prev = Tensor::from_vec(vec![anchor], 1, &self.device)?;
-        let mut prevs = Vec::with_capacity(blk);
-        let mut toks = Vec::with_capacity(blk);
-        for i in 0..blk {
-            let e = self.markov_w1.index_select(&prev, 0)?; // [1, r]
-            let bias = c.w2.narrow(0, i, 1)?.squeeze(0)?.matmul(&e.t()?)?; // [k, 1]
-            let scores = (c.logits.narrow(0, i, 1)?.t()? + bias.to_dtype(DType::F32)?)?;
-            let pick = scores.argmax(0)?.reshape(1)?;
-            prevs.push(prev);
-            prev = c
-                .ids
-                .narrow(0, i, 1)?
-                .flatten_all()?
-                .index_select(&pick, 0)?;
-            toks.push(prev.clone());
+        #[cfg(all(feature = "metal", not(feature = "cuda")))]
+        if self.device.is_metal()
+            && let Some((tokens, prevs)) =
+                metal::markov_chain(&c.ids, &c.logits, &c.w2, &self.markov_w1, anchor)?
+        {
+            return Ok((tokens.to_vec1::<u32>()?, prevs));
         }
-        Ok((
-            Tensor::cat(&toks, 0)?.to_vec1::<u32>()?,
-            Tensor::cat(&prevs, 0)?,
-        ))
+        markov_chain_ops(c, &self.markov_w1, anchor)
     }
 
     /// Confidence head over the final tokens.
@@ -550,9 +540,93 @@ impl DSparkDrafter {
     }
 }
 
+/// [`DSparkDrafter::markov_chain`] as a chain of tensor ops (~10 per
+/// position): the path for devices without the fused kernel, and the reference
+/// the kernels are tested against.
+fn markov_chain_ops(c: &MarkovCandidates, w1: &Tensor, anchor: u32) -> Result<(Vec<u32>, Tensor)> {
+    let blk = c.ids.dim(0)?;
+    let mut prev = Tensor::from_vec(vec![anchor], 1, w1.device())?;
+    let mut prevs = Vec::with_capacity(blk);
+    let mut toks = Vec::with_capacity(blk);
+    for i in 0..blk {
+        let e = w1.index_select(&prev, 0)?; // [1, r]
+        let bias = e.matmul(&c.w2.narrow(0, i, 1)?.squeeze(0)?.t()?)?; // [1, k]
+        // Reduce along the last dim: candle's Metal argmax over dim 0 of a
+        // `[k, 1]` tensor returns 0 whatever the values.
+        let scores = (c.logits.narrow(0, i, 1)? + bias.to_dtype(DType::F32)?)?;
+        let pick = scores.argmax(D::Minus1)?.reshape(1)?;
+        prevs.push(prev);
+        prev = c
+            .ids
+            .narrow(0, i, 1)?
+            .flatten_all()?
+            .index_select(&pick, 0)?;
+        toks.push(prev.clone());
+    }
+    Ok((
+        Tensor::cat(&toks, 0)?.to_vec1::<u32>()?,
+        Tensor::cat(&prevs, 0)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::gguf_to_hf_name;
+
+    /// The fused Markov-chain kernel against the op chain, on random candidates
+    /// with a W1/W2 bias large enough to reorder them.
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    #[test]
+    fn metal_markov_chain_matches_op_chain() {
+        use super::{MarkovCandidates, markov_chain_ops, metal};
+        use candle_core::{DType, Device, Tensor};
+
+        if !candle_core::utils::metal_is_available() {
+            return;
+        }
+        let dev = Device::new_metal(0).unwrap();
+        let (blk, k, r, vocab) = (15usize, 256usize, 256usize, 4096usize);
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            // Candidate ids: distinct per row, all inside the vocabulary.
+            let ids: Vec<u32> = (0..blk * k).map(|i| ((i * 7919) % vocab) as u32).collect();
+            let ids = Tensor::from_vec(ids, (blk, k), &dev).unwrap();
+            let logits = Tensor::randn(0f32, 1.0, (blk, k), &dev).unwrap();
+            let w1 = Tensor::randn(0f32, 0.3, (vocab, r), &dev)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            let w2 = Tensor::randn(0f32, 0.3, (blk, k, r), &dev)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            let c = MarkovCandidates { ids, logits, w2 };
+            let (want_tok, want_prev) = markov_chain_ops(&c, &w1, 17).unwrap();
+            // The CPU has no BF16 matmul.
+            if dtype != DType::BF16 {
+                let cpu = |t: &Tensor| t.to_device(&Device::Cpu).unwrap();
+                let on_cpu = MarkovCandidates {
+                    ids: cpu(&c.ids),
+                    logits: cpu(&c.logits),
+                    w2: cpu(&c.w2),
+                };
+                let (cpu_tok, _) = markov_chain_ops(&on_cpu, &cpu(&w1), 17).unwrap();
+                assert_eq!(want_tok, cpu_tok, "{dtype:?} op chain: Metal vs CPU");
+            }
+            let (got_tok, got_prev) = metal::markov_chain(&c.ids, &c.logits, &c.w2, &w1, 17)
+                .unwrap()
+                .expect("shapes fit the kernel");
+            assert_eq!(
+                got_tok.to_vec1::<u32>().unwrap(),
+                want_tok,
+                "{dtype:?} tokens"
+            );
+            assert_eq!(
+                got_prev.to_vec1::<u32>().unwrap(),
+                want_prev.to_vec1::<u32>().unwrap(),
+                "{dtype:?} prevs"
+            );
+        }
+    }
 
     #[test]
     fn maps_gguf_tensor_names() {

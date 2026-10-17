@@ -2,10 +2,44 @@
 //! equal plain greedy decoding (up to floating-point noise from the batched
 //! verification pass) while taking fewer target passes.
 //!
-//! Gated by `CRANE_MINICPM_V47_DIR` + `CRANE_DSPARK_DIR`.
+//! Gated by `CRANE_MINICPM_V47_DIR` (or `CRANE_MINICPM_V47_GGUF` +
+//! `CRANE_MINICPM_V47_MMPROJ`) + `CRANE_DSPARK_DIR` (a drafter directory or a
+//! `dspark-*.gguf`). Runs on CUDA (bf16), Metal (f16) or the CPU (f32).
 
-use crane_core::candle_core::{self, DType, Device};
+use crane_core::candle_core::{DType, Device};
 use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
+
+/// The first GPU this build supports, with its native activation dtype.
+fn device() -> (Device, DType) {
+    #[cfg(feature = "cuda")]
+    if crane_core::candle_core::utils::cuda_is_available() {
+        return (Device::new_cuda(0).unwrap(), DType::BF16);
+    }
+    #[cfg(feature = "metal")]
+    if crane_core::candle_core::utils::metal_is_available() {
+        return (Device::new_metal(0).unwrap(), DType::F16);
+    }
+    (Device::Cpu, DType::F32)
+}
+
+/// Target + drafter: safetensors from `CRANE_MINICPM_V47_DIR`, or a GGUF pair
+/// from `CRANE_MINICPM_V47_GGUF` / `CRANE_MINICPM_V47_MMPROJ`.
+fn load(device: &Device, dtype: DType) -> MinicpmV46VLModel {
+    let draft = std::env::var("CRANE_DSPARK_DIR").expect("set CRANE_DSPARK_DIR");
+    let mut model = match std::env::var("CRANE_MINICPM_V47_GGUF") {
+        Ok(llm) => {
+            let mmproj = std::env::var("CRANE_MINICPM_V47_MMPROJ")
+                .expect("set CRANE_MINICPM_V47_MMPROJ with CRANE_MINICPM_V47_GGUF");
+            MinicpmV46VLModel::from_gguf(&llm, &mmproj, device, &dtype).expect("load GGUF")
+        },
+        Err(_) => {
+            let dir = std::env::var("CRANE_MINICPM_V47_DIR").expect("set CRANE_MINICPM_V47_DIR");
+            MinicpmV46VLModel::new(&dir, device, &dtype).expect("load model")
+        },
+    };
+    model.load_dspark(&draft).expect("load drafter");
+    model
+}
 
 const PROMPTS: [&str; 3] = [
     "Explain how photosynthesis works in plants, in about 150 words.",
@@ -16,14 +50,18 @@ const PROMPTS: [&str; 3] = [
 #[test]
 #[ignore = "needs CRANE_MINICPM_V47_DIR + CRANE_DSPARK_DIR"]
 fn dspark_matches_plain_greedy() {
-    let dir = std::env::var("CRANE_MINICPM_V47_DIR").expect("set CRANE_MINICPM_V47_DIR");
-    let draft = std::env::var("CRANE_DSPARK_DIR").expect("set CRANE_DSPARK_DIR");
-    #[cfg(feature = "cuda")]
-    let (device, dtype) = (Device::new_cuda(0).unwrap(), DType::BF16);
-    #[cfg(not(feature = "cuda"))]
-    let (device, dtype) = (Device::Cpu, DType::F32);
-    let mut model = MinicpmV46VLModel::new(&dir, &device, &dtype).expect("load model");
-    model.load_dspark(&draft).expect("load drafter");
+    let (device, dtype) = device();
+    let mut model = load(&device, dtype);
+    // First use pays for page-ins and kernel compilation; keep that out of the
+    // timings below.
+    for dspark in [false, true] {
+        let warm = VlGenerationConfig {
+            max_new_tokens: 16,
+            dspark: Some(dspark),
+            ..Default::default()
+        };
+        model.generate(None, PROMPTS[0], &warm, |_| {}).unwrap();
+    }
 
     let max_new = 128;
     for prompt in PROMPTS {
@@ -84,11 +122,8 @@ fn dspark_matches_plain_greedy() {
 #[test]
 #[ignore = "needs CRANE_MINICPM_V47_DIR + CRANE_DSPARK_DIR"]
 fn mode_switching_is_lossless_in_f32() {
-    let dir = std::env::var("CRANE_MINICPM_V47_DIR").expect("set CRANE_MINICPM_V47_DIR");
-    let draft = std::env::var("CRANE_DSPARK_DIR").expect("set CRANE_DSPARK_DIR");
-    let device = Device::new_cuda(0).unwrap();
-    let mut model = MinicpmV46VLModel::new(&dir, &device, &DType::F32).expect("load model");
-    model.load_dspark(&draft).expect("load drafter");
+    let (device, _) = device();
+    let mut model = load(&device, DType::F32);
 
     let max_new = 160;
     for prompt in PROMPTS {

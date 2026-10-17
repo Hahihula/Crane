@@ -6,21 +6,28 @@
 //! below (bf16, greedy, `enable_thinking=False`, `max_slice_nums=9`).
 //! Gated by `CRANE_MINICPM_V47_DIR` (a MiniCPM-V-4.7-1B safetensors dir).
 
-use crane_core::candle_core::{self, DType, Device};
+use crane_core::candle_core::{DType, Device};
 use crane_core::models::minicpm_v::{MinicpmV46VLModel, VlGenerationConfig};
 
 const PROMPT: &str = "Describe this image in one or two sentences.";
 
 fn device() -> (Device, DType) {
+    let f32 = std::env::var("CRANE_TEST_DTYPE").as_deref() == Ok("f32");
     #[cfg(feature = "cuda")]
-    if candle_core::utils::cuda_is_available() {
-        let dt = if std::env::var("CRANE_TEST_DTYPE").as_deref() == Ok("f32") {
-            DType::F32
-        } else {
-            DType::BF16
-        };
-        return (Device::new_cuda(0).unwrap(), dt);
+    if crane_core::candle_core::utils::cuda_is_available() {
+        return (
+            Device::new_cuda(0).unwrap(),
+            if f32 { DType::F32 } else { DType::BF16 },
+        );
     }
+    #[cfg(feature = "metal")]
+    if crane_core::candle_core::utils::metal_is_available() {
+        return (
+            Device::new_metal(0).unwrap(),
+            if f32 { DType::F32 } else { DType::F16 },
+        );
+    }
+    let _ = f32;
     (Device::Cpu, DType::F32)
 }
 

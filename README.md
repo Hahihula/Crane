@@ -89,7 +89,7 @@ We include:
 
 ## 🔥 Updates
 
-- **`2026.10.17`**: 👁️ **MiniCPM-V 4.7 (1B) support** (plus opt-in **DSpark speculative decoding**, `--dspark`: 2.2x on BF16, up to 5x on code/math, see below) — safetensors *and* llama.cpp GGUF (`MiniCPM-V-4_7-1B-*.gguf` + `mmproj-model-f16.gguf`, no `config.json`/`tokenizer.json` needed). Reuses the 4.6 vision tower and the Qwen 3.5 hybrid decoder; new is **canvas M-RoPE** (images are laid on a 2D canvas, thumbnail stretched over the slice grid — position ids match HF `get_rope_index` exactly) and the **`4x`** visual-token mode (skips the mid-ViT window merger). On `test_chart.png`, greedy output matches HF-f32 token-for-token in f32 (16x), and HF-bf16 in 4x/bf16; GGUF Q8_0 + mmproj tracks HF for the full 64 tokens in 4x. Text decode on an RTX 3090 (pp512, tg64, 1B): **~120 t/s BF16**, **~200 t/s Q8_0 / Q4_K_M** at 2–3 GiB VRAM. See [the MiniCPM-V section](#minicpm-v-46--47-vision-language) below.
+- **`2026.10.17`**: 👁️ **MiniCPM-V 4.7 (1B) support** (plus opt-in **DSpark speculative decoding**, `--dspark`: 2.2x on BF16, up to 5x on code/math, see below) — safetensors *and* llama.cpp GGUF (`MiniCPM-V-4_7-1B-*.gguf` + `mmproj-model-f16.gguf`, no `config.json`/`tokenizer.json` needed). Reuses the 4.6 vision tower and the Qwen 3.5 hybrid decoder; new is **canvas M-RoPE** (images are laid on a 2D canvas, thumbnail stretched over the slice grid — position ids match HF `get_rope_index` exactly) and the **`4x`** visual-token mode (skips the mid-ViT window merger). On `test_chart.png`, greedy output matches HF-f32 token-for-token in f32 (16x), and HF-bf16 in 4x/bf16; GGUF Q8_0 + mmproj tracks HF for the full 64 tokens in 4x. Text decode on an RTX 3090 (pp512, tg64, 1B): **~120 t/s BF16**, **~200 t/s Q8_0 / Q4_K_M** at 2–3 GiB VRAM. 🍎 **Also on Metal:** fused kernels for every Gated Delta Net pass (decode, verification, prefill) plus the drafter's top-k and Markov chain take plain decode on an M3 Pro from ~28 to **~90 tok/s** (1B Q8_0), and `--dspark` reaches **1.6x on code and 3.1x on math** on F16 weights, with output identical to plain greedy decoding. See [the MiniCPM-V section](#minicpm-v-46--47-vision-language) below.
 - **`2026.09.21`**: 🌳 **Heavyweight support for Bonsai 2 Ternary 27B!** Crane now loads Prism's PTQ1_0 (GGUF type 143) and PQ2_0 (type 142) files directly, auto-detects the ternary format, and routes only the affected weights through a modular `TernaryLinear` backend. Native CPU and CUDA kernels cover ternary matvec, normalized blockwise Hadamard transforms, and Qwen 3.5 GDN value-head regrouping; ordinary GGUF models continue through the existing Candle path. No Candle fork or dependency patch is required. The same GGUF works in `chat_cli` and the OpenAI/SGLang-compatible `crane-serve`.
 - **`2026.09.15`**: 🍎 **KugelAudio Metal support verified + Q4_0 in-situ quantization for low-VRAM/low-RAM.** Metal was already wired up at the device-selection level; added Metal-specific regression tests (conv tokenizer encoder/decoder, decoder backbone, diffusion head, DPM-Solver++ scheduler) confirming no CUDA-only code paths anywhere in the port. New `--quant q4_0` (any `GgmlDType`, or `CRANE_ISQ`) in-situ-quantizes the ~7B-parameter Qwen2 decoder's Q/K/V/O and MLP projections as they load — `quantize_linear_onto` reads each tensor from a CPU-scoped `VarBuilder` and quantizes it directly onto the target device, so the transient bf16/f16 weight never occupies target-device (GPU/unified) memory, only the much smaller quantized buffer does. `embed_tokens`/`lm_head` (untied, ~1 GB each in F16) stay dense — candle's `QTensor::quantize` on their 152064-row shape was observed to spike memory disproportionately. Covered by 32 unit tests (CPU + Metal, synthetic weights) including a numeric quantized-vs-unquantized sanity check; **loading the real ~18.7GB checkpoint end-to-end has not been verified on a memory-constrained machine** — see `example/kugelaudio_simple.rs`'s doc comment.
 - **`2026.08.16`**: 🧠 **Qwen 3.8 / Qwen 3.6 (27B) support + flexible thinking control.** Both declare `model_type: "qwen3_5"` and convert to GGUF as `qwen35`, so they are the Qwen 3.5 architecture scaled up (64 layers, 24 q / 4 KV heads, 48 GDN value heads, untied `lm_head`) and need **no new modeling code** — every difference is a config value. Thinking is now controllable per request via `chat_template_kwargs: {"enable_thinking": …, "reasoning_effort": "low|medium|xhigh"}` (or OpenAI's top-level `reasoning_effort`), and the `<think>` scratchpad is separated out of `content` into **`reasoning_content`**, streaming included. 🗜️ GGUF embedding tables now stay quantized and dequantize only the rows a forward pass gathers, instead of expanding all 248320 of them at load: **1772 MiB saved** on Qwen 3.8-27B Q4_K_M (peak 22007 → 20235 MiB), bit-exact on untied checkpoints (prefill logits cosine `1.000000000`). Qwen 3.8-27B Q4_K_M runs text-only on a single 24 GB RTX 3090.
@@ -776,6 +776,39 @@ bf16 prefill chunks.
 Tests: `cargo test -p crane-core --features cuda --test gdn_fused --test topk_rows -- --ignored`
 (fused vs op chain, bit-exact), `--test dspark_drafter_parity` (vs PyTorch), and
 `--test minicpm_v47_dspark` (speculative == plain greedy).
+
+**Metal (Apple Silicon).** Everything above also runs on Metal (`--features metal`;
+F16 activations, BF16/F32 also supported). There every GDN pass (a decode step, a
+verification block, a prefill chunk) goes through one fused path of five
+dispatches (`kernels/metal/gdn_fused.metal`: conv+silu, Q/K/V prep with the
+gates, the recurrence, gated norm), so a token gets the same GDN arithmetic
+whether it is decoded alone or inside a verification block. The serial
+recurrence kernel beats the chunked formulation at every prompt length on Metal
+(2.5–2.8x per layer from 64 to 4096 tokens), so prefill uses it too
+(`CRANE_GDN_CHUNKED=1` opts back in). The drafter's batched top-k and Markov
+chain have Metal kernels as well (`kernels/metal/{topk,dspark}.metal`).
+
+Text generation on an M3 Pro (18 GB), 1B, greedy, 128 tokens, the three
+`minicpm_v47_dspark` prompts, tok/s end to end:
+
+| weights | plain | `--dspark` prose | code | math |
+|---|---|---|---|---|
+| GGUF Q8_0 | ~90 | 0.85x (adaptive) | 1.18x | 1.9–2.2x |
+| F16 safetensors | ~50 | 1.0x | 1.57x | 3.15x |
+
+Per GDN layer the fused path is 5.4x faster than the op chain on a decode step
+and ~33x on a 16-token verification block. Prompt ids match HF exactly; in f32,
+greedy output matches HF-f32 token-for-token (16x and 4x) and the speculative
+stream equals plain decoding under constant mode switching; GGUF Q8_0 tracks
+HF-f32 for the full 64 tokens in 4x. A verification block costs ~2.3x a decode
+step here (candle's quantized matmul and the 248k-vocab `lm_head`), so on GGUF
+speculation pays above ~3.4 accepted tokens per round.
+
+Tests: `cargo test -p crane-core --features metal --test gdn_fused --test topk_rows -- --ignored --test-threads=1`
+(fused vs the portable op chain, F16 and BF16), `--lib metal_markov_chain`
+(Markov kernel vs op chain vs CPU), plus `minicpm_v47_dspark` and
+`minicpm_v47_hf_parity` as above (they pick Metal when available; the DSpark
+test also takes `CRANE_MINICPM_V47_GGUF` + `CRANE_MINICPM_V47_MMPROJ`).
 
 ### MuScriptor (Automatic Music Transcription)
 

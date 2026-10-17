@@ -56,6 +56,11 @@ pub use cuda_impl::*;
 #[cfg(feature = "cuda")]
 pub use cuda_topk::topk_indices;
 
+// Metal port of the same top-k kernel; only the batched-rows entry point
+// (`topk_indices_rows`) uses it so far.
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+mod metal_topk;
+
 #[cfg(all(feature = "rocm", not(feature = "cuda")))]
 mod rocm_impl;
 
@@ -77,15 +82,25 @@ pub mod portable;
 pub use portable::*;
 
 /// Top-`k` indices of every row of a contiguous f32 `[rows, n]` matrix, as
-/// `[rows, k]`. One pair of launches on CUDA; a per-row loop elsewhere.
+/// `[rows, k]`. One pair of launches on CUDA and Metal; a per-row loop
+/// elsewhere.
 ///
 /// # Errors
 ///
 /// Returns an error if `x` is not a contiguous f32 matrix or `k` is out of range.
-pub fn topk_indices_rows(x: &candle_core::Tensor, k: usize) -> candle_core::Result<candle_core::Tensor> {
+pub fn topk_indices_rows(
+    x: &candle_core::Tensor,
+    k: usize,
+) -> candle_core::Result<candle_core::Tensor> {
     #[cfg(feature = "cuda")]
     if x.device().is_cuda() {
         return cuda_topk::topk_indices(x, k);
+    }
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    if x.device().is_metal()
+        && let Some(ids) = metal_topk::topk_indices_rows(x, k)?
+    {
+        return Ok(ids);
     }
     let (rows, _) = x.dims2()?;
     let per_row = (0..rows)
@@ -93,4 +108,3 @@ pub fn topk_indices_rows(x: &candle_core::Tensor, k: usize) -> candle_core::Resu
         .collect::<candle_core::Result<Vec<_>>>()?;
     candle_core::Tensor::cat(&per_row, 0)
 }
-

@@ -1,8 +1,10 @@
 //! Top-level `GatedDeltaNet` layer: orchestrates input projection, causal
 //! `Conv1D`, gated delta rule recurrence, gated `RMSNorm`, and output projection.
 
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use candle_core::DType;
 use candle_core::quantized::GgmlDType;
-use candle_core::{DType, Module, Result, Tensor};
+use candle_core::{Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
 use super::backend::{GdnGateConsts, apply_recurrence, compute_beta_g, l2_alpha, l2_norm_fused};
@@ -12,6 +14,12 @@ use super::conv::causal_conv1d_ckpt;
 use super::norm::RmsNormGated;
 use super::projection::{GdnInputProjection, GdnInputProjectionKind};
 use crate::ops::linear::{LinearLayer, linear_layer};
+
+/// The fused multi-token stages for this build's GPU backend (same API on both).
+#[cfg(feature = "cuda")]
+use super::gdn_fused as gf;
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+use super::metal_backend as gf;
 
 /// One linear-attention layer as used by Qwen 3.5 (and similar hybrid models).
 ///
@@ -36,19 +44,20 @@ struct GdnDerived {
     gates: GdnGateConsts,
     /// The `[head_k_dim]` scale vector for the fused Q/K L2 norm.
     l2_alpha: Tensor,
-    /// Weights pre-rounded for the fused multi-token CUDA path.
-    #[cfg(feature = "cuda")]
+    /// Weights pre-rounded for the fused path (CUDA, Metal).
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     fused: Option<FusedConsts>,
 }
 
-/// What the fused CUDA kernels need, derived once: the op-by-op path rounds the
-/// conv and norm weights through bf16 on every call; doing it here is the same
-/// arithmetic without the per-call launches.
-#[cfg(feature = "cuda")]
+/// What the fused kernels need, derived once: the op-by-op path rounds the
+/// conv and norm weights through the activation dtype (bf16 on CUDA, the model
+/// dtype on Metal) on every call; doing it here is the same arithmetic without
+/// the per-call launches.
+#[cfg(any(feature = "cuda", feature = "metal"))]
 struct FusedConsts {
-    /// `conv1d.weight` as `[conv_dim, kernel]` f32 (via bf16).
+    /// `conv1d.weight` as `[conv_dim, kernel]` f32 (via the activation dtype).
     conv_w: Tensor,
-    /// Gated-norm weight `[head_v_dim]` f32 (via bf16).
+    /// Gated-norm weight `[head_v_dim]` f32 (via the activation dtype).
     norm_w: Tensor,
 }
 
@@ -214,17 +223,27 @@ impl GatedDeltaNet {
     ) -> Result<Self> {
         // `conv1d_weight` is the dtype/device witness: it is always present and
         // always carries the model's compute dtype on both load paths.
-        #[cfg(feature = "cuda")]
-        let fused = if conv1d_weight.device().is_cuda()
-            && norm.activation() == super::norm::GateActivation::Silu
-        {
-            let via_bf16 = |t: &Tensor| t.to_dtype(DType::BF16)?.to_dtype(DType::F32)?.contiguous();
-            Some(FusedConsts {
-                conv_w: via_bf16(&conv1d_weight.squeeze(1)?)?,
-                norm_w: via_bf16(norm.weight())?,
-            })
-        } else {
-            None
+        #[cfg(any(feature = "cuda", feature = "metal"))]
+        let fused = {
+            let device = conv1d_weight.device();
+            // CUDA's fused pass is bf16-only; Metal's runs in the model dtype.
+            let act = if device.is_cuda() {
+                Some(DType::BF16)
+            } else if device.is_metal() {
+                Some(conv1d_weight.dtype())
+            } else {
+                None
+            };
+            match act {
+                Some(act) if norm.activation() == super::norm::GateActivation::Silu => {
+                    let via = |t: &Tensor| t.to_dtype(act)?.to_dtype(DType::F32)?.contiguous();
+                    Some(FusedConsts {
+                        conv_w: via(&conv1d_weight.squeeze(1)?)?,
+                        norm_w: via(norm.weight())?,
+                    })
+                },
+                _ => None,
+            }
         };
         let derived = GdnDerived {
             gates: GdnGateConsts::new(&a_log, &dt_bias)?,
@@ -233,7 +252,7 @@ impl GatedDeltaNet {
                 conv1d_weight.dtype(),
                 conv1d_weight.device(),
             )?,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "metal"))]
             fused,
         };
         Ok(Self {
@@ -279,12 +298,13 @@ impl GatedDeltaNet {
             self.input_proj.forward(x, dims, batch_size, seq_len)
         })?;
 
-        // Fused multi-token path: conv, Q/K/V prep, recurrence and gated norm
-        // in a handful of launches instead of ~45 (see `gdn_fused`).
-        #[cfg(feature = "cuda")]
+        // Fused path: conv, Q/K/V prep, recurrence and gated norm in a
+        // handful of launches instead of ~45 (see `gdn_fused`; on Metal every
+        // pass, see `metal_backend`).
+        #[cfg(any(feature = "cuda", feature = "metal"))]
         if let Some(fused) = &self.derived.fused
             && projected.mixed_qkv.is_some()
-            && super::gdn_fused::supported(x, dims)
+            && gf::supported(x, dims)
         {
             let out = self.forward_fused(&projected, fused, dims, cache, split)?;
             if ckpt.is_some_and(|p| p >= seq_len) {
@@ -385,9 +405,10 @@ impl GatedDeltaNet {
         })
     }
 
-    /// The fused CUDA path for a multi-token bf16 pass; `split` is the
-    /// speculative-decoding checkpoint position (`0 < p < seq_len`).
-    #[cfg(feature = "cuda")]
+    /// The fused path (a multi-token bf16 pass on CUDA, any pass on Metal);
+    /// `split` is the speculative-decoding checkpoint position
+    /// (`0 < p < seq_len`).
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     fn forward_fused(
         &self,
         projected: &super::projection::GdnProjection,
@@ -396,15 +417,15 @@ impl GatedDeltaNet {
         cache: &mut GdnLayerCache,
         split: Option<usize>,
     ) -> Result<Tensor> {
-        use super::gdn_fused as gf;
         use crate::utils::prof::{Span, timed};
 
         let mixed = projected.mixed_qkv.as_ref().expect("checked by the caller");
         let seq_len = mixed.dim(1)?;
         let h = dims.num_v_heads;
         let x2 = mixed.reshape((seq_len, dims.conv_dim))?.contiguous()?;
-        if cache.conv_state.dtype() != DType::BF16 {
-            cache.conv_state = cache.conv_state.to_dtype(DType::BF16)?;
+        let act = x2.dtype();
+        if cache.conv_state.dtype() != act {
+            cache.conv_state = cache.conv_state.to_dtype(act)?;
         }
         let state = cache.conv_state.contiguous()?;
         let mut conv = timed(Span::GdnConv, || {
@@ -443,20 +464,12 @@ impl GatedDeltaNet {
             })?;
             let y = timed(Span::GdnRecur, || {
                 super::backend::recurrence_prepped(
-                    &pre.q,
-                    &pre.k,
-                    &pre.v,
-                    &pre.g,
-                    &pre.beta,
-                    dims,
-                    1,
-                    len,
-                    cache,
-                    DType::BF16,
+                    &pre.q, &pre.k, &pre.v, &pre.g, &pre.beta, dims, 1, len, cache, act,
                 )
             })?;
-            // The chunked (long-prefill) recurrence yields bf16, the serial one
-            // f32; the kernel reads f32 and re-rounding a bf16 value is exact.
+            // The chunked (long-prefill) recurrence yields bf16 on CUDA, the
+            // serial one f32; the kernel reads f32 and re-rounding a bf16 value
+            // is exact.
             let y = if y.dtype() == DType::F32 {
                 y
             } else {

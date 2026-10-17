@@ -310,14 +310,29 @@ pub fn apply_recurrence(
     {
         return fused_recurrence(q, k, v, g, beta, dims, batch_size, seq_len, cache, dtype);
     }
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    if q.device().is_metal()
+        && matches!(dims.head_k_dim, 64 | 128)
+        && dims.head_v_dim <= 256
+        && std::env::var("CRANE_GDN_PORTABLE").is_err()
+    {
+        return fused_recurrence(q, k, v, g, beta, dims, batch_size, seq_len, cache, dtype);
+    }
 
-    // Device-portable reference (runs on CPU/CUDA/Metal/ROCm/SYCL).
-    gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)
+    // Device-portable reference (runs on CPU/CUDA/Metal/ROCm/SYCL). Its output
+    // follows `q`, which `l2_norm_fused` promotes to F32 for half inputs; the
+    // layer continues in the model dtype.
+    gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)?.to_dtype(dtype)
 }
 
 /// `CRANE_GDN_SERIAL_MAX`: longest pass sent to the serial recurrence kernel
 /// instead of the chunked formulation (default 0); see `fused_recurrence`.
-#[cfg(any(feature = "cuda", feature = "rocm", feature = "sycl"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "rocm",
+    feature = "sycl",
+    feature = "metal"
+))]
 fn serial_max() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MAX.get_or_init(|| {
@@ -335,8 +350,13 @@ fn serial_max() -> usize {
 /// reshapes the result back to the portable path's `[B, S, num_v_heads, V]`.
 ///
 /// The layout work is identical for every backend; only the launch differs, and
-/// `cuda` / `rocm` / `sycl` never coexist in a working build.
-#[cfg(any(feature = "cuda", feature = "rocm", feature = "sycl"))]
+/// `cuda` / `rocm` / `sycl` / `metal` never coexist in a working build.
+#[cfg(any(
+    feature = "cuda",
+    feature = "rocm",
+    feature = "sycl",
+    feature = "metal"
+))]
 #[allow(clippy::too_many_arguments)]
 fn fused_recurrence(
     q: &Tensor,
@@ -405,7 +425,12 @@ fn fused_recurrence(
 /// `[BH, S, K]`; `v3`: `[BH, S, V]`; `g2`, `beta2`: `[BH, S]`; all contiguous
 /// f32, `q3` pre-scaled by `1/sqrt(K)`), advancing `cache.recurrent_state`.
 /// Returns `y: [BH, S, V]` f32.
-#[cfg(any(feature = "cuda", feature = "rocm", feature = "sycl"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "rocm",
+    feature = "sycl",
+    feature = "metal"
+))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn recurrence_prepped(
     q3: &Tensor,
@@ -441,7 +466,14 @@ pub(super) fn recurrence_prepped(
     // path is dozens, and its f32 math makes splitting a pass at a checkpoint
     // exact. `CRANE_GDN_SERIAL_MAX` (default 0 = off) extends that to every
     // pass up to that length.
+    //
+    // Metal is the exception: its serial kernel beats the chunked formulation
+    // at every length (2.5-2.8x per GDN layer from 64 to 4096 tokens on an M3
+    // Pro, see `tests/gdn_fused.rs`), so there the chunked path is opt-in
+    // (`CRANE_GDN_CHUNKED=1`).
+    let chunked_ok = !q3.device().is_metal() || std::env::var("CRANE_GDN_CHUNKED").is_ok();
     let use_chunked = seq_len > 1
+        && chunked_ok
         && !cache.prefer_serial
         && seq_len > serial_max()
         && std::env::var("CRANE_GDN_SERIAL_PREFILL").is_err();
@@ -463,6 +495,20 @@ pub(super) fn recurrence_prepped(
         #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
         {
             super::sycl_backend::gdn_recurrence_sycl(q3, k3, v3, g2, beta2, &state3)
+        }
+        #[cfg(all(
+            feature = "metal",
+            not(any(feature = "cuda", feature = "rocm", feature = "sycl"))
+        ))]
+        {
+            // `apply_recurrence` / `supported` only route head dims the kernel has.
+            super::metal_backend::gdn_recurrence_metal(q3, k3, v3, g2, beta2, &state3)?.ok_or_else(
+                || {
+                    candle_core::Error::Msg(format!(
+                        "gdn metal: no recurrence kernel for K={kd}, V={vd}"
+                    ))
+                },
+            )
         }
     })?;
 
