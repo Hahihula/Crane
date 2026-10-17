@@ -24,6 +24,8 @@
 //! Tap layers follow DFlash's convention: id `l` is the output of 0-based
 //! decoder layer `l` (`hidden_states[l + 1]`).
 
+#[cfg(feature = "cuda")]
+mod cuda;
 pub mod policy;
 
 use anyhow::{Context, Result};
@@ -498,6 +500,14 @@ impl DSparkDrafter {
     ///
     /// Returns an error if a tensor op fails.
     pub fn markov_chain(&self, c: &MarkovCandidates, anchor: u32) -> Result<(Vec<u32>, Tensor)> {
+        // One launch on CUDA instead of ~10 per position (see `kernels/cuda/dspark.cu`).
+        #[cfg(feature = "cuda")]
+        if self.device.is_cuda()
+            && let Some((tokens, prevs)) =
+                cuda::markov_chain(&c.ids, &c.logits, &c.w2, &self.markov_w1, anchor)?
+        {
+            return Ok((tokens.to_vec1::<u32>()?, prevs));
+        }
         let blk = c.ids.dim(0)?;
         let mut prev = Tensor::from_vec(vec![anchor], 1, &self.device)?;
         let mut prevs = Vec::with_capacity(blk);

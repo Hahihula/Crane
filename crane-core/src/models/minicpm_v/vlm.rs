@@ -294,6 +294,16 @@ impl MinicpmV46VLModel {
         let (ct, extended) = crate::quantized::extended_gguf::read_content(mmap.as_ref())?;
         let tokenizer = crate::utils::tokenizer_utils::resolve_gguf_tokenizer(&ct, gguf_path)?;
 
+        // Text model first: its load has transient peaks (packed expert
+        // fusion) that must not land on top of the resident vision weights.
+        // MiniCPM-V-4.7-35B-A3B Q4_K_M + the f16 mmproj fit a 24 GB card in
+        // this order (~23 GB) and OOM in the other.
+        let text = if extended.is_empty() {
+            Qwen3_5TextModel::from_gguf(ct, &mut cursor, device)?
+        } else {
+            Qwen3_5TextModel::from_gguf_extended(ct, &mut cursor, device, extended)?
+        };
+
         let proj = load_mmproj(std::path::Path::new(mmproj_gguf), device, *dtype)
             .context("load mmproj")?;
         // 4.7's projector uses canvas M-RoPE; 4.6's keeps sequential positions.
@@ -361,12 +371,6 @@ impl MinicpmV46VLModel {
             &proj.vb.pp("model").pp("merger"),
         )
         .context("build merger")?;
-
-        let text = if extended.is_empty() {
-            Qwen3_5TextModel::from_gguf(ct, &mut cursor, device)?
-        } else {
-            Qwen3_5TextModel::from_gguf_extended(ct, &mut cursor, device, extended)?
-        };
 
         let preprocessor = PreprocessorConfig {
             max_slice_nums: proj.max_slice_nums.unwrap_or(9),

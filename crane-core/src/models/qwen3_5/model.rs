@@ -79,6 +79,7 @@ impl Qwen3_5TextModel {
         dtype: DType,
         quant: Option<GgmlDType>,
     ) -> Result<Self> {
+        disable_cuda_event_tracking(device);
         let text_cfg = cfg.text().clone();
         // HF saves Qwen 3.5 weights with the prefix
         //   model.language_model.layers.{i}.{linear_attn,self_attn}.*
@@ -223,6 +224,7 @@ impl Qwen3_5TextModel {
         device: &Device,
         extended: Option<crate::quantized::extended_gguf::ExtendedGgufInfo>,
     ) -> Result<Self> {
+        disable_cuda_event_tracking(device);
         // QMatMul handles quantized weights internally; dequantized side
         // tensors (norms, conv kernels) use the compute dtype, while the
         // embedding stays quantized whatever it is. F16 on Metal / ROCm /
@@ -1246,6 +1248,24 @@ impl ModelForCausalLM for Model {
         }
         Ok(tokens)
     }
+}
+
+/// Turn off candle's per-tensor CUDA event tracking (cudarc records and waits
+/// on an event around every tensor access, for multi-stream safety). Crane
+/// runs each model on one stream, so the events are pure overhead: on
+/// MiniCPM-V-4.7-35B-A3B they were ~31k driver calls (~8.5 ms of CPU) per
+/// DSpark round. The other decoders do the same (`EventTrackingGuard`).
+fn disable_cuda_event_tracking(device: &Device) {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(dev) = device {
+        if dev.is_event_tracking() {
+            // Safety: all work for this model is issued on the device's single
+            // stream, so ordering is already guaranteed without events.
+            unsafe { dev.disable_event_tracking() };
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = device;
 }
 
 #[cfg(test)]
