@@ -27,6 +27,10 @@ fn device() -> (Device, DType) {
             if f32 { DType::F32 } else { DType::F16 },
         );
     }
+    #[cfg(feature = "sycl")]
+    if let Ok(dev) = Device::new_sycl(0) {
+        return (dev, if f32 { DType::F32 } else { DType::F16 });
+    }
     let _ = f32;
     (Device::Cpu, DType::F32)
 }

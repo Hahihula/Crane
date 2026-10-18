@@ -810,6 +810,32 @@ Tests: `cargo test -p crane-core --features metal --test gdn_fused --test topk_r
 `minicpm_v47_hf_parity` as above (they pick Metal when available; the DSpark
 test also takes `CRANE_MINICPM_V47_GGUF` + `CRANE_MINICPM_V47_MMPROJ`).
 
+**SYCL (Intel Arc).** Everything above also runs with `--features sycl` (F16
+activations, F32 also supported). The drafter's batched top-k and Markov chain
+have SYCL kernels (`kernels/sycl/{topk,dspark}.cpp`, ports of the Metal ones);
+the host-side top-k they replace cost ~115 ms per round. Verification blocks
+take the existing fused SYCL GDN kernel, launched twice around the speculative
+checkpoint.
+
+Text generation on an Arc Pro B70, 1B, greedy, 128 tokens, the three
+`minicpm_v47_dspark` prompts, end to end:
+
+| weights | plain | `--dspark` prose | code | math |
+|---|---|---|---|---|
+| F16 safetensors | ~46 tok/s | 1.34–1.41x | 2.3x | 4.3x |
+| GGUF Q8_0 | ~50 tok/s | 0.73x | 1.15x | 1.36x |
+
+On GGUF a 15-token verification block costs ~5x a decode step (candle-sycl's
+quantized matmul for multi-token inputs), so speculation pays only on code and
+math. Greedy output matches HF-f32 token-for-token in f32 (16x and 4x), the
+speculative stream equals plain decoding under constant mode switching, and
+GGUF Q8_0 passes the HF parity tests.
+
+Tests: `cargo test -p crane-core --no-default-features --features sycl --test topk_rows -- --ignored`
+(kernel vs host sort, ties included), `--lib sycl_markov_chain` (Markov kernel
+vs op chain vs CPU), plus `minicpm_v47_dspark` and `minicpm_v47_hf_parity` as
+above (they pick SYCL when available).
+
 ### MuScriptor (Automatic Music Transcription)
 
 [MuScriptor](https://huggingface.co/MuScriptor) is a decoder-only

@@ -19,6 +19,10 @@ fn device() -> (Device, DType) {
     if crane_core::candle_core::utils::metal_is_available() {
         return (Device::new_metal(0).unwrap(), DType::F16);
     }
+    #[cfg(feature = "sycl")]
+    if let Ok(dev) = Device::new_sycl(0) {
+        return (dev, DType::F16);
+    }
     (Device::Cpu, DType::F32)
 }
 

@@ -73,6 +73,10 @@ mod sycl_impl;
 #[cfg(all(feature = "sycl", not(any(feature = "cuda", feature = "rocm"))))]
 pub use sycl_impl::*;
 
+// SYCL port of the same top-k kernel; like Metal, only `topk_indices_rows`.
+#[cfg(all(feature = "sycl", not(any(feature = "cuda", feature = "rocm"))))]
+mod sycl_topk;
+
 // Always compiled: it needs no backend, the GPU entry points fall back to it
 // (off a GPU device, and above the top-k kernel's maximum `k`), and the kernel
 // cross-check tests compare against it.
@@ -82,7 +86,7 @@ pub mod portable;
 pub use portable::*;
 
 /// Top-`k` indices of every row of a contiguous f32 `[rows, n]` matrix, as
-/// `[rows, k]`. One pair of launches on CUDA and Metal; a per-row loop
+/// `[rows, k]`. One pair of launches on CUDA, Metal and SYCL; a per-row loop
 /// elsewhere.
 ///
 /// # Errors
@@ -99,6 +103,12 @@ pub fn topk_indices_rows(
     #[cfg(all(feature = "metal", not(feature = "cuda")))]
     if x.device().is_metal()
         && let Some(ids) = metal_topk::topk_indices_rows(x, k)?
+    {
+        return Ok(ids);
+    }
+    #[cfg(all(feature = "sycl", not(any(feature = "cuda", feature = "rocm"))))]
+    if x.device().is_sycl()
+        && let Some(ids) = sycl_topk::topk_indices_rows(x, k)?
     {
         return Ok(ids);
     }

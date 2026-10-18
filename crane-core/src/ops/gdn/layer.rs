@@ -319,25 +319,42 @@ impl GatedDeltaNet {
             causal_conv1d_ckpt(&mixed_qkv, &self.conv1d_weight, dims, cache, split)
         })?;
 
-        // 3-6 in one launch on SYCL.
+        // 3-6 in one launch on SYCL (two around a speculative checkpoint).
         #[cfg(all(feature = "sycl", not(feature = "cuda"), not(feature = "rocm")))]
-        if mixed_qkv.device().is_sycl()
-            && split.is_none()
-            && std::env::var("CRANE_GDN_PORTABLE").is_err()
-        {
-            let fused = timed(Span::GdnRecur, || {
-                super::sycl_backend::gdn_fused_sycl(
-                    &mixed_qkv,
-                    &projected.a,
-                    &projected.b,
-                    &self.derived.gates.neg_exp_a_log,
-                    &self.derived.gates.dt_bias,
-                    &cache.recurrent_state,
-                    dims,
-                )
-            })?;
-            if let Some((y, state)) = fused {
+        if mixed_qkv.device().is_sycl() && std::env::var("CRANE_GDN_PORTABLE").is_err() {
+            let fused = timed(Span::GdnRecur, || -> Result<Option<Tensor>> {
+                let run = |state: &Tensor, t0: usize, len: usize| {
+                    super::sycl_backend::gdn_fused_sycl(
+                        &mixed_qkv.narrow(1, t0, len)?,
+                        &projected.a.narrow(1, t0, len)?,
+                        &projected.b.narrow(1, t0, len)?,
+                        &self.derived.gates.neg_exp_a_log,
+                        &self.derived.gates.dt_bias,
+                        state,
+                        dims,
+                    )
+                };
+                let p = split.unwrap_or(seq_len);
+                let Some((head, state)) = run(&cache.recurrent_state, 0, p)? else {
+                    return Ok(None);
+                };
                 cache.recurrent_state = state;
+                if p == seq_len {
+                    return Ok(Some(head));
+                }
+                let conv_state = conv_ckpt
+                    .clone()
+                    .expect("conv checkpoint computed for 0 < p < seq_len");
+                cache.checkpoint = Some((conv_state, cache.recurrent_state.copy()?));
+                let (tail, state) = run(&cache.recurrent_state, p, seq_len - p)?
+                    .expect("the tail has the head's shapes and dtype");
+                cache.recurrent_state = state;
+                Ok(Some(Tensor::cat(&[&head, &tail], 1)?))
+            })?;
+            if let Some(y) = fused {
+                if ckpt.is_some_and(|p| p >= seq_len) {
+                    cache.save_checkpoint()?;
+                }
                 return timed(Span::GdnFinish, || {
                     self.finish_forward(&y, &projected.z, batch_size, seq_len)
                 });

@@ -29,6 +29,8 @@ mod cuda;
 #[cfg(all(feature = "metal", not(feature = "cuda")))]
 mod metal;
 pub mod policy;
+#[cfg(all(feature = "sycl", not(any(feature = "cuda", feature = "rocm"))))]
+mod sycl;
 
 use anyhow::{Context, Result};
 use candle_core::{D, DType, Device, Module, Tensor};
@@ -182,7 +184,14 @@ impl DSparkDrafter {
         )
         .with_context(|| format!("parse {}", cfg_path.display()))?;
         let files = crate::utils::utils::get_safetensors_files(dir)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&files, dtype, device) }?;
+        // Cast on the CPU and upload from heap memory. The published
+        // `model.safetensors` stores its tensors at 2-byte-aligned offsets, and
+        // on SYCL (Level Zero, Arc B70) a host->device copy straight from a
+        // misaligned mmap address issued behind any queued kernel loses the
+        // device.
+        let vb = unsafe {
+            crate::utils::cast_var_builder::from_mmaped_safetensors_cpu_cast(&files, dtype, device)
+        }?;
         Self::new(cfg, &vb, device, dtype)
     }
 
@@ -502,8 +511,8 @@ impl DSparkDrafter {
     ///
     /// Returns an error if a tensor op fails.
     pub fn markov_chain(&self, c: &MarkovCandidates, anchor: u32) -> Result<(Vec<u32>, Tensor)> {
-        // One launch on CUDA / Metal instead of ~10 per position (see
-        // `kernels/cuda/dspark.cu`, `kernels/metal/dspark.metal`).
+        // One launch on CUDA / Metal / SYCL instead of ~10 per position (see
+        // `kernels/{cuda,metal,sycl}/dspark.*`).
         #[cfg(feature = "cuda")]
         if self.device.is_cuda()
             && let Some((tokens, prevs)) =
@@ -515,6 +524,13 @@ impl DSparkDrafter {
         if self.device.is_metal()
             && let Some((tokens, prevs)) =
                 metal::markov_chain(&c.ids, &c.logits, &c.w2, &self.markov_w1, anchor)?
+        {
+            return Ok((tokens.to_vec1::<u32>()?, prevs));
+        }
+        #[cfg(all(feature = "sycl", not(any(feature = "cuda", feature = "rocm"))))]
+        if self.device.is_sycl()
+            && let Some((tokens, prevs)) =
+                sycl::markov_chain(&c.ids, &c.logits, &c.w2, &self.markov_w1, anchor)?
         {
             return Ok((tokens.to_vec1::<u32>()?, prevs));
         }
@@ -573,29 +589,38 @@ fn markov_chain_ops(c: &MarkovCandidates, w1: &Tensor, anchor: u32) -> Result<(V
 mod tests {
     use super::gguf_to_hf_name;
 
-    /// The fused Markov-chain kernel against the op chain, on random candidates
-    /// with a W1/W2 bias large enough to reorder them.
-    #[cfg(all(feature = "metal", not(feature = "cuda")))]
-    #[test]
-    fn metal_markov_chain_matches_op_chain() {
-        use super::{MarkovCandidates, markov_chain_ops, metal};
+    /// A fused Markov-chain kernel against the op chain (and the op chain
+    /// against the CPU), on random candidates with a W1/W2 bias large enough
+    /// to reorder them.
+    #[cfg(any(
+        all(feature = "metal", not(feature = "cuda")),
+        all(feature = "sycl", not(any(feature = "cuda", feature = "rocm")))
+    ))]
+    fn check_markov_kernel(
+        dev: &candle_core::Device,
+        kernel: impl Fn(
+            &candle_core::Tensor,
+            &candle_core::Tensor,
+            &candle_core::Tensor,
+            &candle_core::Tensor,
+            u32,
+        )
+            -> candle_core::Result<Option<(candle_core::Tensor, candle_core::Tensor)>>,
+    ) {
+        use super::{MarkovCandidates, markov_chain_ops};
         use candle_core::{DType, Device, Tensor};
 
-        if !candle_core::utils::metal_is_available() {
-            return;
-        }
-        let dev = Device::new_metal(0).unwrap();
         let (blk, k, r, vocab) = (15usize, 256usize, 256usize, 4096usize);
         for dtype in [DType::F32, DType::F16, DType::BF16] {
             // Candidate ids: distinct per row, all inside the vocabulary.
             let ids: Vec<u32> = (0..blk * k).map(|i| ((i * 7919) % vocab) as u32).collect();
-            let ids = Tensor::from_vec(ids, (blk, k), &dev).unwrap();
-            let logits = Tensor::randn(0f32, 1.0, (blk, k), &dev).unwrap();
-            let w1 = Tensor::randn(0f32, 0.3, (vocab, r), &dev)
+            let ids = Tensor::from_vec(ids, (blk, k), dev).unwrap();
+            let logits = Tensor::randn(0f32, 1.0, (blk, k), dev).unwrap();
+            let w1 = Tensor::randn(0f32, 0.3, (vocab, r), dev)
                 .unwrap()
                 .to_dtype(dtype)
                 .unwrap();
-            let w2 = Tensor::randn(0f32, 0.3, (blk, k, r), &dev)
+            let w2 = Tensor::randn(0f32, 0.3, (blk, k, r), dev)
                 .unwrap()
                 .to_dtype(dtype)
                 .unwrap();
@@ -610,9 +635,9 @@ mod tests {
                     w2: cpu(&c.w2),
                 };
                 let (cpu_tok, _) = markov_chain_ops(&on_cpu, &cpu(&w1), 17).unwrap();
-                assert_eq!(want_tok, cpu_tok, "{dtype:?} op chain: Metal vs CPU");
+                assert_eq!(want_tok, cpu_tok, "{dtype:?} op chain: GPU vs CPU");
             }
-            let (got_tok, got_prev) = metal::markov_chain(&c.ids, &c.logits, &c.w2, &w1, 17)
+            let (got_tok, got_prev) = kernel(&c.ids, &c.logits, &c.w2, &w1, 17)
                 .unwrap()
                 .expect("shapes fit the kernel");
             assert_eq!(
@@ -626,6 +651,25 @@ mod tests {
                 "{dtype:?} prevs"
             );
         }
+    }
+
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    #[test]
+    fn metal_markov_chain_matches_op_chain() {
+        if !candle_core::utils::metal_is_available() {
+            return;
+        }
+        let dev = candle_core::Device::new_metal(0).unwrap();
+        check_markov_kernel(&dev, super::metal::markov_chain);
+    }
+
+    #[cfg(all(feature = "sycl", not(any(feature = "cuda", feature = "rocm"))))]
+    #[test]
+    fn sycl_markov_chain_matches_op_chain() {
+        let Ok(dev) = candle_core::Device::new_sycl(0) else {
+            return;
+        };
+        check_markov_kernel(&dev, super::sycl::markov_chain);
     }
 
     #[test]
